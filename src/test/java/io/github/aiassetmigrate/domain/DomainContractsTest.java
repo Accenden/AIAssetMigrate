@@ -37,9 +37,14 @@ class DomainContractsTest {
 
     private List<Record> snapshots() {
         return List.of(
-                new Asset(ID, Path.of("sample.png"), Asset.Type.TEXTURE, "fingerprint", Map.of()),
+                new Asset(ID, Path.of("sample.png"), Asset.Type.TEXTURE, "a".repeat(64), Map.of()),
                 new Project(ID, directory, 0, List.of(), TIME),
-                new Finding(ID, Optional.empty(), Finding.Severity.UNKNOWN, "unknown", "Not checked"),
+                new InventorySnapshot(1, 1, new Project(ID, directory, 1, List.of(), TIME),
+                        List.of(), InventorySnapshot.ScanStatus.PARTIAL, TIME, List.of(), List.of()),
+                new PathOutcome(Path.of("sample.png"), PathOutcome.Kind.FILE, PathOutcome.Status.SKIPPED),
+                new AssetReference(ID, AssetReference.Kind.TEXTURE, "sample.png", Optional.empty(),
+                        AssetReference.ResolutionStatus.UNRESOLVED),
+                new Finding(ID, Optional.empty(), Optional.empty(), Finding.Severity.UNKNOWN, "unknown", "Not checked"),
                 new ReviewedChange(ID, ID, ReviewedChange.Kind.CATEGORY,
                         ReviewedChange.Decision.ACCEPTED, Map.of("category", "texture"), TIME),
                 command(), plan(List.of(command())),
@@ -78,7 +83,7 @@ class DomainContractsTest {
     void collectionsAreSnapshotsAndUnmodifiable() {
         var metadata = new HashMap<String, String>();
         metadata.put("format", "png");
-        var asset = new Asset(ID, Path.of("sample.png"), Asset.Type.TEXTURE, "hash", metadata);
+        var asset = new Asset(ID, Path.of("sample.png"), Asset.Type.TEXTURE, "a".repeat(64), metadata);
         var review = new ReviewedChange(ID, ID, ReviewedChange.Kind.CATEGORY,
                 ReviewedChange.Decision.ACCEPTED, metadata, TIME);
         var dependencies = new ArrayList<UUID>();
@@ -107,7 +112,7 @@ class DomainContractsTest {
         assets.clear();
         commands.clear();
         reviews.clear();
-        findings.add(new Finding(ID, Optional.of(ID), Finding.Severity.WARNING, "test", "test"));
+        findings.add(new Finding(ID, Optional.of(ID), Optional.empty(), Finding.Severity.WARNING, "test", "test"));
         assertEquals(List.of(asset), project.assets());
         assertEquals(List.of(operation), plan.commands());
         assertEquals(List.of(review), plan.reviewedChanges());
@@ -133,7 +138,7 @@ class DomainContractsTest {
         var metadata = new HashMap<String, String>();
         metadata.put("format", null);
         assertThrows(NullPointerException.class,
-                () -> new Asset(ID, Path.of("sample.png"), Asset.Type.TEXTURE, "hash", metadata));
+                () -> new Asset(ID, Path.of("sample.png"), Asset.Type.TEXTURE, "a".repeat(64), metadata));
     }
 
     @Test
@@ -152,14 +157,14 @@ class DomainContractsTest {
     @Test
     void absoluteAssetAndCommandPathsAreRejected() {
         assertThrows(IllegalArgumentException.class,
-                () -> new Asset(ID, directory, Asset.Type.TEXTURE, "hash", Map.of()));
+                () -> new Asset(ID, directory, Asset.Type.TEXTURE, "a".repeat(64), Map.of()));
         assertThrows(IllegalArgumentException.class, () -> new AssetOperationCommand(ID, ID,
                 MigrationCommand.Operation.COPY, directory, Map.of(), List.of(), Optional.empty()));
     }
 
     @Test
     void constructingSnapshotsDoesNotAccessOrCreateOutput() throws Exception {
-        assertEquals(9, snapshots().size());
+        assertEquals(12, snapshots().size());
         assertFalse(Files.exists(directory.resolve("output")));
         try (var entries = Files.list(directory)) {
             assertEquals(0, entries.count());

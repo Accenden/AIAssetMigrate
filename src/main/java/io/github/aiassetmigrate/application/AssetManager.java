@@ -13,9 +13,25 @@ import java.util.UUID;
  * in subsequent milestones and injected into clients through constructors.
  * Methods may block and must not be called on the JavaFX application thread.
  * No implementation or execution authority is provided by this contract alone.
+ * Import implementations receive their state directory, repository, scanner and
+ * logger factory through constructor injection. Until supported, unrelated
+ * operations must throw UnsupportedOperationException, not fabricate results.
  */
 public interface AssetManager {
-    ImportResult importAssets(Path sourceRoot);
+    /** Creates a new project. Recoverable file failures are returned in the snapshot. */
+    ImportResult importAssets(Path sourceRoot) throws ImportException;
+
+    /**
+     * Rescans an existing project; sourceRoot must match its original root.
+     * Preserves project identity and createdAt while advancing inventoryRevision.
+     */
+    ImportResult rescan(UUID projectId, Path sourceRoot) throws ImportException;
+
+    /** Loads the latest inventory without scanning or creating state. */
+    InventorySnapshot loadInventory(UUID projectId) throws ImportException;
+
+    /** Loads a positive, explicit inventory revision without scanning or creating state. */
+    InventorySnapshot loadInventory(UUID projectId, long revision) throws ImportException;
 
     AnalysisResult analyze(UUID projectId, AnalysisKind kind);
 
@@ -55,10 +71,9 @@ public interface AssetManager {
         }
     }
 
-    record ImportResult(Project project, List<Finding> findings) {
+    record ImportResult(InventorySnapshot snapshot) {
         public ImportResult {
-            Objects.requireNonNull(project, "project");
-            findings = List.copyOf(findings);
+            Objects.requireNonNull(snapshot, "snapshot");
         }
     }
 
