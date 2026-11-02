@@ -8,6 +8,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.io.ByteArrayOutputStream;
+import java.awt.image.BufferedImage;
+import javax.imageio.ImageIO;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -50,15 +53,15 @@ class AssetScannerTest {
         Files.writeString(nested.resolve("model.OBJ"), "v 0 0 0\n");
         Files.writeString(nested.resolve("material.MtL"), "newmtl name\n");
         Files.write(nested.resolve("model.FbX"), new byte[]{0, 1, 2});
-        Files.write(directory.resolve("image.PNG"), new byte[]{3, 4, 5});
-        Files.write(directory.resolve("image.JpG"), new byte[]{6, 7, 8});
-        Files.write(directory.resolve("image.JPEG"), new byte[]{9, 10, 11});
-        Path hidden = Files.write(directory.resolve(".hidden.png"), new byte[]{12});
+        Files.write(directory.resolve("image.PNG"), pngHeader());
+        Files.write(directory.resolve("image.JpG"), jpegHeader());
+        Files.write(directory.resolve("image.JPEG"), jpegHeader());
+        Path hidden = Files.write(directory.resolve(".hidden.png"), pngHeader());
         if (Files.getFileStore(directory).supportsFileAttributeView("dos")) {
             Files.setAttribute(hidden, "dos:hidden", true);
         }
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
+        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
         assertEquals(7, result.assets().size());
         Map<String, Asset> assets = result.assets().stream()
                 .collect(Collectors.toMap(asset -> portable(asset.relativePath()), asset -> asset));
@@ -74,7 +77,7 @@ class AssetScannerTest {
                     asset.fingerprint());
             assertEquals(Long.toString(Files.size(file)), asset.metadata().get(Asset.SIZE_BYTES));
             assertEquals(Files.getLastModifiedTime(file).toInstant().toString(), asset.metadata().get(Asset.MODIFIED_AT));
-            assertEquals(Asset.InspectionStatus.NOT_PERFORMED.name(), asset.metadata().get(Asset.INSPECTION_STATUS));
+            assertEquals(Asset.InspectionStatus.UNVERIFIED.name(), asset.metadata().get(Asset.INSPECTION_STATUS));
         }
         assertEquals("obj", assets.get("spaces \u96ea/model.OBJ").metadata().get(Asset.FORMAT));
         assertEquals("jpeg", assets.get("image.JPEG").metadata().get(Asset.FORMAT));
@@ -83,22 +86,16 @@ class AssetScannerTest {
     }
 
     @Test
-    void arbitraryImageBytesAreHashedWithoutDecodingOrValidationClaims() throws Exception {
+    void arbitraryImageBytesAreSkippedWithoutModifyingSource() throws Exception {
         byte[] bytes = {(byte) 0xff, (byte) 0xfe, 0, 7};
         for (String extension : List.of("png", "jpg", "jpeg")) {
             Files.write(directory.resolve("not-an-image." + extension), bytes);
         }
-        String expected = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
-        assertEquals(3, result.assets().size());
-        assertTrue(result.findings().isEmpty());
-        result.assets().forEach(asset -> {
-            assertEquals(expected, asset.fingerprint());
-            assertEquals("NOT_PERFORMED", asset.metadata().get(Asset.INSPECTION_STATUS));
-            assertFalse(asset.metadata().containsKey("width"));
-            assertFalse(asset.metadata().containsKey("height"));
-        });
+        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
+        assertTrue(result.assets().isEmpty());
+        assertEquals(3, result.findings().stream().filter(f -> f.code().equals("CORRUPT_FORMAT")).count());
+        assertEquals(3, result.pathOutcomes().stream().filter(o -> o.status() == PathOutcome.Status.SKIPPED).count());
         for (String extension : List.of("png", "jpg", "jpeg")) {
             assertArrayEquals(bytes, Files.readAllBytes(directory.resolve("not-an-image." + extension)));
         }
@@ -108,11 +105,12 @@ class AssetScannerTest {
     void emptyFileUsesStandardSha256WithoutClaimingFormatValidity() throws IOException {
         Files.createFile(directory.resolve("empty.obj"));
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
+        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
         assertEquals(1, result.assets().size());
         assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 result.assets().getFirst().fingerprint());
-        assertEquals("NOT_PERFORMED", result.assets().getFirst().metadata().get(Asset.INSPECTION_STATUS));
+        assertEquals("UNVERIFIED", result.assets().getFirst().metadata().get(Asset.INSPECTION_STATUS));
+        assertEquals("INSPECTION_UNVERIFIED", result.findings().getFirst().code());
     }
 
     @Test
@@ -123,8 +121,9 @@ class AssetScannerTest {
         var result = new AssetScanner().scan(directory);
         assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
         assertEquals(List.of(Path.of("healthy.obj")), result.assets().stream().map(Asset::relativePath).toList());
-        assertEquals(2, result.findings().size());
+        assertEquals(3, result.findings().size());
         assertEquals(List.of("a.bin", "z.txt"), result.findings().stream()
+                .filter(finding -> finding.code().equals("UNSUPPORTED_EXTENSION"))
                 .map(finding -> portable(finding.sourceRelativePath().orElseThrow())).toList());
         assertTrue(result.findings().stream().allMatch(finding -> finding.assetId().isEmpty()));
         assertEquals(2, result.pathOutcomes().stream().filter(outcome -> outcome.status() == PathOutcome.Status.SKIPPED).count());
@@ -136,7 +135,7 @@ class AssetScannerTest {
             Files.writeString(Files.createDirectory(directory.resolve(folder)).resolve("asset.obj"), "content");
         }
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
+        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
         assertEquals(List.of(".hidden/asset.obj", "node_modules/asset.obj", "target/asset.obj"),
                 result.assets().stream().map(asset -> portable(asset.relativePath())).toList());
     }
@@ -318,6 +317,16 @@ class AssetScannerTest {
 
     private static String portable(Path path) {
         return path.toString().replace(path.getFileSystem().getSeparator(), "/");
+    }
+
+    static byte[] jpegHeader() throws IOException { return imageBytes("jpeg"); }
+
+    static byte[] pngHeader() throws IOException { return imageBytes("png"); }
+
+    private static byte[] imageBytes(String format) throws IOException {
+        var output = new ByteArrayOutputStream();
+        assertTrue(ImageIO.write(new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB), format, output));
+        return output.toByteArray();
     }
 
     private static void assertSorted(List<String> values) {

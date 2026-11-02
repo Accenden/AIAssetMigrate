@@ -11,6 +11,7 @@ import io.github.aiassetmigrate.domain.LogEvent;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
@@ -29,6 +30,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
+import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
 import static java.nio.file.StandardOpenOption.*;
 
 /** One writer per project. Persisted events are authoritative; listeners are disposable. */
@@ -48,19 +50,32 @@ public final class LogPublisher implements AutoCloseable {
     private IOException failure;
 
     public LogPublisher(Path directory, UUID projectId) throws IOException {
+        this(directory, projectId, false);
+    }
+
+    /** Require new files if the filesystem cannot report Unix link counts. */
+    public LogPublisher(Path directory, UUID projectId, boolean protectUnverifiableLinks) throws IOException {
+        this(directory, projectId, protectUnverifiableLinks, false);
+    }
+
+    LogPublisher(Path directory, UUID projectId, boolean protectUnverifiableLinks,
+                 boolean forceNewFiles) throws IOException {
         this.projectId = Objects.requireNonNull(projectId, "projectId");
         file = logFile(directory.toAbsolutePath().normalize(), projectId);
         Files.createDirectories(directory);
+        boolean newFiles = forceNewFiles || (protectUnverifiableLinks
+                && !Files.getFileStore(directory).supportsFileAttributeView("unix"));
         // Lock a sidecar: Windows file locks can otherwise prevent live readers.
-        lockChannel = FileChannel.open(directory.resolve(projectId + ".lock"), CREATE, WRITE);
+        lockChannel = FileChannel.open(directory.resolve(projectId + ".lock"),
+                newFiles ? CREATE_NEW : CREATE, WRITE, NOFOLLOW_LINKS);
         FileChannel opened = null;
         try {
             lock = lockChannel.tryLock();
             if (lock == null) {
                 throw new IOException("Another publisher owns " + file);
             }
-            opened = FileChannel.open(file, CREATE, READ, WRITE);
-            byte[] bytes = Files.readAllBytes(file);
+            opened = FileChannel.open(file, newFiles ? CREATE_NEW : CREATE, READ, WRITE, NOFOLLOW_LINKS);
+            byte[] bytes = Channels.newInputStream(opened).readAllBytes();
             if (bytes.length > 0 && bytes[bytes.length - 1] != '\n') {
                 throw new IOException("Incomplete final log record; preserve and repair the file before writing: " + file);
             }
@@ -88,7 +103,9 @@ public final class LogPublisher implements AutoCloseable {
         if (afterSequence < 0) {
             throw new IllegalArgumentException("afterSequence must be nonnegative");
         }
-        return decode(Files.readAllBytes(logFile(directory, projectId)), projectId, afterSequence);
+        try (var input = Files.newInputStream(logFile(directory, projectId), NOFOLLOW_LINKS)) {
+            return decode(input.readAllBytes(), projectId, afterSequence);
+        }
     }
 
     private static List<LogEvent> decode(byte[] bytes, UUID projectId, long afterSequence) throws IOException {

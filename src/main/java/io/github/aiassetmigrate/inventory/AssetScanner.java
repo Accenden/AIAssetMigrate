@@ -32,7 +32,7 @@ import static io.github.aiassetmigrate.domain.PathOutcome.Kind.*;
 import static io.github.aiassetmigrate.domain.PathOutcome.Status.*;
 
 /**
- * Read-only, bounded traversal and fingerprints; no format validation is performed.
+ * Read-only traversal, fingerprints and bounded format inspection, not full validation.
  * Attribute and ancestry checks detect concurrent changes best-effort, not atomically.
  * Providers without file keys and edits restoring timestamps can evade detection;
  * this scanner does not defend against hostile filesystem replacement races.
@@ -50,6 +50,7 @@ public final class AssetScanner {
         this.io = Objects.requireNonNull(io, "io");
     }
 
+    /** PARTIAL means at least one warning, including unverified formats; path outcomes describe coverage. */
     public record ScanResult(Path sourceRoot, List<Asset> assets, List<Finding> findings,
                              InventorySnapshot.ScanStatus scanStatus, List<PathOutcome> pathOutcomes) {
         public ScanResult {
@@ -255,6 +256,7 @@ public final class AssetScanner {
             try {
                 MessageDigest digest = sha256();
                 safe(file);
+                FormatInspection inspection = new FormatInspection(extension, before.size(), limits);
                 long bytes = 0;
                 boolean grew = false;
                 try (InputStream input = io.open(file)) {
@@ -265,11 +267,13 @@ public final class AssetScanner {
                         int requested = remaining >= buffer.length ? buffer.length : (int) remaining + 1;
                         int count = input.read(buffer, 0, requested);
                         if (count < 0) break;
+                        if (count == 0) throw new IOException("File read made no progress");
                         if (count > remaining) {
                             grew = true;
                             break;
                         }
                         digest.update(buffer, 0, count);
+                        inspection.accept(buffer, count);
                         bytes += count;
                     }
                 }
@@ -281,11 +285,19 @@ public final class AssetScanner {
                     outcome(relative, FILE, FAILED);
                     return FAILED;
                 }
+                FormatInspection.Result inspected = inspection.finish();
+                if (inspected.corrupt()) {
+                    problem(relative, "CORRUPT_FORMAT", inspected.message());
+                    outcome(relative, FILE, SKIPPED);
+                    return SKIPPED;
+                }
+                problem(relative, "INSPECTION_UNVERIFIED", inspected.message());
                 assets.add(new Asset(UUID.randomUUID(), relative, type,
                         HexFormat.of().formatHex(digest.digest()), Map.of(
                         Asset.FORMAT, extension, Asset.SIZE_BYTES, Long.toString(before.size()),
                         Asset.MODIFIED_AT, before.lastModifiedTime().toInstant().toString(),
-                        Asset.INSPECTION_STATUS, Asset.InspectionStatus.NOT_PERFORMED.name())));
+                        Asset.INSPECTION_STATUS, Asset.InspectionStatus.UNVERIFIED.name(),
+                        Asset.INSPECTION_METHOD, inspected.method())));
                 outcome(relative, FILE, INVENTORIED);
                 return INVENTORIED;
             } catch (IOException failure) {

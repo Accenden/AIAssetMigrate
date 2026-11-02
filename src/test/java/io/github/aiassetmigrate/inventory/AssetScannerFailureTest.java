@@ -29,7 +29,7 @@ class AssetScannerFailureTest {
     @Test
     void unreadableFileKeepsHealthySiblingAndFailedCoverage() throws Exception {
         Path bad = Files.writeString(root.resolve("bad.obj"), "bad");
-        Files.writeString(root.resolve("good.png"), "not an image");
+        Files.write(root.resolve("good.png"), AssetScannerTest.pngHeader());
         AssetScanner.ScanResult result = scanner(new AssetScanner.Io() {
             @Override InputStream open(Path path) throws IOException {
                 if (path.equals(bad)) throw new AccessDeniedException(path.toString());
@@ -135,6 +135,22 @@ class AssetScannerFailureTest {
         assertEquals(5, read.get());
         assertTrue(result.assets().isEmpty());
         assertCode(result, "UNSTABLE_FILE");
+    }
+
+    @Test
+    void zeroProgressReadFailsInsteadOfLooping() throws Exception {
+        Files.writeString(root.resolve("stalled.obj"), "data");
+        AssetScanner.ScanResult result = scanner(new AssetScanner.Io() {
+            @Override InputStream open(Path path) {
+                return new InputStream() {
+                    public int read() { return 0; }
+                    public int read(byte[] bytes, int offset, int length) { return 0; }
+                };
+            }
+        }).scan(root);
+        assertTrue(result.assets().isEmpty());
+        assertCode(result, "FILE_READ_FAILED");
+        assertOutcome(result, "stalled.obj", PathOutcome.Status.FAILED);
     }
 
     @Test

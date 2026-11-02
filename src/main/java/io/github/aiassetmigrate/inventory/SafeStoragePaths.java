@@ -8,11 +8,11 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 
-final class SafeStoragePaths {
+public final class SafeStoragePaths {
     private SafeStoragePaths() {
     }
 
-    static void validateSeparation(Path sourceRoot, Path stateDirectory) throws IOException {
+    public static void validateSeparation(Path sourceRoot, Path stateDirectory) throws IOException {
         Path source = checkedPath(sourceRoot);
         Path state = checkedPath(stateDirectory);
         if (!attributes(source).isDirectory() || !Files.isReadable(source)) {
@@ -30,7 +30,7 @@ final class SafeStoragePaths {
         }
     }
 
-    static void validateExistingPath(Path path) throws IOException {
+    public static void validateExistingPath(Path path) throws IOException {
         checkedPath(path);
     }
 
@@ -52,7 +52,7 @@ final class SafeStoragePaths {
         }
     }
 
-    static void requireRegularFile(Path file) throws IOException {
+    public static void requireRegularFile(Path file) throws IOException {
         Path checked = checkedPath(file);
         if (!attributes(checked).isRegularFile()) {
             throw new IOException("Not a regular file: " + file);

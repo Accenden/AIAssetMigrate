@@ -18,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 
 import static java.nio.file.StandardOpenOption.APPEND;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class LogPublisherTest {
     @TempDir Path directory;
@@ -147,6 +148,47 @@ class LogPublisherTest {
             assertThrows(IOException.class, () -> publisher.publish(LogEvent.Level.INFO, "still fails"));
             assertTrue(received.isEmpty());
             assertTrue(LogPublisher.readLogs(directory, project, 0).isEmpty());
+        }
+    }
+
+    @Test
+    void strictFallbackNeverOpensExistingHardLinkedLogOrSidecar() throws Exception {
+        Path asset = Files.createFile(directory.resolve("source-asset"));
+        for (String suffix : List.of(".log", ".lock")) {
+            UUID id = UUID.randomUUID();
+            Path link = directory.resolve(id + suffix);
+            try { Files.createLink(link, asset); }
+            catch (UnsupportedOperationException | IOException e) { assumeTrue(false, "Hard links unavailable"); }
+            assertThrows(IOException.class, () -> new LogPublisher(directory, id, true, true));
+            assertEquals(0, Files.size(asset));
+        }
+    }
+
+    @Test
+    void strictFallbackCreatesNewFilesButRefusesReuse() throws Exception {
+        try (var publisher = new LogPublisher(directory, project, true, true)) {
+            publisher.publish(LogEvent.Level.INFO, "first");
+        }
+        byte[] before = Files.readAllBytes(LogPublisher.logFile(directory, project));
+        assertThrows(IOException.class, () -> new LogPublisher(directory, project, true, true));
+        assertArrayEquals(before, Files.readAllBytes(LogPublisher.logFile(directory, project)));
+    }
+
+    @Test
+    void opensRejectSymlinkedLogsAndSidecars() throws Exception {
+        Path target = Files.createFile(directory.resolve("target"));
+        for (String suffix : List.of(".log", ".lock")) {
+            UUID id = UUID.randomUUID();
+            Path link = directory.resolve(id + suffix);
+            try { Files.createSymbolicLink(link, target); }
+            catch (UnsupportedOperationException | IOException | SecurityException e) {
+                assumeTrue(false, "Symbolic links unavailable");
+            }
+            assertThrows(IOException.class, () -> new LogPublisher(directory, id));
+            if (suffix.equals(".log")) {
+                assertThrows(IOException.class, () -> LogPublisher.readLogs(directory, id, 0));
+            }
+            assertEquals(0, Files.size(target));
         }
     }
 }

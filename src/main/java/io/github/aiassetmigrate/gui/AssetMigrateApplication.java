@@ -1,36 +1,247 @@
 package io.github.aiassetmigrate.gui;
 
+import io.github.aiassetmigrate.application.ImportException;
+import io.github.aiassetmigrate.domain.Asset;
+import io.github.aiassetmigrate.domain.Finding;
+import io.github.aiassetmigrate.domain.InventorySnapshot;
+import io.github.aiassetmigrate.domain.PathOutcome;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
+import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.SplitPane;
+import javafx.scene.control.TableColumn;
+import javafx.scene.control.TableView;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
+import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 
+import java.io.File;
+import java.nio.file.Path;
+import java.util.UUID;
+import java.util.function.Function;
+
 public final class AssetMigrateApplication extends Application {
+    private final ImportRunner runner = new ImportRunner(Platform::runLater);
+    private final TextField source = new TextField();
+    private final TextField state = new TextField();
+    private final TextField logs = new TextField();
+    private final TextField projectId = new TextField();
+    private final TextField revision = new TextField();
+    private final Label status = new Label("Choose a source folder and explicit state and log locations.");
+    private final Label summary = new Label("No inventory loaded.");
+    private final TableView<Asset> inventory = new TableView<>();
+    private final TextArea findings = new TextArea();
+    private final GridPane inputs = new GridPane();
+    private final HBox actions = new HBox(10);
+    private final ProgressIndicator progress = new ProgressIndicator();
+
     @Override
     public void start(Stage stage) {
-        Label title = new Label("AIAssetMigrate");
-        title.setStyle("-fx-font-size: 28px; -fx-font-weight: bold;");
-        Label scope = new Label("Unity asset preparation | Bootstrap");
-        Label status = new Label("Application shell ready. Import, review, migration, and AI are not implemented yet.\n"
-                + "No asset files are read or modified by this shell.");
+        Label title = new Label("Import Project");
+        title.setStyle("-fx-font-size: 24px; -fx-font-weight: bold;");
+        Label note = new Label("State and log locations must be separate from each other and the source folder. Source assets are not modified.");
+        note.setWrapText(true);
+
+        inputs.setHgap(10);
+        inputs.setVgap(8);
+        folderRow(stage, 0, "Source folder", source);
+        folderRow(stage, 1, "State directory", state);
+        folderRow(stage, 2, "Log directory", logs);
+        projectId.setPromptText("Project ID for loading a saved inventory");
+        revision.setPromptText("Latest if blank");
+        inputs.addRow(3, new Label("Project ID"), projectId);
+        inputs.addRow(4, new Label("Revision"), revision);
+        GridPane.setHgrow(projectId, Priority.ALWAYS);
+        GridPane.setHgrow(revision, Priority.ALWAYS);
+
+        Button importButton = new Button("Import Project");
+        importButton.setDefaultButton(true);
+        importButton.setOnAction(event -> begin(false));
+        Button loadButton = new Button("Load Saved Inventory");
+        loadButton.setOnAction(event -> begin(true));
+        actions.getChildren().addAll(importButton, loadButton);
+        progress.setMaxSize(20, 20);
+        progress.setVisible(false);
         status.setWrapText(true);
-        VBox root = new VBox(16, title, scope, status);
-        root.setPadding(new Insets(32));
+        HBox statusRow = new HBox(10, progress, status);
+        HBox.setHgrow(status, Priority.ALWAYS);
+
+        addColumn("Path", asset -> asset.relativePath().toString(), 260);
+        addColumn("Type", asset -> asset.type().toString(), 90);
+        addColumn("Format", asset -> asset.metadata().getOrDefault(Asset.FORMAT, ""), 75);
+        addColumn("Bytes", asset -> asset.metadata().getOrDefault(Asset.SIZE_BYTES, ""), 90);
+        addColumn("Modified", asset -> asset.metadata().getOrDefault(Asset.MODIFIED_AT, ""), 180);
+        addColumn("Inspection", asset -> asset.metadata().getOrDefault(Asset.INSPECTION_STATUS, ""), 130);
+        addColumn("SHA-256", Asset::fingerprint, 300);
+        inventory.setPlaceholder(new Label("No assets in the displayed inventory."));
+        findings.setEditable(false);
+        findings.setWrapText(true);
+        findings.setPromptText("Scan findings and incomplete coverage appear here.");
+        VBox inventoryPane = new VBox(6, new Label("Inventory"), inventory);
+        VBox.setVgrow(inventory, Priority.ALWAYS);
+        VBox findingsPane = new VBox(6, new Label("Findings and coverage"), findings);
+        VBox.setVgrow(findings, Priority.ALWAYS);
+        SplitPane results = new SplitPane(inventoryPane, findingsPane);
+        results.setDividerPositions(0.65);
+        VBox top = new VBox(10, title, note, inputs, actions, statusRow, summary);
+        BorderPane root = new BorderPane(results);
+        root.setTop(top);
+        BorderPane.setMargin(results, new Insets(12, 0, 0, 0));
+        root.setPadding(new Insets(20));
         stage.setTitle("AIAssetMigrate");
-        stage.setScene(new Scene(root, 720, 360));
-        stage.setMinWidth(420);
-        stage.setMinHeight(240);
+        stage.setScene(new Scene(root, 1000, 720));
+        stage.setMinWidth(600);
+        stage.setMinHeight(500);
+        stage.setOnCloseRequest(event -> {
+            if (runner.isBusy()) {
+                event.consume();
+                status.setText("Wait for the current operation to finish before closing.");
+            }
+        });
         stage.show();
         if (getParameters().getRaw().contains("--smoke-test")) {
             Platform.runLater(() -> {
-                System.out.println("JavaFX shell launched successfully.");
+                System.out.println("JavaFX import window launched successfully.");
                 stage.close();
                 Platform.exit();
             });
         }
+    }
+
+    private void folderRow(Stage stage, int row, String label, TextField field) {
+        field.setPromptText("Enter a directory path or browse");
+        Button browse = new Button("Browse...");
+        browse.setOnAction(event -> {
+            DirectoryChooser chooser = new DirectoryChooser();
+            chooser.setTitle("Select " + label.toLowerCase());
+            File selected = chooser.showDialog(stage);
+            if (selected != null) field.setText(selected.toPath().toString());
+        });
+        inputs.addRow(row, new Label(label), field, browse);
+        GridPane.setHgrow(field, Priority.ALWAYS);
+    }
+
+    private void addColumn(String title, Function<Asset, String> value, double width) {
+        TableColumn<Asset, String> column = new TableColumn<>(title);
+        column.setCellValueFactory(cell -> new ReadOnlyStringWrapper(value.apply(cell.getValue())));
+        column.setPrefWidth(width);
+        inventory.getColumns().add(column);
+    }
+
+    private void begin(boolean load) {
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            Path sourcePath = load ? null : requiredPath(source, "Source folder");
+            UUID id = load ? UUID.fromString(projectId.getText().trim()) : null;
+            Long requestedRevision = null;
+            if (load && !revision.getText().isBlank()) {
+                requestedRevision = Long.valueOf(revision.getText().trim());
+                if (requestedRevision < 1) throw new IllegalArgumentException("Revision must be positive.");
+            }
+            Long selectedRevision = requestedRevision;
+            boolean started = runner.submit(statePath, logPath,
+                    manager -> load ? (selectedRevision == null ? manager.loadInventory(id)
+                            : manager.loadInventory(id, selectedRevision))
+                            : manager.importAssets(sourcePath).snapshot(), this::completed);
+            if (started) {
+                inputs.setDisable(true);
+                actions.setDisable(true);
+                progress.setVisible(true);
+                status.setText(load ? "Loading inventory..." : "Importing project...");
+                summary.setText("No inventory loaded.");
+                inventory.getItems().clear();
+                findings.clear();
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private static Path requiredPath(TextField field, String label) {
+        String value = field.getText().trim();
+        if (value.isEmpty()) throw new IllegalArgumentException(label + " is required.");
+        return Path.of(value).toAbsolutePath();
+    }
+
+    private void completed(ImportRunner.Outcome outcome) {
+        inputs.setDisable(false);
+        actions.setDisable(false);
+        progress.setVisible(false);
+        if (outcome.snapshot() != null) showSnapshot(outcome.snapshot());
+        Throwable failure = outcome.failure();
+        if (failure == null) {
+            status.setText("Inventory loaded successfully.");
+        } else {
+            status.setText(failureText(failure, outcome.snapshot()));
+            if (failure instanceof ImportException importFailure && importFailure.committedRevision().isPresent()) {
+                projectId.setText(importFailure.projectId().map(UUID::toString).orElse(""));
+                importFailure.committedRevision().ifPresent(value -> revision.setText(value.toString()));
+            }
+        }
+    }
+
+    private void showSnapshot(InventorySnapshot snapshot) {
+        var project = snapshot.project();
+        projectId.setText(project.id().toString());
+        revision.setText(Long.toString(project.inventoryRevision()));
+        source.setText(project.sourceRoot().toString());
+        summary.setText("Project: " + project.id() + " | Revision: " + project.inventoryRevision()
+                + " | Scan: " + snapshot.scanStatus() + " | Assets: " + project.assets().size()
+                + " | Findings: " + snapshot.findings().size());
+        inventory.getItems().setAll(project.assets());
+        findings.setText(formatFindings(snapshot));
+    }
+
+    static String failureText(Throwable failure, InventorySnapshot snapshot) {
+        String message = failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage();
+        StringBuilder text = new StringBuilder("Operation failed: ").append(message);
+        Throwable cause = failure.getCause();
+        if (cause != null && cause.getMessage() != null && !cause.getMessage().equals(message)) {
+            text.append("\nCause: ").append(cause.getMessage());
+        }
+        if (failure instanceof ImportException importFailure && importFailure.committedRevision().isPresent()) {
+            text.append("\nInventory was committed; it was not rolled back.");
+            text.append(" Project ID: ").append(importFailure.projectId().map(UUID::toString).orElse("unavailable"));
+            text.append(" Revision: ").append(importFailure.committedRevision().orElseThrow());
+            text.append(". Use Load Saved Inventory to recover it.");
+        } else if (snapshot != null) {
+            text.append("\nThe displayed inventory was obtained, but resource cleanup failed.");
+        }
+        return text.toString();
+    }
+
+    static String formatFindings(InventorySnapshot snapshot) {
+        StringBuilder text = new StringBuilder();
+        for (Finding finding : snapshot.findings()) {
+            text.append(finding.severity()).append(" [").append(finding.code()).append("] ");
+            finding.sourceRelativePath().ifPresent(path -> text.append(path.toString().isEmpty() ? "(source root)" : path).append(": "));
+            text.append(finding.message()).append('\n');
+        }
+        for (PathOutcome outcome : snapshot.pathOutcomes()) {
+            if (outcome.status() == PathOutcome.Status.FAILED || outcome.status() == PathOutcome.Status.UNVISITED
+                    || outcome.status() == PathOutcome.Status.SKIPPED) {
+                text.append("Coverage ").append(outcome.status()).append(" ").append(outcome.kind()).append(": ")
+                        .append(outcome.relativePath().toString().isEmpty() ? "(source root)" : outcome.relativePath()).append('\n');
+            }
+        }
+        return text.isEmpty() ? "No findings or skipped or incomplete coverage." : text.toString();
+    }
+
+    @Override
+    public void stop() {
+        runner.close();
     }
 
     public static void main(String[] args) {

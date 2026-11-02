@@ -5,13 +5,15 @@ output folders while preserving source assets.
 
 ## Current Status
 
-Step 1 is bootstrapped: a single-module Java project, shared domain and
-`AssetManager` contracts, CLI help/version, a JavaFX shell, and unit tests.
-File-backed project event logging, replay, and live subscriptions are implemented.
-The first OAuth increment provides browser authorization and validated in-memory
-credentials, not yet a saved AI account connection.
-Import, project-state persistence, analysis, plan approval, conversion, migration, and live AI
-are not implemented. The shell does not read or modify asset files.
+F01 provides deterministic asset import through the CLI and JavaFX, with
+revisioned inventory storage, metadata, bounded format checks and warnings. The
+scanner reads but does not modify source assets. File-backed project event logging,
+replay, and live subscriptions are implemented separately, with the limitations
+described below. The OAuth foundation provides browser authorization and validated
+in-memory credentials, not yet a saved AI account connection.
+
+Analysis, plan approval, conversion, migration, report workflows and live AI are
+not implemented. Import does not claim compatibility with any game engine.
 
 ## Build and Run
 
@@ -30,8 +32,9 @@ $env:JAVA_HOME = "$env:USERPROFILE\.jdks\ms-21.0.9"
 ./mvnw.cmd javafx:run
 ```
 
-Use `./mvnw` instead of `./mvnw.cmd` on macOS/Linux. JavaFX requires a graphical
-desktop. To launch and automatically close the shell for a smoke test:
+Use `bash ./mvnw` instead of `./mvnw.cmd` on macOS/Linux; the tracked wrapper
+does not currently have executable permission. JavaFX requires a graphical
+desktop. To launch and automatically close the application for a smoke test:
 
 ```powershell
 ./mvnw.cmd javafx:run "-Djavafx.args=--smoke-test"
@@ -43,19 +46,60 @@ Maven launch commands above until application packaging is implemented.
 ## Structure
 
 - `domain`: immutable asset, plan, command, run, report, and event contracts.
-- `application`: the shared `AssetManager` boundary and log observer contracts.
+- `application`: the shared `AssetManager` boundary and file-backed import service.
+- `inventory`: scanning, limited format inspection and revisioned inventory storage.
 - `logging`: file-backed `LogPublisher`, replay, and asynchronous subscriptions.
 - `auth`: OpenAI public-client OAuth with PKCE, loopback callbacks, and signed identity validation.
-- `cli`: picocli help/version and `logs` commands, independent of JavaFX startup.
-- `gui`: minimal JavaFX application shell.
+- `cli`: picocli import and logs commands, independent of JavaFX startup.
+- `gui`: JavaFX project import and inventory display.
 - `src/test`: JUnit 5 contract and CLI tests, including temporary-directory tests.
 
-The application contract deliberately has no placeholder execution implementation.
-Future clients will receive an `AssetManager` implementation through constructor
-injection. Persistence, conversion, and AI adapters will be added in their own
-packages when implemented. A plan data object is not authorization to write files;
-the later application implementation must validate explicit approval and source
-fingerprints before execution.
+The shared facade implements import, rescan and inventory loading. Later workflow
+methods explicitly reject unsupported operations. A plan data object is not
+authorization to write files; a later execution implementation must validate
+explicit approval and source fingerprints before execution.
+
+## Import
+
+Select **Import Project** in the GUI, then choose a source folder and separate
+state and log directories. For the CLI, for example:
+
+```sh
+bash ./mvnw exec:java '-Dexec.args=import /absolute/path/to/assets --state-directory /absolute/path/to/state --log-directory /absolute/path/to/logs'
+```
+
+Quote individual paths containing spaces in the `exec.args` value. State and log
+directories must not overlap each other or the source directory. Unsafe symlinks,
+junctions and path aliases are rejected, including aliases in selected paths'
+ancestors. Path checks are best-effort against concurrent filesystem replacement
+and cannot reliably identify bind mounts; do not use bind-mounted aliases of the
+source, state or log locations. An import reports its project ID, inventory
+revision, assets, findings and path coverage. A failure after publication reports the committed
+project ID and revision; it does not imply the saved inventory was rolled back.
+
+| Input | Type | Current inspection | Output/conversion |
+| --- | --- | --- | --- |
+| OBJ | Model | Bounded text sample; not complete validation | Not implemented |
+| FBX | Model | Limited binary-header checks where applicable; otherwise unverified | Not implemented |
+| MTL | Material | Bounded text sample; not complete validation | Not implemented |
+| PNG | Texture | Limited PNG header checks | Not implemented |
+| JPG/JPEG | Texture | Limited JPEG marker checks | Not implemented |
+
+Supported readable files are retained as **unverified** with a warning when
+inspection cannot establish validity. Confirmed invalid checked headers and
+unsupported extensions are skipped and flagged. These checks do not decode the
+complete files or verify references, engine import, conversion support or actual
+rendering. Warnings make a scan `PARTIAL`, even if every directory was traversed;
+the path outcomes separately describe traversal coverage. Inventory revisions
+preserve same-path asset IDs on rescan and retain coverage evidence when a
+directory could not be visited. The facade exposes rescan and revision loading;
+the GUI can also load a saved revision. The CLI currently provides initial import.
+On filesystems that do not expose Unix link counts (including Windows), rescanning
+an existing project currently fails closed rather than risk appending to a log
+hard-linked to a source asset. Initial import and saved-inventory loading remain
+available there.
+Inventory snapshots are limited to 64 MiB; per-file warnings and long paths can
+cause a large scan to reach that limit before its 100,000-entry traversal limit.
 
 ## File Logs
 
@@ -80,6 +124,11 @@ publisher; callers must stop new asset-writing steps. Sequence numbers resume
 after restart. The publisher never logs credentials automatically: callers must
 exclude secrets from messages/details.
 
+Independent file readers can observe a complete record before its force has
+finished, so polling does not yet guarantee durable-before-delivery. Future
+subscription cursors are not consistently enforced for live events. The CLI
+viewer also does not yet detect every output failure before advancing its cursor.
+
 `subscribe(afterSequence, observer, onFailure)` replays missed events then follows
 new events in order on a per-viewer virtual thread. A broken viewer does not stop
 logging. A viewer more than 1,024 live events behind is disconnected and notified
@@ -100,7 +149,8 @@ still be being written; reopening a publisher on an incomplete file fails withou
 changing it. Preserve and inspect damaged files before manually repairing them.
 This initial implementation rereads the file for replay/follow and has no rotation
 or retention policy; it is intended for modest local logs, not large archives.
-The JavaFX log viewer and real workflow event producers are still future work.
+Import produces project events. The JavaFX log viewer and integration with later
+workflow operations are still future work.
 
 ## OAuth Foundation (Part 1)
 

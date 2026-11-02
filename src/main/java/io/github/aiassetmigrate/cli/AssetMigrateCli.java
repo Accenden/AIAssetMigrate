@@ -7,9 +7,9 @@ import picocli.CommandLine.Spec;
 
 @Command(name = "aiassetmigrate", mixinStandardHelpOptions = true,
         version = "AIAssetMigrate 0.1.0-SNAPSHOT",
-        description = "Prepare game assets for migration. File-backed event logs are available.",
-        subcommands = LogsCommand.class,
-        footer = "Import, analysis, approval, migration, and AI are not implemented yet.")
+        description = "Prepare game assets for migration. Import and file-backed event logs are available.",
+        subcommands = {ImportCommand.class, LogsCommand.class},
+        footer = "Analysis, approval, migration, and AI are not implemented yet.")
 public final class AssetMigrateCli implements Runnable {
     @Spec
     private CommandSpec spec;

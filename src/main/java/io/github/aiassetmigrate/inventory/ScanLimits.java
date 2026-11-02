@@ -1,6 +1,6 @@
 package io.github.aiassetmigrate.inventory;
 
-/** Root depth is zero; entries exclude the root. Text budgets are reserved for format inspection. */
+/** Root depth is zero; entries exclude the root. Reference budget is reserved for reference extraction. */
 public record ScanLimits(int maxDepth, int maxEntries, int maxTextLineBytes,
                          long maxParsedTextBytes, int maxReferencesPerFile) {
     public static final ScanLimits DEFAULTS = new ScanLimits(64, 100_000, 1024 * 1024,

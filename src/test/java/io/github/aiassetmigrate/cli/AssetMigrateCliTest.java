@@ -16,6 +16,7 @@ class AssetMigrateCliTest {
             CommandLine cli = new CommandLine(new AssetMigrateCli()).setOut(new PrintWriter(output));
             assertEquals(0, cli.execute(args));
             assertTrue(output.toString().contains("Usage: aiassetmigrate"));
+            assertTrue(output.toString().contains("import"));
             assertTrue(output.toString().replaceAll("\\s+", " ").contains("not implemented yet"));
         }
     }
