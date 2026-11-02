@@ -143,8 +143,8 @@ public final class LogPublisher implements AutoCloseable {
         checkOpen();
         LogEvent event = new LogEvent(UUID.randomUUID(), projectId, Math.incrementExact(sequence),
                 Instant.now(), level, message, runId, commandId, details);
-        byte[] bytes = (JSON.writeValueAsString(event) + "\n").getBytes(StandardCharsets.UTF_8);
         try {
+            byte[] bytes = (JSON.writeValueAsString(event) + "\n").getBytes(StandardCharsets.UTF_8);
             ByteBuffer buffer = ByteBuffer.wrap(bytes);
             while (buffer.hasRemaining()) {
                 channel.write(buffer);
@@ -152,6 +152,7 @@ public final class LogPublisher implements AutoCloseable {
             channel.force(true);
         } catch (IOException e) {
             failure = e;
+            listeners.forEach(listener -> listener.fail(e));
             throw new IOException("Cannot persist log event; stop new write steps: " + file, e);
         }
         sequence = event.sequence();
@@ -167,6 +168,9 @@ public final class LogPublisher implements AutoCloseable {
         checkOpen();
         Objects.requireNonNull(observer, "observer");
         Objects.requireNonNull(onFailure, "onFailure");
+        if (afterSequence < 0 || afterSequence > sequence) {
+            throw new IllegalArgumentException("afterSequence must be between 0 and " + sequence);
+        }
         List<LogEvent> replay = readLogs(file.getParent(), projectId, afterSequence);
         Listener listener = new Listener(observer, onFailure, replay);
         listeners.add(listener);
@@ -221,7 +225,7 @@ public final class LogPublisher implements AutoCloseable {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } catch (RuntimeException e) {
-                    report(e);
+                    fail(e);
                 } finally {
                     close();
                 }
@@ -230,27 +234,36 @@ public final class LogPublisher implements AutoCloseable {
 
         void offer(LogEvent event) {
             if (active.get() && !pending.offer(event)) {
-                close();
-                Thread.startVirtualThread(() -> report(new IllegalStateException(
-                        "Log viewer fell behind and was disconnected; reconnect using its last sequence")));
+                fail(new IllegalStateException(
+                        "Log viewer fell behind and was disconnected; reconnect using its last sequence"));
             }
         }
 
-        void report(Throwable error) {
-            try {
-                onFailure.accept(error);
-            } catch (RuntimeException ignored) {
-                // A broken error display must not affect persistence or other viewers.
+        void fail(Throwable error) {
+            if (disconnect()) {
+                Thread.startVirtualThread(() -> {
+                    try {
+                        onFailure.accept(error);
+                    } catch (RuntimeException ignored) {
+                        // A broken error display must not affect persistence or other viewers.
+                    }
+                });
             }
         }
 
         @Override
         public void close() {
+            disconnect();
+        }
+
+        private boolean disconnect() {
             if (active.getAndSet(false)) {
                 listeners.remove(this);
                 thread.interrupt();
                 pending.clear();
+                return true;
             }
+            return false;
         }
     }
 }

@@ -7,6 +7,7 @@ import io.github.aiassetmigrate.inventory.SafeStoragePaths;
 import io.github.aiassetmigrate.logging.LogPublisher;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -22,7 +23,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** File-backed F01 facade. Each write owns its publisher and project lock until completion. */
+/** File-backed F01 facade. Watched publishers belong to this manager until it closes. */
 public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     private static final long MAX_EXISTING_LOG_BYTES = 64L * 1024 * 1024;
     private final Path stateDirectory;
@@ -31,6 +32,15 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     private final AssetScanner scanner;
     private final PublisherFactory publisherFactory;
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final Map<UUID, ManagedPublisher> publishers = new HashMap<>();
+
+    private static final class ManagedPublisher {
+        final Publisher publisher;
+        int writers;
+        boolean watched;
+
+        ManagedPublisher(Publisher publisher) { this.publisher = publisher; }
+    }
 
     @FunctionalInterface
     interface PublisherFactory {
@@ -39,6 +49,9 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     interface Publisher extends AutoCloseable {
         void publish(LogEvent.Level level, String message) throws IOException;
+        default LogSubscription subscribe(long afterSequence, LogObserver observer) throws IOException {
+            throw new UnsupportedOperationException("Publisher does not support subscriptions");
+        }
         @Override void close() throws IOException;
     }
 
@@ -48,6 +61,9 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             return new Publisher() {
                 public void publish(LogEvent.Level level, String message) throws IOException {
                     publisher.publish(level, message);
+                }
+                public LogSubscription subscribe(long afterSequence, LogObserver observer) throws IOException {
+                    return publisher.subscribe(afterSequence, observer, observer::onError);
                 }
                 public void close() throws IOException { publisher.close(); }
             };
@@ -91,7 +107,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     throw new IOException("Source root does not match the project");
                 }
                 validatePaths(sourceRoot, id);
-                try (Publisher publisher = publisherFactory.open(logDirectory, id)) {
+                try (Publisher publisher = acquireWriter(id)) {
                     try {
                         publisher.publish(LogEvent.Level.INFO, "Scan started");
                         Instant started = Instant.now();
@@ -234,6 +250,30 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         return first.startsWith(second) || second.startsWith(first);
     }
 
+    private synchronized Publisher acquireWriter(UUID id) throws IOException {
+        ensureOpen();
+        ManagedPublisher entry = publishers.get(id);
+        if (entry == null) {
+            entry = new ManagedPublisher(publisherFactory.open(logDirectory, id));
+            publishers.put(id, entry);
+        }
+        entry.writers++;
+        ManagedPublisher owned = entry;
+        return new Publisher() {
+            @Override public void publish(LogEvent.Level level, String message) throws IOException {
+                owned.publisher.publish(level, message);
+            }
+            @Override public void close() throws IOException { releaseWriter(id, owned); }
+        };
+    }
+
+    private synchronized void releaseWriter(UUID id, ManagedPublisher entry) throws IOException {
+        if (--entry.writers == 0 && (!entry.watched || closed.get())) {
+            publishers.remove(id, entry);
+            entry.publisher.close();
+        }
+    }
+
     @Override public InventorySnapshot loadInventory(UUID projectId) {
         ensureOpen();
         try {
@@ -251,7 +291,20 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         if (closed.get()) throw new IllegalStateException("Asset manager is closed");
     }
 
-    @Override public void close() { closed.set(true); }
+    @Override public synchronized void close() {
+        if (!closed.compareAndSet(false, true)) return;
+        IOException failure = null;
+        for (var iterator = publishers.entrySet().iterator(); iterator.hasNext();) {
+            var entry = iterator.next().getValue();
+            if (entry.writers != 0) continue;
+            iterator.remove();
+            try { entry.publisher.close(); }
+            catch (IOException e) {
+                if (failure == null) failure = e; else failure.addSuppressed(e);
+            }
+        }
+        if (failure != null) throw new UncheckedIOException("Cannot close project publisher", failure);
+    }
     @Override public AnalysisResult analyze(UUID id, AnalysisKind kind) { throw new UnsupportedOperationException(); }
     @Override public List<ReviewedChange> review(UUID id, List<ReviewedChange> changes) { throw new UnsupportedOperationException(); }
     @Override public List<Finding> checkCompatibility(UUID id, TargetProfile target) { throw new UnsupportedOperationException(); }
@@ -261,5 +314,33 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     @Override public Report validate(UUID id) { throw new UnsupportedOperationException(); }
     @Override public List<Report> history(UUID id) { throw new UnsupportedOperationException(); }
     @Override public CommandResult command(UUID id, String request) { throw new UnsupportedOperationException(); }
-    @Override public LogSubscription watch(UUID id, long sequence, LogObserver observer) { throw new UnsupportedOperationException(); }
+    @Override public synchronized LogSubscription watch(UUID id, long sequence, LogObserver observer) {
+        ensureOpen();
+        Objects.requireNonNull(id, "projectId");
+        Objects.requireNonNull(observer, "observer");
+        if (sequence < 0) throw new IllegalArgumentException("afterSequence must be nonnegative");
+        ManagedPublisher entry = publishers.get(id);
+        boolean created = false;
+        try {
+            if (entry == null) {
+                var snapshot = repository.loadLatest(id)
+                        .orElseThrow(() -> new IOException("Project not found: " + id));
+                validatePaths(snapshot.project().sourceRoot(), id);
+                SafeStoragePaths.requireRegularFile(LogPublisher.logFile(logDirectory, id));
+                entry = new ManagedPublisher(publisherFactory.open(logDirectory, id));
+                publishers.put(id, entry);
+                created = true;
+            }
+            LogSubscription subscription = entry.publisher.subscribe(sequence, observer);
+            entry.watched = true;
+            return subscription;
+        } catch (IOException | RuntimeException failure) {
+            if (created) {
+                publishers.remove(id);
+                try { entry.publisher.close(); } catch (IOException closeFailure) { failure.addSuppressed(closeFailure); }
+            }
+            if (failure instanceof IOException io) throw new UncheckedIOException("Cannot watch project " + id, io);
+            throw (RuntimeException) failure;
+        }
+    }
 }

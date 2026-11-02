@@ -201,7 +201,7 @@ class DefaultAssetManagerTest {
         assertThrows(ImportException.class, () -> manager.loadInventory(UUID.randomUUID()));
         assertFalse(Files.exists(state));
         assertFalse(Files.exists(logs));
-        assertThrows(UnsupportedOperationException.class, () -> manager.watch(UUID.randomUUID(), 0, event -> {}));
+        assertThrows(java.io.UncheckedIOException.class, () -> manager.watch(UUID.randomUUID(), 0, event -> {}));
         assertThrows(UnsupportedOperationException.class, () -> manager.analyze(UUID.randomUUID(), AssetManager.AnalysisKind.CATEGORIES));
         manager.close();
         assertThrows(IllegalStateException.class, () -> manager.importAssets(source));

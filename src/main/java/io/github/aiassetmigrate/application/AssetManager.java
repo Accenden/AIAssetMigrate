@@ -56,7 +56,15 @@ public interface AssetManager {
     /** Interprets allowlisted actions, but cannot grant approval. */
     CommandResult command(UUID projectId, String request);
 
-    /** Replays events strictly after the cursor, then follows live events. */
+    /**
+     * Replays events strictly after the cursor, then follows live events. Setup failures
+     * are thrown to the caller (I/O failures as UncheckedIOException); asynchronous
+     * disconnections reach observer.onError, whose default implementation does nothing.
+     * Closing a subscription does not close the project publisher or stop work.
+     * DefaultAssetManager retains a watched publisher until manager close; another
+     * process cannot own the same project publisher while it is retained. If a write
+     * is in progress when the manager closes, publisher closure waits for that write.
+     */
     LogSubscription watch(UUID projectId, long afterSequence, LogObserver observer);
 
     enum AnalysisKind { CATEGORIES, RELATIONSHIPS, MATERIALS, NAMES, FOLDERS }

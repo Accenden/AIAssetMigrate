@@ -125,8 +125,7 @@ after restart. The publisher never logs credentials automatically: callers must
 exclude secrets from messages/details.
 
 Independent file readers can observe a complete record before its force has
-finished, so polling does not yet guarantee durable-before-delivery. Future
-subscription cursors are not consistently enforced for live events. The CLI
+finished, so polling does not yet guarantee durable-before-delivery. The CLI
 viewer also does not yet detect every output failure before advancing its cursor.
 
 `subscribe(afterSequence, observer, onFailure)` replays missed events then follows
@@ -135,6 +134,15 @@ logging. A viewer more than 1,024 live events behind is disconnected and notifie
 through `onFailure`; reconnect from its last processed sequence. Closing a
 subscription does not close the publisher. Closing the publisher cancels viewers;
 undelivered events remain available for replay.
+
+`AssetManager.watch` subscribes through a manager-owned project publisher. Override
+`LogObserver.onError` to report asynchronous failures and reconnect from the last
+successfully processed sequence; its default implementation does nothing. Invalid
+or future cursors fail synchronously. Closing a subscription leaves the publisher
+and ongoing work alone; the manager retains the publisher until it closes, or an
+active write finishes after manager close. Another manager or process cannot own
+that project's publisher during this time. Watching
+an existing project also inherits the documented non-Unix log-reuse limitation.
 
 Read existing logs from the CLI (replace the example UUID with the project ID):
 

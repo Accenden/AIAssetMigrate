@@ -6,4 +6,7 @@ import io.github.aiassetmigrate.domain.LogEvent;
 @FunctionalInterface
 public interface LogObserver {
     void update(LogEvent event);
+
+    /** Called on unexpected disconnection; override to report it and reconnect. The default ignores it. */
+    default void onError(Throwable failure) { }
 }

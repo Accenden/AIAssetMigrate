@@ -123,6 +123,26 @@ class LogPublisherTest {
     }
 
     @Test
+    void subscriptionRejectsFutureAndNegativeCursorsButAcceptsCurrentCursor() throws Exception {
+        var received = new CopyOnWriteArrayList<Long>();
+        var delivered = new CountDownLatch(1);
+        try (var publisher = new LogPublisher(directory, project)) {
+            assertThrows(IllegalArgumentException.class, () -> publisher.subscribe(-1, event -> {}, error -> {}));
+            assertThrows(IllegalArgumentException.class, () -> publisher.subscribe(1, event -> {}, error -> {}));
+            publisher.publish(LogEvent.Level.INFO, "one");
+            assertThrows(IllegalArgumentException.class, () -> publisher.subscribe(2, event -> {}, error -> {}));
+            try (var subscription = publisher.subscribe(1, event -> {
+                received.add(event.sequence());
+                delivered.countDown();
+            }, error -> fail(error))) {
+                publisher.publish(LogEvent.Level.INFO, "two");
+                assertTrue(delivered.await(5, TimeUnit.SECONDS));
+                assertEquals(List.of(2L), received);
+            }
+        }
+    }
+
+    @Test
     void wrongProjectAndSequenceGapsAreRejected() throws Exception {
         try (var publisher = new LogPublisher(directory, project)) {
             publisher.publish(LogEvent.Level.INFO, "one");
@@ -136,19 +156,47 @@ class LogPublisherTest {
     }
 
     @Test
-    void storageFailurePoisonsPublisherAndDoesNotNotifyListeners() throws Exception {
+    void storageFailurePoisonsPublisherAndDisconnectsAndNotifiesListeners() throws Exception {
         var received = new CopyOnWriteArrayList<LogEvent>();
+        var failures = new CopyOnWriteArrayList<Throwable>();
+        var notified = new CountDownLatch(2);
+        var release = new CountDownLatch(1);
         try (var publisher = new LogPublisher(directory, project);
-             var subscription = publisher.subscribe(0, received::add, error -> {})) {
+             var subscription = publisher.subscribe(0, received::add, error -> {
+                 failures.add(error);
+                 notified.countDown();
+                 try { release.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                 throw new IllegalStateException("broken failure handler");
+             });
+             var other = publisher.subscribe(0, received::add, error -> {
+                 failures.add(error);
+                 notified.countDown();
+             })) {
             // Simulate an I/O failure without depending on platform-specific permissions.
             var field = LogPublisher.class.getDeclaredField("channel");
             field.setAccessible(true);
             ((FileChannel) field.get(publisher)).close();
             assertThrows(IOException.class, () -> publisher.publish(LogEvent.Level.INFO, "fails"));
+            assertTrue(notified.await(5, TimeUnit.SECONDS));
+            assertEquals(2, failures.size());
+            assertTrue(failures.stream().allMatch(IOException.class::isInstance));
             assertThrows(IOException.class, () -> publisher.publish(LogEvent.Level.INFO, "still fails"));
+            assertThrows(IOException.class, () -> publisher.subscribe(0, received::add, error -> {}));
             assertTrue(received.isEmpty());
             assertTrue(LogPublisher.readLogs(directory, project, 0).isEmpty());
+        } finally {
+            release.countDown();
         }
+    }
+
+    @Test
+    void normalPublisherCloseDoesNotReportFailure() throws Exception {
+        var failures = new CopyOnWriteArrayList<Throwable>();
+        var publisher = new LogPublisher(directory, project);
+        var subscription = publisher.subscribe(0, event -> {}, failures::add);
+        publisher.close();
+        subscription.close();
+        assertTrue(failures.isEmpty());
     }
 
     @Test
