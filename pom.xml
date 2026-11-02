@@ -14,7 +14,6 @@
         <junit.version>5.11.4</junit.version>
         <picocli.version>4.7.6</picocli.version>
         <jackson.version>2.18.2</jackson.version>
-        <nimbus.version>10.10</nimbus.version>
     </properties>
     <dependencies>
         <dependency>
@@ -31,9 +30,6 @@
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId><artifactId>jackson-datatype-jdk8</artifactId><version>${jackson.version}</version>
-        </dependency>
-        <dependency>
-            <groupId>com.nimbusds</groupId><artifactId>nimbus-jose-jwt</artifactId><version>${nimbus.version}</version>
         </dependency>
         <dependency>
             <groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><version>${junit.version}</version><scope>test</scope>
