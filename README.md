@@ -75,7 +75,12 @@ ancestors. Path checks are best-effort against concurrent filesystem replacement
 and cannot reliably identify bind mounts; do not use bind-mounted aliases of the
 source, state or log locations. An import reports its project ID, inventory
 revision, assets, findings and path coverage. A failure after publication reports the committed
-project ID and revision; it does not imply the saved inventory was rolled back.
+project ID and revision; it does not imply the saved inventory was rolled back. To update an
+existing project's inventory, use its UUID from the import output:
+
+```sh
+bash ./mvnw exec:java '-Dexec.args=rescan /absolute/path/to/assets --project PROJECT-UUID --state-directory /absolute/path/to/state --log-directory /absolute/path/to/logs'
+```
 
 | Input | Type | Current inspection | Output/conversion |
 | --- | --- | --- | --- |
@@ -92,8 +97,8 @@ complete files or verify references, engine import, conversion support or actual
 rendering. Warnings make a scan `PARTIAL`, even if every directory was traversed;
 the path outcomes separately describe traversal coverage. Inventory revisions
 preserve same-path asset IDs on rescan and retain coverage evidence when a
-directory could not be visited. The facade exposes rescan and revision loading;
-the GUI can also load a saved revision. The CLI currently provides initial import.
+directory could not be visited. The facade and CLI expose rescan and revision
+loading; the GUI can load a saved revision or rescan a project by its UUID.
 On filesystems that do not expose Unix link counts (including typical Windows
 configurations), logging currently fails closed rather than risk writing through
 a hard link to a source asset. Import and rescan therefore cannot complete there;

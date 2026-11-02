@@ -58,7 +58,7 @@ public final class AssetMigrateApplication extends Application {
         folderRow(stage, 0, "Source folder", source);
         folderRow(stage, 1, "State directory", state);
         folderRow(stage, 2, "Log directory", logs);
-        projectId.setPromptText("Project ID for loading a saved inventory");
+        projectId.setPromptText("Project ID for loading or rescanning a project");
         revision.setPromptText("Latest if blank");
         inputs.addRow(3, new Label("Project ID"), projectId);
         inputs.addRow(4, new Label("Revision"), revision);
@@ -70,7 +70,9 @@ public final class AssetMigrateApplication extends Application {
         importButton.setOnAction(event -> begin(false));
         Button loadButton = new Button("Load Saved Inventory");
         loadButton.setOnAction(event -> begin(true));
-        actions.getChildren().addAll(importButton, loadButton);
+        Button rescanButton = new Button("Rescan Project");
+        rescanButton.setOnAction(event -> begin(false, true));
+        actions.getChildren().addAll(importButton, rescanButton, loadButton);
         progress.setMaxSize(20, 20);
         progress.setVisible(false);
         status.setWrapText(true);
@@ -140,11 +142,15 @@ public final class AssetMigrateApplication extends Application {
     }
 
     private void begin(boolean load) {
+        begin(load, false);
+    }
+
+    private void begin(boolean load, boolean rescan) {
         try {
             Path statePath = requiredPath(state, "State directory");
             Path logPath = requiredPath(logs, "Log directory");
             Path sourcePath = load ? null : requiredPath(source, "Source folder");
-            UUID id = load ? UUID.fromString(projectId.getText().trim()) : null;
+            UUID id = load || rescan ? UUID.fromString(projectId.getText().trim()) : null;
             Long requestedRevision = null;
             if (load && !revision.getText().isBlank()) {
                 requestedRevision = Long.valueOf(revision.getText().trim());
@@ -154,12 +160,13 @@ public final class AssetMigrateApplication extends Application {
             boolean started = runner.submit(statePath, logPath,
                     manager -> load ? (selectedRevision == null ? manager.loadInventory(id)
                             : manager.loadInventory(id, selectedRevision))
+                            : rescan ? manager.rescan(id, sourcePath).snapshot()
                             : manager.importAssets(sourcePath).snapshot(), this::completed);
             if (started) {
                 inputs.setDisable(true);
                 actions.setDisable(true);
                 progress.setVisible(true);
-                status.setText(load ? "Loading inventory..." : "Importing project...");
+                status.setText(load ? "Loading inventory..." : rescan ? "Rescanning project..." : "Importing project...");
                 summary.setText("No inventory loaded.");
                 inventory.getItems().clear();
                 findings.clear();

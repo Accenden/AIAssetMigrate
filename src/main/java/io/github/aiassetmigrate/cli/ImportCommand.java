@@ -85,7 +85,7 @@ public final class ImportCommand implements Callable<Integer> {
         }
     }
 
-    private static void printInventory(PrintWriter out, InventorySnapshot snapshot) throws IOException {
+    static void printInventory(PrintWriter out, InventorySnapshot snapshot) throws IOException {
         var project = snapshot.project();
         out.println("Project ID: " + project.id());
         out.println("Revision: " + project.inventoryRevision());
@@ -114,7 +114,7 @@ public final class ImportCommand implements Callable<Integer> {
         }
     }
 
-    private static String safe(String text) {
+    static String safe(String text) {
         if (text == null) return "(no detail)";
         StringBuilder result = new StringBuilder();
         text.codePoints().forEach(character -> {
