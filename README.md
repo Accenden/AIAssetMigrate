@@ -94,10 +94,10 @@ the path outcomes separately describe traversal coverage. Inventory revisions
 preserve same-path asset IDs on rescan and retain coverage evidence when a
 directory could not be visited. The facade exposes rescan and revision loading;
 the GUI can also load a saved revision. The CLI currently provides initial import.
-On filesystems that do not expose Unix link counts (including Windows), rescanning
-an existing project currently fails closed rather than risk appending to a log
-hard-linked to a source asset. Initial import and saved-inventory loading remain
-available there.
+On filesystems that do not expose Unix link counts (including typical Windows
+configurations), logging currently fails closed rather than risk writing through
+a hard link to a source asset. Import and rescan therefore cannot complete there;
+saved-inventory loading remains available.
 Inventory snapshots are limited to 64 MiB; per-file warnings and long paths can
 cause a large scan to reach that limit before its 100,000-entry traversal limit.
 
@@ -106,8 +106,10 @@ cause a large scan to reach that limit before its 100,000-entry traversal limit.
 No SQLite is used or required. Each project has a UTF-8 JSON-lines file named
 `<project-uuid>.log` in an explicitly chosen application log directory. Keep this
 directory outside source assets. A `<project-uuid>.lock` sidecar enforces one
-publisher per project while allowing independent readers, including on Windows.
-Do not delete lock files or edit/rotate log files while a publisher is running.
+publisher per project, while `.gate` coordinates snapshots and commits and
+`.commit` identifies the validated log prefix. Do not delete or edit log files
+or sidecars while a publisher or reader is running. Older versions do not honor
+the new gate and must not access these logs concurrently.
 
 Application services can construct and inject a publisher:
 
@@ -118,15 +120,20 @@ try (var logs = new LogPublisher(logDirectory, projectId)) {
 }
 ```
 
-`publish` appends and forces the event to disk before notifying subscribers.
+`publish` appends and forces the event and publishes a versioned, hash-bound
+commit marker before notifying subscribers.
 An I/O failure throws `IOException` and disables subsequent writes through that
 publisher; callers must stop new asset-writing steps. Sequence numbers resume
 after restart. The publisher never logs credentials automatically: callers must
 exclude secrets from messages/details.
 
-Independent file readers can observe a complete record before its force has
-finished, so polling does not yet guarantee durable-before-delivery. The CLI
-viewer also does not yet detect every output failure before advancing its cursor.
+Independent readers coordinate through the gate and read only the validated
+prefix identified by the marker. A marker-stage failure may have an indeterminate
+outcome: an event can be present after a failed publish. Directory syncing uses
+`FileChannel.force` on a read-only directory channel; Java does not guarantee that
+this persists directory entries on every provider. Consequently crash durability
+is not yet established across platforms. Path validation also cannot rule out
+hostile concurrent entry replacement; use a trusted log directory.
 
 `subscribe(afterSequence, observer, onFailure)` replays missed events then follows
 new events in order on a per-viewer virtual thread. A broken viewer does not stop
@@ -141,8 +148,8 @@ successfully processed sequence; its default implementation does nothing. Invali
 or future cursors fail synchronously. Closing a subscription leaves the publisher
 and ongoing work alone; the manager retains the publisher until it closes, or an
 active write finishes after manager close. Another manager or process cannot own
-that project's publisher during this time. Watching
-an existing project also inherits the documented non-Unix log-reuse limitation.
+that project's publisher during this time. Watching an existing project also
+inherits the documented non-Unix logging limitation.
 
 Read existing logs from the CLI (replace the example UUID with the project ID):
 
@@ -151,10 +158,18 @@ Read existing logs from the CLI (replace the example UUID with the project ID):
 # Add --follow to poll for new events every 250 ms; Ctrl+C stops the viewer.
 ```
 
-Readers do not create missing history. Malformed records, wrong project IDs, and
-sequence gaps are errors. Readers defer an incomplete trailing line, which may
-still be being written; reopening a publisher on an incomplete file fails without
-changing it. Preserve and inspect damaged files before manually repairing them.
+`--after` is exclusive. The CLI advances its cursor only after successfully
+writing and flushing an event; an output failure stops the viewer with a nonzero
+exit status so the failed event can be replayed.
+
+Readers do not create missing history. Malformed records, wrong project IDs,
+sequence gaps, and missing or invalid markers are errors. Readers expose only the
+marked prefix; reopening a publisher with an uncommitted tail fails without
+changing it. Markerless logs require explicit adoption; their historical durability
+cannot be proved. The adoption and tail-recovery tools are not implemented yet,
+so affected projects cannot currently be reopened for writing. Preserve the
+original files and do not use older versions to bypass these checks.
+Filesystems without verifiable Unix link counts currently fail closed for logging.
 This initial implementation rereads the file for replay/follow and has no rotation
 or retention policy; it is intended for modest local logs, not large archives.
 Import produces project events. The JavaFX log viewer and integration with later

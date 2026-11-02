@@ -7,6 +7,7 @@ import picocli.CommandLine.Spec;
 import picocli.CommandLine.Model.CommandSpec;
 
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -18,7 +19,7 @@ public final class LogsCommand implements Callable<Integer> {
     private Path directory;
     @Option(names = "--project", required = true, description = "Project UUID.")
     private UUID projectId;
-    @Option(names = "--after", defaultValue = "0", description = "Last received event sequence (exclusive).")
+    @Option(names = "--after", defaultValue = "0", description = "Last successfully output event sequence (exclusive).")
     private long after;
     @Option(names = "--follow", description = "Follow new records until interrupted (Ctrl+C).")
     private boolean follow;
@@ -32,14 +33,19 @@ public final class LogsCommand implements Callable<Integer> {
             return 2;
         }
         try {
+            PrintWriter out = spec.commandLine().getOut();
             do {
                 for (var event : LogPublisher.readLogs(directory, projectId, after)) {
-                    spec.commandLine().getOut().printf("%d %s %-7s %s%n", event.sequence(),
+                    out.printf("%d %s %-7s %s%n", event.sequence(),
                             event.occurredAt(), event.level(), event.message()
                                     .replace("\r", "\\r").replace("\n", "\\n"));
+                    out.flush();
+                    if (out.checkError()) {
+                        spec.commandLine().getErr().println("Unable to write project logs");
+                        return 1;
+                    }
                     after = event.sequence();
                 }
-                spec.commandLine().getOut().flush();
                 if (follow) Thread.sleep(250);
             } while (follow);
             return 0;

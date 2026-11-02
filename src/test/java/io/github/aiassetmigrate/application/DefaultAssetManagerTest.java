@@ -141,6 +141,26 @@ class DefaultAssetManagerTest {
         }
     }
 
+    @Test void hardLinkedCommitSidecarsCannotModifyAnAsset() throws Exception {
+        Path asset = Files.writeString(source.resolve("asset.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(state, logs)) {
+            var first = manager.importAssets(source).snapshot();
+            assumeTrue(Files.getFileStore(asset).supportsFileAttributeView("unix"), "unix link count unavailable");
+            for (String suffix : new String[] {".gate", ".commit"}) {
+                Path sidecar = logs.resolve(first.project().id() + suffix);
+                byte[] original = Files.readAllBytes(sidecar);
+                Files.delete(sidecar);
+                try { Files.createLink(sidecar, asset); }
+                catch (UnsupportedOperationException | IOException e) { assumeTrue(false, "Hard links unavailable"); }
+                assertThrows(ImportException.class, () -> manager.rescan(first.project().id(), source));
+                assertEquals("v 0 0 0\n", Files.readString(asset));
+                assertEquals(first, manager.loadInventory(first.project().id()));
+                Files.delete(sidecar);
+                Files.write(sidecar, original);
+            }
+        }
+    }
+
     @Test void unavailableLinkCountRejectsExistingFilesEvenWithoutKnownHardLinks() throws Exception {
         Path file = Files.createFile(directory.resolve("existing-log"));
         IOException failure = assertThrows(IOException.class,

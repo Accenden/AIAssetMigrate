@@ -4,7 +4,7 @@ Audit date: 2026-11-02.
 
 Requirements source: `ProjectDesignUpdated(I forgot to add in a diagram).pdf`, especially F01-F10 on pages 1-4 and UC01-UC11 on pages 6-8. The updated document, not the original `ProjectDesign.pdf`, governs this plan. UC11 account connection is supporting setup, not an eleventh core feature.
 
-This is an implementation plan and current-state audit only. Application code has not been changed.
+This document began as an implementation plan and current-state audit. F01 import has since been implemented as described below; later milestones remain outstanding.
 
 ## Current State
 
@@ -12,7 +12,7 @@ The project is a Java 21 Maven application using picocli, JavaFX, Jackson, and J
 
 | Feature | Status | Existing code | Remaining work |
 | --- | --- | --- | --- |
-| F01 Import assets | Partial backend | Recursive scanning; extension-based types; SHA-256, size and modification metadata; warnings and coverage outcomes; revisioned inventory JSON storage. | Shared import service, format/corruption inspection, CLI `import`, GUI Import Project, and workflow integration tests. |
+| F01 Import assets | Implemented with limitations | Shared import/rescan service, recursive scanning, metadata/fingerprints, bounded format checks and unverified warnings, revisioned storage, CLI `import`, and GUI import/load. | Expand format coverage; restore safe logging on filesystems without Unix link counts and verify Linux/Windows. Import and rescan currently fail closed there. Unverified files remain explicitly marked and engine compatibility is not established. |
 | F02 Categorize assets | Contracts only | Asset type metadata, category analysis kind, suggestion and reviewed-change contracts. | Semantic categories, uncertainty handling, suggestion review/corrections, persistence, AI assistance, and interfaces. File type detection is not categorization. |
 | F03 Relationships and materials | Contracts only | Persistable asset-reference records, relationship/material analysis kinds and operation descriptions. | Reference extraction/resolution, grouping and mapping suggestions, explicit review/exclusion, approved output-reference rewriting, and interfaces. |
 | F04 Rename and organize | Contracts only | Naming/folder analysis kinds and migration operation data. | Naming rules, output-layout preview, collision/path/reference checks, review, and approved output-copy operations. |
@@ -21,43 +21,43 @@ The project is a Java 21 Maven application using picocli, JavaFX, Jackson, and J
 | F07 Convert and migrate | Data scaffolding | Command/run/status models and `migrate()` contract; run records contain a step-status map, not complete step results. | Command execution, converter strategies, per-step diagnostics/outputs, preflight approval/fingerprint/path/tool checks, progress, failure handling, and interrupted-run recovery. |
 | F08 Validate and reports | Data scaffolding | Report/finding/run models and `validate()` / `history()` declarations. | Actual output checks, report persistence/retrieval, completion-status calculation, missing-history handling, and optional AI summaries. |
 | F09 Natural-language commands | Contract only | `command()` and command-result boundary. | AI interpretation, structured allowlisted actions, clarification/rejection, dispatch through the facade, and interfaces. |
-| F10 Live logs and replay | Working subsystem with known gaps; partial integration | File-backed ordered events, force-before-callback publication, replay, asynchronous subscriptions, CLI `logs` and polling follow mode. | Cursor/reader-visibility fixes, `AssetManager.watch()`, real workflow producers, GUI viewer, and executor stop-on-log-failure integration. |
-| UC11 Connect AI account | Not implemented | No OAuth session, credential store, model client, or OpenAI adapter implementation. | Verify provider-supported authorization first; then PKCE/state, secure storage, refresh/disconnect, usage-limit behavior, and account controls. |
+| F10 Live logs and replay | Working subsystem with known gaps; partial integration | File-backed ordered events, commit markers and gated snapshots, replay, asynchronous subscriptions, `AssetManager.watch()`, CLI `logs` and polling follow mode with output-failure detection. | Establish directory durability and filesystem safety guarantees, finish maintenance/recovery, real workflow producers, GUI viewer, and executor stop-on-log-failure integration. |
+| UC11 Connect AI account | Partial foundation | Browser authorization, PKCE/state, loopback callbacks, signed identity validation, and in-memory credentials. | Verify live provider-supported model access; add secure storage, refresh/disconnect, usage-limit behavior, model client, and account controls. |
 
 ### Evidence and Reuse
 
 Paths below are relative to `src/main/java/io/github/aiassetmigrate/` unless stated otherwise.
 
-- `application/AssetManager.java:11-60` explicitly defines a shared boundary, not an implementation. It already requires explicit review, exact-version approval, execution preflight checks, and allowlisted natural-language actions.
-- `inventory/AssetScanner.java:79-95,239-289` implements scanning and fingerprints. Recognized extensions are OBJ, FBX, MTL, PNG, JPG, and JPEG. It deliberately reports `inspectionStatus=NOT_PERFORMED`; arbitrary readable bytes with a recognized extension can currently enter inventory.
+- `application/AssetManager.java` defines the shared boundary; `application/DefaultAssetManager.java` implements import, rescan and inventory loading. Later operations remain explicitly unsupported.
+- `inventory/AssetScanner.java` implements scanning, fingerprints and bounded inspection. Recognized extensions are OBJ, FBX, MTL, PNG, JPG, and JPEG. Inconclusive inputs remain `UNVERIFIED`; limited checks do not establish full validity.
 - `inventory/FileAssetRepository.java:67-146,177-229` implements inventory reads, cooperative writer locking, immutable numbered revisions, forced writes, and atomic publication. It is inventory storage, not yet storage for reviews, plans, runs, or reports.
 - `inventory/SafeStoragePaths.java:15-30,62-102` protects source/state separation and rejects unsafe filesystem entries. Preserve these safeguards when adding output writes.
 - `domain/InventorySnapshot.java:12-34` and `inventory/InventoryJsonCodec.java:29-118` provide immutable, versioned inventory persistence. Reuse it rather than introducing another inventory format.
-- `cli/AssetMigrateCli.java:8-19` currently registers logs, not the feature command set. `gui/AssetMigrateApplication.java:13-26` is a shell, not a feature UI.
-- `README.md:8-12` understates current inventory infrastructure by saying project-state persistence is unimplemented. Update status documentation when implementing the next milestone; do not use the README alone as the feature inventory.
+- `cli/AssetMigrateCli.java` registers import and logs, not the later feature command set. `gui/AssetMigrateApplication.java` implements import and saved-inventory loading, not later feature workflows.
 
 ### Existing Gaps to Address, Not Just Missing Features
 
-- `logging/LogPublisher.java:148-156,192-218`: the subscription cursor filters replay, but is not retained for live events. A subscription after sequence 100 can receive new event 3. M1 must reject ahead-of-history cursors or enforce them consistently for live delivery.
-- `logging/LogPublisher.java:98-108,130-143` and `cli/LogsCommand.java:35-43`: callbacks follow `force(true)`, but independent polling readers can see a complete record before forcing finishes or fails. Durable-before-delivery is not yet guaranteed for CLI polling. This is a source-level race identified by inspection, not a reproduced test failure.
-- `cli/LogsCommand.java:36-42`: the cursor advances before output flush, with no `PrintWriter.checkError()` handling. A failed viewer output can be mistaken for successful consumption.
+- Subscriptions reject negative or ahead-of-history cursors, preventing a replay/live cursor gap. The standalone CLI reader intentionally accepts future `--after` cursors and waits for later events.
+- Log snapshots now use a separate cross-process gate and validated commit marker rather than inferring commitment from complete lines. Portable crash durability is still unproven: Java does not guarantee that forcing a read-only directory channel persists directory entries. Hostile concurrent pathname replacement can also race pathname-only checks; use trusted log directories while these limitations remain.
+- Explicit markerless-log adoption and safe tail archival/recovery are not implemented. Existing markerless logs and logs with uncommitted tails cannot currently be reopened for writing. Preserve their bytes; do not bypass the checks with an older version.
+- The CLI advances its cursor only after the event has been flushed without an output error; on failure it stops so the failed event can be replayed.
 - `domain/MigrationCommand.java:9-19`: existing operations are only `COPY`, `CONVERT_TEXTURE` and `REWRITE_REFERENCES`. Rename/organization can use approved copy destinations; model conversion needs an explicit operation/schema/validator extension.
 
-## Verified Baseline
+## Verification
 
-- JDK used for this audit: 22.0.2; project compilation targets Java 21.
-- `mvnw` is tracked without executable permission. `./mvnw verify` fails with permission denied here; `bash ./mvnw` works without changing tracked permissions.
-- Default `bash ./mvnw verify` discovers 111 tests but fails with 4 failures and 46 errors. The failures originate from inventory safety checks rejecting the `/var` symlink in macOS temporary-directory ancestors.
-- Setting the temporary directory at test-JVM startup produces **BUILD SUCCESS: 111 tests, zero failures/errors, two skipped**. Both skipped tests require Windows junction support. This validates existing components, not the missing workflows.
-- JavaFX was inspected but not launched during this audit. Live AI and external converters cannot be validated because their implementations do not exist.
+- JDK used on macOS: 22.0.2; project compilation targets Java 21.
+- `mvnw` is tracked without executable permission; invoke it with `bash ./mvnw`.
+- `bash ./mvnw clean verify` passed with 226 tests, zero failures/errors and two Windows-junction tests skipped on macOS. Surefire starts its test JVM with the build directory as its temporary directory to avoid macOS `/var` aliases without relaxing filesystem protections. The cross-process gate test uses a timeout to check that a reader remains blocked; it is not proof of crash durability.
+- The JavaFX import window launched and closed successfully with `bash ./mvnw javafx:run "-Djavafx.args=--smoke-test"`; this is a launch smoke test, not an interactive import acceptance test.
+- A project directory whose own ancestors are aliases is still rejected by path-safety checks. Bind mounts and hostile concurrent entry replacement are not reliably detected; avoid aliased or untrusted storage. Logging currently fails closed on filesystems without Unix link counts, preventing import and rescan there. Linux and Windows verification remain outstanding.
 
-Reproducible verification command from this repository root, after `target/` exists:
+Verification command from this repository root:
 
 ```sh
-bash ./mvnw '-DargLine=-Djava.io.tmpdir=/Users/kunt/EECS3311/AIAssetMigrate/target' verify
+bash ./mvnw verify
 ```
 
-Treat the default temporary-path failure as a portability issue to resolve, not a reason to remove symlink protections. Passing `-Djava.io.tmpdir` only as a Maven property did not resolve it; the test JVM needs the startup argument.
+The test JVM needs its temporary-directory property at startup; the Maven configuration supplies it. Do not remove source symlink or junction protections to accommodate temporary-directory aliases.
 
 ## Implementation Rules
 
@@ -160,8 +160,8 @@ Exit tests: small real conversion fixtures, malformed inputs, missing/failed/tim
 
 Priority: P1. Depends on the M0 authorization gate and the validated service paths in M2-M5. Features: hybrid completion of F02-F06/F08, F09 and UC11.
 
-- Implement `CredentialStore`, `OAuthSession`, `LLMClient`, `OpenAIAdapter` and `AIEngine` as separate responsibilities. Store credentials in supported OS-secure storage; never put tokens in project state, plans or logs.
-- Implement browser authorization with PKCE/state, callback validation, cancellation, code exchange, refresh, disconnect and failure handling. A connection is established only after valid credentials are stored. Account connection never changes migration approval.
+- Complete the existing `OAuthSession` and implement `CredentialStore`, `LLMClient`, `OpenAIAdapter` and `AIEngine` as separate responsibilities. Store credentials in supported OS-secure storage; never put tokens in project state, plans or logs.
+- Integrate the existing browser authorization with secure persistence, refresh, disconnect and failure handling. A connection is established only after valid credentials are stored. Account connection never changes migration approval.
 - Disconnect clears stored and in-memory credentials without cancelling the provider subscription or changing migration approval.
 - Give the agent a bounded inspection loop, allowed read-only tools and validated structured outputs. Enforce step/time/response limits and separate file contents from application instructions.
 - Add AI suggestions for categories, relationships/materials, names/folders and draft steps. Preserve type information, accepted reviews and deterministic compatibility findings on model failure; require explicit review of changes.

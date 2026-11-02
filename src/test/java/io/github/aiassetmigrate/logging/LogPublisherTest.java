@@ -5,6 +5,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,6 +18,9 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static java.nio.file.StandardOpenOption.APPEND;
 import static org.junit.jupiter.api.Assertions.*;
@@ -202,7 +208,7 @@ class LogPublisherTest {
     @Test
     void strictFallbackNeverOpensExistingHardLinkedLogOrSidecar() throws Exception {
         Path asset = Files.createFile(directory.resolve("source-asset"));
-        for (String suffix : List.of(".log", ".lock")) {
+        for (String suffix : List.of(".log", ".lock", ".gate", ".commit")) {
             UUID id = UUID.randomUUID();
             Path link = directory.resolve(id + suffix);
             try { Files.createLink(link, asset); }
@@ -225,7 +231,7 @@ class LogPublisherTest {
     @Test
     void opensRejectSymlinkedLogsAndSidecars() throws Exception {
         Path target = Files.createFile(directory.resolve("target"));
-        for (String suffix : List.of(".log", ".lock")) {
+        for (String suffix : List.of(".log", ".lock", ".gate", ".commit")) {
             UUID id = UUID.randomUUID();
             Path link = directory.resolve(id + suffix);
             try { Files.createSymbolicLink(link, target); }
@@ -237,6 +243,173 @@ class LogPublisherTest {
                 assertThrows(IOException.class, () -> LogPublisher.readLogs(directory, id, 0));
             }
             assertEquals(0, Files.size(target));
+        }
+    }
+
+    @Test
+    void hardLinkedExistingSidecarsAreAlwaysRejected() throws Exception {
+        Path target = Files.createFile(directory.resolve("protected-source"));
+        for (String suffix : List.of(".log", ".lock", ".gate", ".commit")) {
+            UUID id = UUID.randomUUID();
+            try { Files.createLink(directory.resolve(id + suffix), target); }
+            catch (UnsupportedOperationException | IOException e) { assumeTrue(false, "Hard links unavailable"); }
+            assertThrows(IOException.class, () -> new LogPublisher(directory, id));
+            assertEquals(0, Files.size(target));
+        }
+    }
+
+    @Test
+    void markerlessLogsIncludingEmptyLogsAreNeverAdopted() throws Exception {
+        Path log = LogPublisher.logFile(directory, project);
+        Files.writeString(log, "");
+        assertTrue(assertThrows(IOException.class, () -> new LogPublisher(directory, project))
+                .getMessage().contains("not yet available"));
+        assertTrue(assertThrows(IOException.class, () -> LogPublisher.readLogs(directory, project, 0))
+                .getMessage().contains("not yet available"));
+        assertEquals(0, Files.size(log));
+    }
+
+    @Test
+    void markerValidationRejectsInvalidMetadataAndDamagedPrefix() throws Exception {
+        try (var publisher = new LogPublisher(directory, project)) {
+            publisher.publish(LogEvent.Level.INFO, "one");
+        }
+        Path marker = directory.resolve(project + ".commit");
+        String original = Files.readString(marker);
+        for (String invalid : List.of("not json", "x".repeat(4097),
+                original.replace("\"version\":1", "\"version\":2"),
+                original.replace("\"version\":1", "\"version\":1,\"version\":1"),
+                original.replaceFirst("\"offset\":[0-9]+,", ""),
+                original.replace(project.toString(), UUID.randomUUID().toString()),
+                original.replace("\"sequence\":1", "\"sequence\":2"),
+                original.replaceFirst("\"offset\":[0-9]+", "\"offset\":9999999"),
+                original.replaceFirst("[0-9a-f]{64}", "0".repeat(64)))) {
+            Files.writeString(marker, invalid);
+            assertThrows(IOException.class, () -> LogPublisher.readLogs(directory, project, 0));
+            assertThrows(IOException.class, () -> new LogPublisher(directory, project));
+        }
+        Files.writeString(marker, original);
+        Files.writeString(LogPublisher.logFile(directory, project), "bad\n");
+        assertThrows(IOException.class, () -> LogPublisher.readLogs(directory, project, 0));
+    }
+
+    @Test
+    void injectedFailuresPreserveTailAndNeverPrematurelyCommit() throws Exception {
+        for (CommittedLog.Stage stage : CommittedLog.Stage.values()) {
+            UUID id = UUID.randomUUID();
+            AtomicBoolean armed = new AtomicBoolean();
+            try (var publisher = new LogPublisher(directory, id, false, false, current -> {
+                if (armed.get() && current == stage) throw new IOException("injected " + stage);
+            })) {
+                publisher.publish(LogEvent.Level.INFO, "committed");
+                armed.set(true);
+                IOException error = assertThrows(IOException.class,
+                        () -> publisher.publish(LogEvent.Level.INFO, "uncertain"));
+                assertTrue(error.getMessage().contains("indeterminate"));
+                assertThrows(IOException.class, () -> publisher.publish(LogEvent.Level.INFO, "poisoned"));
+            }
+            Path file = LogPublisher.logFile(directory, id);
+            byte[] original = Files.readAllBytes(file);
+            List<LogEvent> events = LogPublisher.readLogs(directory, id, 0);
+            assertEquals(stage == CommittedLog.Stage.DIRECTORY_FORCE ? 2 : 1, events.size(), stage.toString());
+            if (stage != CommittedLog.Stage.DIRECTORY_FORCE) {
+                assertThrows(IOException.class, () -> new LogPublisher(directory, id), stage.toString());
+            } else {
+                try (var reopened = new LogPublisher(directory, id)) {
+                    assertEquals(3, reopened.publish(LogEvent.Level.INFO, "next").sequence());
+                }
+            }
+            if (stage != CommittedLog.Stage.DIRECTORY_FORCE) assertArrayEquals(original, Files.readAllBytes(file));
+        }
+    }
+
+    @Test
+    void separateJvmReaderWaitsForCommitGateAfterCompleteAppend() throws Exception {
+        checkSeparateJvmReader(false);
+        checkSeparateJvmReader(true);
+    }
+
+    private void checkSeparateJvmReader(boolean failForce) throws Exception {
+        UUID id = UUID.randomUUID();
+        CountDownLatch appended = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicBoolean armed = new AtomicBoolean();
+        try (var publisher = new LogPublisher(directory, id, false, false, stage -> {
+            if (armed.get() && stage == CommittedLog.Stage.AFTER_APPEND) {
+                appended.countDown();
+                try {
+                    if (!release.await(10, TimeUnit.SECONDS)) throw new IOException("test timeout");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException(e);
+                }
+            }
+            if (armed.get() && stage == CommittedLog.Stage.LOG_FORCE && failForce) {
+                throw new IOException("injected force failure");
+            }
+        }); var threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            armed.set(true);
+            var writer = threads.submit(() -> publisher.publish(LogEvent.Level.INFO, "event"));
+            assertTrue(appended.await(5, TimeUnit.SECONDS));
+            String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
+            Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", classpath, ReaderProcess.class.getName(), directory.toString(), id.toString())
+                    .redirectErrorStream(true).start();
+            try (var output = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                assertEquals("READY", output.readLine());
+                var result = threads.submit(output::readLine);
+                assertThrows(TimeoutException.class, () -> result.get(250, TimeUnit.MILLISECONDS));
+                release.countDown();
+                if (failForce) {
+                    assertThrows(java.util.concurrent.ExecutionException.class, () -> writer.get(5, TimeUnit.SECONDS));
+                } else {
+                    assertEquals(1, writer.get(5, TimeUnit.SECONDS).sequence());
+                }
+                assertEquals(failForce ? "0" : "1", result.get(5, TimeUnit.SECONDS));
+                assertTrue(process.waitFor(5, TimeUnit.SECONDS));
+                assertEquals(0, process.exitValue());
+            } finally {
+                release.countDown();
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    public static final class ReaderProcess {
+        public static void main(String[] args) throws Exception {
+            System.out.println("READY");
+            System.out.flush();
+            System.out.println(LogPublisher.readLogs(Path.of(args[0]), UUID.fromString(args[1]), 0).size());
+        }
+    }
+
+    @Test
+    void rejectedLocalOwnerDoesNotReleaseCrossProcessOwnership() throws Exception {
+        try (var publisher = new LogPublisher(directory, project)) {
+            assertThrows(IOException.class, () -> new LogPublisher(directory, project));
+            String classpath = System.getProperty("surefire.test.class.path", System.getProperty("java.class.path"));
+            Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", classpath, WriterProcess.class.getName(), directory.toString(), project.toString())
+                    .redirectErrorStream(true).start();
+            try {
+                assertTrue(process.waitFor(5, TimeUnit.SECONDS));
+                try (var output = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    assertEquals("REJECTED", output.readLine());
+                }
+                assertEquals(0, process.exitValue());
+            } finally {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    public static final class WriterProcess {
+        public static void main(String[] args) throws Exception {
+            try (var ignored = new LogPublisher(Path.of(args[0]), UUID.fromString(args[1]))) {
+                System.out.println("ACQUIRED");
+            } catch (IOException e) {
+                System.out.println("REJECTED");
+            }
         }
     }
 }

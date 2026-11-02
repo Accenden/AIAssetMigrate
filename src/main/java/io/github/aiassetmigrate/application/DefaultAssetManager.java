@@ -216,6 +216,8 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         if (overlap(stateDirectory, logDirectory)) throw new IOException("State and log directories must be separate");
         validateLogFile(LogPublisher.logFile(logDirectory, id), publisherOpen);
         validateLogFile(logDirectory.resolve(id + ".lock"), publisherOpen);
+        validateLogFile(logDirectory.resolve(id + ".gate"), publisherOpen);
+        validateLogFile(logDirectory.resolve(id + ".commit"), publisherOpen);
     }
 
     private static void validateLogFile(Path path, boolean publisherOpen) throws IOException {
@@ -231,7 +233,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     static void validateLogLinkCount(Path path, boolean unixAvailable, boolean publisherOpen) throws IOException {
         if (!unixAvailable) {
-            // The F01 publisher atomically creates both files on these filesystems.
+            // The publisher must safely create its files before these pre-commit checks.
             if (!publisherOpen) throw new IOException("Cannot safely reuse log file without link count: " + path);
             return;
         }

@@ -2,10 +2,12 @@ package io.github.aiassetmigrate.application;
 
 import io.github.aiassetmigrate.domain.LogEvent;
 import io.github.aiassetmigrate.inventory.AssetScanner;
+import io.github.aiassetmigrate.logging.LogPublisher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.UncheckedIOException;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
@@ -62,6 +64,21 @@ class DefaultAssetManagerWatchTest {
                 assertTrue(failed.await(5, TimeUnit.SECONDS));
                 assertEquals("broken viewer", error.get().getMessage());
                 assertEquals(2, manager.rescan(id, source).snapshot().project().inventoryRevision());
+            }
+        }
+    }
+
+    @Test void snapshotReaderWorksWhileWatchOwnsPublisher() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path logs = directory.resolve("logs");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), logs)) {
+            UUID id = manager.importAssets(source).snapshot().project().id();
+            assumeTrue(Files.getFileStore(logs).supportsFileAttributeView("unix"));
+            try (var subscription = manager.watch(id, 0, event -> {})) {
+                assertEquals(4, LogPublisher.readLogs(logs, id, 0).size());
+                assertThrows(IOException.class, () -> new LogPublisher(logs, id));
+                manager.rescan(id, source);
+                assertEquals(8, LogPublisher.readLogs(logs, id, 0).size());
             }
         }
     }

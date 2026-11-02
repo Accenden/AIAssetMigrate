@@ -10,8 +10,6 @@ import io.github.aiassetmigrate.application.LogSubscription;
 import io.github.aiassetmigrate.domain.LogEvent;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
@@ -27,6 +25,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
@@ -35,6 +34,7 @@ import static java.nio.file.StandardOpenOption.*;
 
 /** One writer per project. Persisted events are authoritative; listeners are disposable. */
 public final class LogPublisher implements AutoCloseable {
+    private static final java.util.Set<Path> LOCAL_OWNERS = ConcurrentHashMap.newKeySet();
     private static final ObjectMapper JSON = new ObjectMapper()
             .registerModule(new Jdk8Module()).registerModule(new JavaTimeModule())
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -44,6 +44,8 @@ public final class LogPublisher implements AutoCloseable {
     private final FileChannel channel;
     private final FileChannel lockChannel;
     private final FileLock lock;
+    private final CommittedLog storage;
+    private final Object logKey;
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
     private long sequence;
     private boolean closed;
@@ -60,32 +62,63 @@ public final class LogPublisher implements AutoCloseable {
 
     LogPublisher(Path directory, UUID projectId, boolean protectUnverifiableLinks,
                  boolean forceNewFiles) throws IOException {
+        this(directory, projectId, protectUnverifiableLinks, forceNewFiles, CommittedLog.NO_FAULTS);
+    }
+
+    LogPublisher(Path directory, UUID projectId, boolean protectUnverifiableLinks,
+                 boolean forceNewFiles, CommittedLog.Faults faults) throws IOException {
         this.projectId = Objects.requireNonNull(projectId, "projectId");
-        file = logFile(directory.toAbsolutePath().normalize(), projectId);
+        io.github.aiassetmigrate.inventory.SafeStoragePaths.validateExistingPath(directory);
         Files.createDirectories(directory);
+        storage = new CommittedLog(directory, projectId, faults);
+        file = storage.log;
         boolean newFiles = forceNewFiles || (protectUnverifiableLinks
                 && !Files.getFileStore(directory).supportsFileAttributeView("unix"));
-        // Lock a sidecar: Windows file locks can otherwise prevent live readers.
-        lockChannel = FileChannel.open(directory.resolve(projectId + ".lock"),
-                newFiles ? CREATE_NEW : CREATE, WRITE, NOFOLLOW_LINKS);
+        if (!LOCAL_OWNERS.add(storage.owner)) throw new IOException("Another publisher owns " + file);
+        try {
+            lockChannel = CommittedLog.open(storage.owner, newFiles);
+        } catch (IOException | RuntimeException e) {
+            LOCAL_OWNERS.remove(storage.owner);
+            throw e;
+        }
         FileChannel opened = null;
         try {
             lock = lockChannel.tryLock();
             if (lock == null) {
                 throw new IOException("Another publisher owns " + file);
             }
-            opened = FileChannel.open(file, newFiles ? CREATE_NEW : CREATE, READ, WRITE, NOFOLLOW_LINKS);
-            byte[] bytes = Channels.newInputStream(opened).readAllBytes();
-            if (bytes.length > 0 && bytes[bytes.length - 1] != '\n') {
-                throw new IOException("Incomplete final log record; preserve and repair the file before writing: " + file);
+            boolean existing = Files.exists(file, NOFOLLOW_LINKS);
+            if (!existing && Files.exists(storage.marker, NOFOLLOW_LINKS)) {
+                throw new IOException("Commit marker exists without its log: " + file);
             }
-            List<LogEvent> events = decode(bytes, projectId, 0);
-            sequence = events.isEmpty() ? 0 : events.getLast().sequence();
+            if (existing && !Files.exists(storage.marker, NOFOLLOW_LINKS)) {
+                throw new IOException("Missing commit marker; legacy adoption or recovery is not yet available: " + file);
+            }
+            opened = CommittedLog.open(file, newFiles || !existing);
+            FileChannel logChannel = opened;
+            CommittedLog.Snapshot snapshot = storage.gated(!existing, () -> {
+                if (!existing) storage.initialize(logChannel);
+                return storage.snapshot();
+            });
+            checkedDecode(snapshot, projectId, 0);
+            if (opened.size() != snapshot.boundary().offset()) {
+                throw new IOException("Uncommitted log tail requires recovery, which is not yet available: " + file);
+            }
+            sequence = snapshot.boundary().sequence();
             opened.position(opened.size());
             channel = opened;
+            logKey = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes.class, NOFOLLOW_LINKS).fileKey();
+            if (logKey == null) throw new IOException("Cannot verify log identity: " + file);
         } catch (IOException | RuntimeException e) {
-            if (opened != null) opened.close();
-            lockChannel.close();
+            try {
+                if (opened != null) opened.close();
+            } finally {
+                try {
+                    lockChannel.close();
+                } finally {
+                    LOCAL_OWNERS.remove(storage.owner);
+                }
+            }
             if (e instanceof OverlappingFileLockException) {
                 throw new IOException("Another publisher owns " + file, e);
             }
@@ -98,14 +131,24 @@ public final class LogPublisher implements AutoCloseable {
                 Objects.requireNonNull(projectId, "projectId") + ".log");
     }
 
-    /** Read-only snapshot. A trailing uncommitted line is deferred until its newline arrives. */
+    /** Read the validated committed prefix without acquiring the publisher lifetime lock. */
     public static List<LogEvent> readLogs(Path directory, UUID projectId, long afterSequence) throws IOException {
         if (afterSequence < 0) {
             throw new IllegalArgumentException("afterSequence must be nonnegative");
         }
-        try (var input = Files.newInputStream(logFile(directory, projectId), NOFOLLOW_LINKS)) {
-            return decode(input.readAllBytes(), projectId, afterSequence);
+        CommittedLog storage = new CommittedLog(directory, Objects.requireNonNull(projectId), CommittedLog.NO_FAULTS);
+        if (Files.exists(storage.log, NOFOLLOW_LINKS) && !Files.exists(storage.marker, NOFOLLOW_LINKS)) {
+            throw new IOException("Missing commit marker; legacy adoption or recovery is not yet available: " + storage.log);
         }
+        return storage.gated(false, () -> checkedDecode(storage.snapshot(), projectId, afterSequence));
+    }
+
+    private static List<LogEvent> checkedDecode(CommittedLog.Snapshot snapshot, UUID projectId, long afterSequence)
+            throws IOException {
+        List<LogEvent> all = decode(snapshot.bytes(), projectId, 0);
+        long last = all.isEmpty() ? 0 : all.getLast().sequence();
+        if (last != snapshot.boundary().sequence()) throw new IOException("Commit marker sequence mismatch");
+        return all.stream().filter(event -> event.sequence() > afterSequence).toList();
     }
 
     private static List<LogEvent> decode(byte[] bytes, UUID projectId, long afterSequence) throws IOException {
@@ -145,15 +188,36 @@ public final class LogPublisher implements AutoCloseable {
                 Instant.now(), level, message, runId, commandId, details);
         try {
             byte[] bytes = (JSON.writeValueAsString(event) + "\n").getBytes(StandardCharsets.UTF_8);
-            ByteBuffer buffer = ByteBuffer.wrap(bytes);
-            while (buffer.hasRemaining()) {
-                channel.write(buffer);
-            }
-            channel.force(true);
-        } catch (IOException e) {
-            failure = e;
-            listeners.forEach(listener -> listener.fail(e));
-            throw new IOException("Cannot persist log event; stop new write steps: " + file, e);
+            storage.gated(false, () -> {
+                CommittedLog.safeFile(file);
+                Object currentKey = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes.class,
+                        NOFOLLOW_LINKS).fileKey();
+                if (!logKey.equals(currentKey)) throw new IOException("Log identity changed: " + file);
+                CommittedLog.Snapshot snapshot = storage.snapshot();
+                checkedDecode(snapshot, projectId, 0);
+                if (snapshot.boundary().sequence() != sequence || channel.size() != snapshot.boundary().offset()) {
+                    throw new IOException("Log boundary changed or uncommitted tail requires recovery: " + file);
+                }
+                if ((long) snapshot.bytes().length + bytes.length > Integer.MAX_VALUE) {
+                    throw new IOException("Committed log too large: " + file);
+                }
+                channel.position(snapshot.boundary().offset());
+                int split = bytes.length / 2;
+                CommittedLog.write(channel, java.util.Arrays.copyOf(bytes, split));
+                storage.faults.at(CommittedLog.Stage.PARTIAL_APPEND);
+                CommittedLog.write(channel, java.util.Arrays.copyOfRange(bytes, split, bytes.length));
+                storage.faults.at(CommittedLog.Stage.AFTER_APPEND);
+                storage.faults.at(CommittedLog.Stage.LOG_FORCE);
+                channel.force(true);
+                byte[] prefix = java.util.Arrays.copyOf(snapshot.bytes(), snapshot.bytes().length + bytes.length);
+                System.arraycopy(bytes, 0, prefix, snapshot.bytes().length, bytes.length);
+                storage.commit(prefix, event.sequence());
+                return null;
+            });
+        } catch (IOException | RuntimeException e) {
+            failure = e instanceof IOException io ? io : new IOException("Log storage failed", e);
+            listeners.forEach(listener -> listener.fail(failure));
+            throw new IOException("Cannot persist log event; stop new write steps; marker-stage outcome may be indeterminate: " + file, failure);
         }
         sequence = event.sequence();
         for (Listener listener : listeners) {
@@ -198,7 +262,11 @@ public final class LogPublisher implements AutoCloseable {
                 try {
                     channel.close();
                 } finally {
-                    lockChannel.close();
+                    try {
+                        lockChannel.close();
+                    } finally {
+                        LOCAL_OWNERS.remove(storage.owner);
+                    }
                 }
             }
         }
