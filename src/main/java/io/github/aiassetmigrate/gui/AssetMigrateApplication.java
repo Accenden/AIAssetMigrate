@@ -40,9 +40,12 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 
 public final class AssetMigrateApplication extends Application {
+    static final AssetManager.OrganizationRules DEFAULT_ORGANIZATION_RULES = new AssetManager.OrganizationRules(
+            AssetManager.NameStyle.PRESERVE, AssetManager.FolderStyle.PRESERVE);
     private final ImportRunner runner = new ImportRunner(Platform::runLater);
     private final TextField source = new TextField();
     private final TextField state = new TextField();
@@ -67,6 +70,8 @@ public final class AssetMigrateApplication extends Application {
     private final TextField reviewValue = new TextField();
     private final TextField reviewReference = new TextField();
     private final ComboBox<ReviewedChange.Decision> decision = new ComboBox<>();
+    private final ComboBox<AssetManager.NameStyle> nameStyle = new ComboBox<>();
+    private final ComboBox<AssetManager.FolderStyle> folderStyle = new ComboBox<>();
     private AnalysisContext analysisContext;
 
     record AnalysisContext(UUID project, Path state, Path logs, AssetManager.AnalysisResult result) {
@@ -198,6 +203,19 @@ public final class AssetMigrateApplication extends Application {
         names.setOnAction(event -> analyze(AssetManager.AnalysisKind.NAMES));
         folders.setOnAction(event -> analyze(AssetManager.AnalysisKind.FOLDERS));
         FlowPane analyzeActions = new FlowPane(8, 8, categories, relationships, materials, names, folders);
+        nameStyle.getItems().setAll(AssetManager.NameStyle.values());
+        nameStyle.setValue(DEFAULT_ORGANIZATION_RULES.nameStyle());
+        folderStyle.getItems().setAll(AssetManager.FolderStyle.values());
+        folderStyle.setValue(DEFAULT_ORGANIZATION_RULES.folderStyle());
+        Button generateOrganization = new Button("Generate Organization Suggestions");
+        generateOrganization.setOnAction(event -> {
+            var rules = new AssetManager.OrganizationRules(nameStyle.getValue(), folderStyle.getValue());
+            analyze(organizationAnalysis(rules));
+        });
+        FlowPane organizationRules = new FlowPane(8, 8, new Label("Name style"), nameStyle,
+                new Label("Folder style"), folderStyle, generateOrganization);
+        Label rulesNote = new Label("Generates name and folder suggestions only. Suggestions are not accepted; no asset files are written.");
+        rulesNote.setWrapText(true);
         suggestionColumn("Asset ID", suggestion -> suggestion.assetId().toString(), 260);
         suggestionColumn("Kind", suggestion -> suggestion.kind().toString(), 120);
         suggestionColumn("Proposed value", AssetManager.Suggestion::proposedValue, 360);
@@ -243,7 +261,7 @@ public final class AssetMigrateApplication extends Application {
         organizationPreview.setPrefRowCount(8);
         organizationPreview.setPromptText("Read-only preview; not approval and no assets are written.");
         HBox reviewActions = new HBox(8, decision, submitReview, manualReview);
-        analysisPane.getChildren().addAll(explanation, analyzeActions, analysisRevision, new Label("Suggestions"), suggestions,
+        analysisPane.getChildren().addAll(explanation, analyzeActions, rulesNote, organizationRules, analysisRevision, new Label("Suggestions"), suggestions,
                 new Label("Analysis findings"), analysisFindings, new Label("Explicit review (select a suggestion or enter manually)"),
                 reviewAsset, reviewKind, reviewValue, reviewReference, reviewActions,
                 new Label("Saved reviews for analyzed revision"), loadReviews, savedReviews,
@@ -266,11 +284,19 @@ public final class AssetMigrateApplication extends Application {
     }
 
     private void analyze(AssetManager.AnalysisKind kind) {
+        analyze((manager, id) -> manager.analyze(id, kind));
+    }
+
+    static BiFunction<AssetManager, UUID, AssetManager.AnalysisResult> organizationAnalysis(AssetManager.OrganizationRules rules) {
+        return (manager, id) -> manager.analyzeOrganization(id, rules);
+    }
+
+    private void analyze(BiFunction<AssetManager, UUID, AssetManager.AnalysisResult> operation) {
         try {
             Path statePath = requiredPath(state, "State directory");
             Path logPath = requiredPath(logs, "Log directory");
             UUID id = UUID.fromString(projectId.getText().trim());
-            if (runner.submitValue(statePath, logPath, manager -> manager.analyze(id, kind), result -> {
+            if (runner.submitValue(statePath, logPath, manager -> operation.apply(manager, id), result -> {
                 busy(false);
                 if (result.value() != null) {
                     analysisContext = new AnalysisContext(id, statePath, logPath, result.value());

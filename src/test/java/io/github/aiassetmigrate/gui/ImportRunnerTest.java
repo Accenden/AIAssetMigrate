@@ -170,6 +170,42 @@ class ImportRunnerTest {
     }
 
     @Test
+    void organizationRulesAreCapturedAndSubmittedOnWorker() throws Exception {
+        var defaults = AssetMigrateApplication.DEFAULT_ORGANIZATION_RULES;
+        assertEquals(AssetManager.NameStyle.PRESERVE, defaults.nameStyle());
+        assertEquals(AssetManager.FolderStyle.PRESERVE, defaults.folderStyle());
+        UUID project = UUID.randomUUID();
+        for (var rules : List.of(defaults, new AssetManager.OrganizationRules(
+                AssetManager.NameStyle.SNAKE_CASE, AssetManager.FolderStyle.BY_TYPE))) {
+            var operation = AssetMigrateApplication.organizationAnalysis(rules);
+            var analysis = new AssetManager.AnalysisResult(17L, List.of(), List.of());
+            AtomicReference<Object[]> arguments = new AtomicReference<>();
+            AtomicReference<Thread> thread = new AtomicReference<>();
+            AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                    new Class<?>[]{AssetManager.class}, (proxy, method, args) -> {
+                        assertEquals("analyzeOrganization", method.getName());
+                        arguments.set(args);
+                        thread.set(Thread.currentThread());
+                        return analysis;
+                    });
+            BlockingQueue<Runnable> ui = new LinkedBlockingQueue<>();
+            AtomicReference<ImportRunner.Result<AssetManager.AnalysisResult>> result = new AtomicReference<>();
+            try (ImportRunner runner = new ImportRunner(ui::add, (state, logs) -> new ImportRunner.Managed(manager, () -> { }))) {
+                assertTrue(runner.submitValue(STATE, LOGS, instance -> operation.apply(instance, project), result::set));
+                Runnable completion = ui.poll(5, TimeUnit.SECONDS);
+                assertNotNull(completion);
+                completion.run();
+                assertNull(result.get().failure());
+                assertSame(analysis, result.get().value());
+                assertArrayEquals(new Object[]{project, rules}, arguments.get());
+                assertNotSame(Thread.currentThread(), thread.get());
+                var context = new AssetMigrateApplication.AnalysisContext(project, STATE, LOGS, result.get().value());
+                assertEquals("Analysis inventory revision: 17", context.revisionText());
+            }
+        }
+    }
+
+    @Test
     void reviewRequiresExplicitDecisionAndEncodesEditedValues() {
         UUID asset = UUID.randomUUID();
         UUID target = UUID.randomUUID();

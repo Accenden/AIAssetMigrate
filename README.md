@@ -160,6 +160,14 @@ approval. Unresolved references remain blocking even when manually reviewed unti
 planning supports validating and applying those corrections. Migration plans and
 execution remain unimplemented.
 
+To generate rule-based proposals instead, use `analyze-organization` with
+`--name-style preserve|snake-case|kebab-case` and `--folder-style preserve|by-type`,
+along with the project, state-directory and log-directory options. The GUI offers
+the same rules. These are combined proposals for the current inventory, not saved
+reviews. Review each desired change explicitly and run the organization preview
+again before proceeding; its reference and destination checks use the saved
+decisions rather than the unaccepted rule proposals.
+
 ## File Logs
 
 No SQLite is used or required. Each project has a UTF-8 JSON-lines file named

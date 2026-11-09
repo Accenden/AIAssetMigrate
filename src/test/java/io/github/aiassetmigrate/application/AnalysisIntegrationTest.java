@@ -19,6 +19,41 @@ import static org.junit.jupiter.api.Assertions.*;
 class AnalysisIntegrationTest {
     @TempDir Path directory;
 
+    @Test void ruleSuggestionsRemainUnacceptedUntilExplicitReview() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path model = source.resolve("Hero Knight.obj");
+        String content = "v 0 0 0\n";
+        Files.writeString(model, content);
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id();
+            var rules = new AssetManager.OrganizationRules(AssetManager.NameStyle.SNAKE_CASE,
+                    AssetManager.FolderStyle.BY_TYPE);
+            var analysis = manager.analyzeOrganization(project, rules);
+            assertEquals(snapshot.project().inventoryRevision(), analysis.inventoryRevision());
+            var name = analysis.suggestions().stream().filter(s -> s.kind() == AssetManager.AnalysisKind.NAMES)
+                    .findFirst().orElseThrow();
+            var folder = analysis.suggestions().stream().filter(s -> s.kind() == AssetManager.AnalysisKind.FOLDERS)
+                    .findFirst().orElseThrow();
+            assertEquals("hero_knight.obj", name.proposedValue());
+            assertEquals("Models", folder.proposedValue());
+            assertTrue(manager.loadReviews(project).isEmpty());
+            assertEquals("Hero Knight.obj", manager.previewOrganization(project, analysis.inventoryRevision())
+                    .entries().getFirst().destination().orElseThrow());
+            var decisions = List.of(
+                    new ReviewedChange(UUID.randomUUID(), name.assetId(), ReviewedChange.Kind.NAME,
+                            ReviewedChange.Decision.ACCEPTED, Map.of("name", name.proposedValue()), Instant.now()),
+                    new ReviewedChange(UUID.randomUUID(), folder.assetId(), ReviewedChange.Kind.FOLDER,
+                            ReviewedChange.Decision.ACCEPTED, Map.of("folder", folder.proposedValue()), Instant.now()));
+            manager.review(project, analysis.inventoryRevision(), decisions);
+            assertEquals("Models/hero_knight.obj", manager.previewOrganization(project, analysis.inventoryRevision())
+                    .entries().getFirst().destination().orElseThrow());
+            assertEquals(content, Files.readString(model));
+            manager.rescan(project, source);
+            assertThrows(IllegalStateException.class, () -> manager.review(project, analysis.inventoryRevision(), decisions));
+        }
+    }
+
     @Test void categoryAnalysisUsesSavedInventoryWithoutChangingSource() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Path file = source.resolve("hero.obj");

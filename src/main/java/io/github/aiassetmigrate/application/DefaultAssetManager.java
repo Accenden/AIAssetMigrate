@@ -4,6 +4,7 @@ import io.github.aiassetmigrate.domain.*;
 import io.github.aiassetmigrate.analysis.CategoryAnalyzer;
 import io.github.aiassetmigrate.analysis.MaterialAnalysis;
 import io.github.aiassetmigrate.analysis.OrganizationPreview;
+import io.github.aiassetmigrate.analysis.OrganizationRulesAnalyzer;
 import io.github.aiassetmigrate.inventory.AssetScanner;
 import io.github.aiassetmigrate.inventory.FileAssetRepository;
 import io.github.aiassetmigrate.inventory.FileReviewedChangeRepository;
@@ -387,6 +388,10 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             return new AnalysisResult(snapshot.project().inventoryRevision(), suggestions, List.of());
         }
         throw new UnsupportedOperationException("Analysis not implemented: " + kind);
+    }
+
+    @Override public AnalysisResult analyzeOrganization(UUID id, OrganizationRules rules) {
+        return OrganizationRulesAnalyzer.analyze(loadInventory(id), Objects.requireNonNull(rules, "rules"));
     }
 
     private MaterialAnalysis.Result inspectReferences(InventorySnapshot snapshot) {

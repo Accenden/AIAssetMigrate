@@ -36,6 +36,9 @@ public interface AssetManager {
 
     AnalysisResult analyze(UUID projectId, AnalysisKind kind);
 
+    /** Suggests an organization from explicit rules; no decision or output is written. */
+    AnalysisResult analyzeOrganization(UUID projectId, OrganizationRules rules);
+
     /** Saves explicit decisions only for the inventory revision the user reviewed. */
     List<ReviewedChange> review(UUID projectId, long expectedInventoryRevision, List<ReviewedChange> changes);
 
@@ -75,6 +78,16 @@ public interface AssetManager {
     LogSubscription watch(UUID projectId, long afterSequence, LogObserver observer);
 
     enum AnalysisKind { CATEGORIES, RELATIONSHIPS, MATERIALS, NAMES, FOLDERS }
+
+    enum NameStyle { PRESERVE, SNAKE_CASE, KEBAB_CASE }
+    enum FolderStyle { PRESERVE, BY_TYPE }
+
+    record OrganizationRules(NameStyle nameStyle, FolderStyle folderStyle) {
+        public OrganizationRules {
+            Objects.requireNonNull(nameStyle, "nameStyle");
+            Objects.requireNonNull(folderStyle, "folderStyle");
+        }
+    }
 
     record TargetProfile(String id, String version) {
         public TargetProfile {

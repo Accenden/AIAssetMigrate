@@ -42,26 +42,30 @@ public final class AnalyzeCommand implements Callable<Integer> {
                 result = manager.analyze(projectId, AssetManager.AnalysisKind.valueOf(kind.name().toUpperCase(java.util.Locale.ROOT)));
             }
             var out = spec.commandLine().getOut();
-            out.println("Inventory revision: " + result.inventoryRevision());
-            out.println("Suggestions (" + result.suggestions().size() + "):");
-            for (var suggestion : result.suggestions()) {
-                out.printf("  ID: %s Asset ID: %s Kind: %s Value: %s%n", suggestion.id(), suggestion.assetId(),
-                        suggestion.kind(), ImportCommand.safe(suggestion.proposedValue()));
-                suggestion.reference().ifPresent(reference -> out.printf("    Reference: %s%n", ImportCommand.safe(reference)));
-            }
-            out.println("Findings (" + result.findings().size() + "):");
-            for (var finding : result.findings()) {
-                out.printf("  %s %s Asset ID: %s Path: %s: %s%n", finding.severity(),
-                        ImportCommand.safe(finding.code()), finding.assetId().map(UUID::toString).orElse("<project>"),
-                        finding.sourceRelativePath().map(Path::toString).map(ImportCommand::safe).orElse("<project>"),
-                        ImportCommand.safe(finding.message()));
-            }
+            printResult(out, result);
             out.flush();
             if (out.checkError()) throw new java.io.IOException("Could not write analysis output");
             return 0;
         } catch (Exception e) {
             spec.commandLine().getErr().println("Analysis failed: " + ImportCommand.safe(e.getMessage()));
             return 1;
+        }
+    }
+
+    static void printResult(java.io.PrintWriter out, AssetManager.AnalysisResult result) {
+        out.println("Inventory revision: " + result.inventoryRevision());
+        out.println("Suggestions (" + result.suggestions().size() + "):");
+        for (var suggestion : result.suggestions()) {
+            out.printf("  ID: %s Asset ID: %s Kind: %s Value: %s%n", suggestion.id(), suggestion.assetId(),
+                    suggestion.kind(), ImportCommand.safe(suggestion.proposedValue()));
+            suggestion.reference().ifPresent(reference -> out.printf("    Reference: %s%n", ImportCommand.safe(reference)));
+        }
+        out.println("Findings (" + result.findings().size() + "):");
+        for (var finding : result.findings()) {
+            out.printf("  %s %s Asset ID: %s Path: %s: %s%n", finding.severity(),
+                    ImportCommand.safe(finding.code()), finding.assetId().map(UUID::toString).orElse("<project>"),
+                    finding.sourceRelativePath().map(Path::toString).map(ImportCommand::safe).orElse("<project>"),
+                    ImportCommand.safe(finding.message()));
         }
     }
 }
