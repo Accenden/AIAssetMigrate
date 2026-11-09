@@ -1,10 +1,12 @@
 package io.github.aiassetmigrate.gui;
 
 import io.github.aiassetmigrate.application.ImportException;
+import io.github.aiassetmigrate.application.AssetManager;
 import io.github.aiassetmigrate.domain.Asset;
 import io.github.aiassetmigrate.domain.Finding;
 import io.github.aiassetmigrate.domain.InventorySnapshot;
 import io.github.aiassetmigrate.domain.PathOutcome;
+import io.github.aiassetmigrate.domain.ReviewedChange;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyStringWrapper;
@@ -12,12 +14,16 @@ import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
 import javafx.scene.control.Label;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.Tab;
+import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
@@ -28,6 +34,9 @@ import javafx.stage.Stage;
 
 import java.io.File;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
 
@@ -45,6 +54,15 @@ public final class AssetMigrateApplication extends Application {
     private final GridPane inputs = new GridPane();
     private final HBox actions = new HBox(10);
     private final ProgressIndicator progress = new ProgressIndicator();
+    private final VBox analysisPane = new VBox(8);
+    private final TableView<AssetManager.Suggestion> suggestions = new TableView<>();
+    private final TextArea analysisFindings = new TextArea();
+    private final TextField reviewValue = new TextField();
+    private final TextField reviewReference = new TextField();
+    private final ComboBox<ReviewedChange.Decision> decision = new ComboBox<>();
+    private UUID analysisProject;
+    private Path analysisState;
+    private Path analysisLogs;
 
     @Override
     public void start(Stage stage) {
@@ -80,6 +98,7 @@ public final class AssetMigrateApplication extends Application {
         HBox.setHgrow(status, Priority.ALWAYS);
 
         addColumn("Path", asset -> asset.relativePath().toString(), 260);
+        addColumn("Asset ID", asset -> asset.id().toString(), 270);
         addColumn("Type", asset -> asset.type().toString(), 90);
         addColumn("Format", asset -> asset.metadata().getOrDefault(Asset.FORMAT, ""), 75);
         addColumn("Bytes", asset -> asset.metadata().getOrDefault(Asset.SIZE_BYTES, ""), 90);
@@ -97,9 +116,17 @@ public final class AssetMigrateApplication extends Application {
         SplitPane results = new SplitPane(inventoryPane, findingsPane);
         results.setDividerPositions(0.65);
         VBox top = new VBox(10, title, note, inputs, actions, statusRow, summary);
-        BorderPane root = new BorderPane(results);
+        setupAnalysis();
+        Tab inventoryTab = new Tab("Inventory", results);
+        ScrollPane analysisScroll = new ScrollPane(analysisPane);
+        analysisScroll.setFitToWidth(true);
+        Tab analysisTab = new Tab("Analysis and Review", analysisScroll);
+        inventoryTab.setClosable(false);
+        analysisTab.setClosable(false);
+        TabPane tabs = new TabPane(inventoryTab, analysisTab);
+        BorderPane root = new BorderPane(tabs);
         root.setTop(top);
-        BorderPane.setMargin(results, new Insets(12, 0, 0, 0));
+        BorderPane.setMargin(tabs, new Insets(12, 0, 0, 0));
         root.setPadding(new Insets(20));
         stage.setTitle("AIAssetMigrate");
         stage.setScene(new Scene(root, 1000, 720));
@@ -119,6 +146,151 @@ public final class AssetMigrateApplication extends Application {
                 Platform.exit();
             });
         }
+    }
+
+    private void setupAnalysis() {
+        Label explanation = new Label("Analysis uses the latest saved inventory, not the revision displayed in the Inventory tab. Suggestions are not reviews.");
+        explanation.setWrapText(true);
+        Button categories = new Button("Analyze Categories");
+        Button relationships = new Button("Analyze Relationships");
+        Button materials = new Button("Analyze Materials");
+        categories.setOnAction(event -> analyze(AssetManager.AnalysisKind.CATEGORIES));
+        relationships.setOnAction(event -> analyze(AssetManager.AnalysisKind.RELATIONSHIPS));
+        materials.setOnAction(event -> analyze(AssetManager.AnalysisKind.MATERIALS));
+        HBox analyzeActions = new HBox(8, categories, relationships, materials);
+        suggestionColumn("Asset ID", suggestion -> suggestion.assetId().toString(), 260);
+        suggestionColumn("Kind", suggestion -> suggestion.kind().toString(), 120);
+        suggestionColumn("Proposed value", AssetManager.Suggestion::proposedValue, 360);
+        suggestions.setPlaceholder(new Label("Run analysis to display suggestions."));
+        suggestions.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
+            reviewValue.setText(selected == null ? "" : selected.proposedValue());
+            reviewReference.setText(selected == null ? "" : selected.reference().orElse(""));
+            decision.setValue(null);
+        });
+        analysisFindings.setEditable(false);
+        analysisFindings.setWrapText(true);
+        analysisFindings.setPromptText("Analysis findings appear here.");
+        analysisFindings.setPrefRowCount(4);
+        reviewValue.setPromptText("Category or target asset UUID (editable)");
+        reviewReference.setPromptText("Original reference (required for material mapping)");
+        decision.getItems().setAll(ReviewedChange.Decision.ACCEPTED, ReviewedChange.Decision.REJECTED);
+        decision.setPromptText("Choose decision");
+        Button submitReview = new Button("Save Explicit Review");
+        submitReview.setOnAction(event -> review());
+        HBox reviewActions = new HBox(8, decision, submitReview);
+        analysisPane.getChildren().addAll(explanation, analyzeActions, new Label("Suggestions"), suggestions,
+                new Label("Analysis findings"), analysisFindings, new Label("Selected suggestion review"),
+                reviewValue, reviewReference, reviewActions);
+        VBox.setVgrow(suggestions, Priority.ALWAYS);
+    }
+
+    private void suggestionColumn(String title, Function<AssetManager.Suggestion, String> value, double width) {
+        TableColumn<AssetManager.Suggestion, String> column = new TableColumn<>(title);
+        column.setCellValueFactory(cell -> new ReadOnlyStringWrapper(value.apply(cell.getValue())));
+        column.setPrefWidth(width);
+        suggestions.getColumns().add(column);
+    }
+
+    private void busy(boolean value) {
+        inputs.setDisable(value);
+        actions.setDisable(value);
+        analysisPane.setDisable(value);
+        progress.setVisible(value);
+    }
+
+    private void analyze(AssetManager.AnalysisKind kind) {
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID id = UUID.fromString(projectId.getText().trim());
+            if (runner.submitValue(statePath, logPath, manager -> manager.analyze(id, kind), result -> {
+                busy(false);
+                if (result.value() != null) {
+                    analysisProject = id;
+                    analysisState = statePath;
+                    analysisLogs = logPath;
+                    suggestions.getItems().setAll(result.value().suggestions());
+                    analysisFindings.setText(formatAnalysisFindings(result.value().findings()));
+                }
+                status.setText(result.failure() == null ? "Analysis complete. Select a suggestion to review."
+                        : failureText(result.failure(), null) + (result.value() != null ? "\nAnalysis results were obtained, but cleanup failed." : ""));
+            })) {
+                busy(true);
+                status.setText("Analyzing latest inventory...");
+                analysisProject = null;
+                suggestions.getItems().clear();
+                analysisFindings.clear();
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void review() {
+        try {
+            AssetManager.Suggestion selected = suggestions.getSelectionModel().getSelectedItem();
+            if (selected == null) throw new IllegalArgumentException("Select a suggestion.");
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID id = UUID.fromString(projectId.getText().trim());
+            if (!id.equals(analysisProject) || !statePath.equals(analysisState) || !logPath.equals(analysisLogs)) {
+                throw new IllegalArgumentException("Project or directories changed; run analysis again before reviewing.");
+            }
+            ReviewedChange change = makeReview(selected, decision.getValue(), reviewValue.getText(), reviewReference.getText());
+            if (runner.submitValue(statePath, logPath, manager -> manager.review(id, List.of(change)), result -> {
+                busy(false);
+                if (result.value() != null) {
+                    suggestions.getItems().remove(selected);
+                }
+                status.setText(result.failure() == null ? "Review saved: " + change.decision()
+                        : failureText(result.failure(), null) + (result.value() != null
+                        ? "\nThe review call returned, but cleanup failed; it may have been saved." : "\nThe review may have been saved; verify before retrying."));
+            })) {
+                busy(true);
+                status.setText("Saving explicit review...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    static ReviewedChange makeReview(AssetManager.Suggestion suggestion, ReviewedChange.Decision decision,
+                                     String value, String reference) {
+        if (decision == null) throw new IllegalArgumentException("Choose ACCEPTED or REJECTED.");
+        String edited = value.trim();
+        if (edited.isEmpty()) throw new IllegalArgumentException("Review value is required.");
+        ReviewedChange.Kind kind;
+        Map<String, String> values;
+        switch (suggestion.kind()) {
+            case CATEGORIES -> {
+                kind = ReviewedChange.Kind.CATEGORY;
+                values = Map.of("category", edited);
+            }
+            case RELATIONSHIPS, MATERIALS -> {
+                String target = UUID.fromString(edited).toString();
+                if (suggestion.kind() == AssetManager.AnalysisKind.MATERIALS) {
+                    if (reference.isBlank()) throw new IllegalArgumentException("Original reference is required for material mapping.");
+                    kind = ReviewedChange.Kind.MATERIAL_MAPPING;
+                    values = Map.of("targetAssetId", target, "reference", reference);
+                } else {
+                    kind = ReviewedChange.Kind.RELATIONSHIP;
+                    values = Map.of("targetAssetId", target);
+                }
+            }
+            default -> throw new IllegalArgumentException("Unsupported suggestion kind: " + suggestion.kind());
+        }
+        return new ReviewedChange(UUID.randomUUID(), suggestion.assetId(), kind, decision, values, Instant.now());
+    }
+
+    static String formatAnalysisFindings(List<Finding> items) {
+        StringBuilder text = new StringBuilder();
+        for (Finding finding : items) {
+            text.append(finding.severity()).append(" [").append(finding.code()).append("] ");
+            finding.sourceRelativePath().ifPresent(path -> text.append(path).append(": "));
+            finding.assetId().ifPresent(id -> text.append("asset ").append(id).append(": "));
+            text.append(finding.message()).append('\n');
+        }
+        return text.isEmpty() ? "No analysis findings." : text.toString();
     }
 
     private void folderRow(Stage stage, int row, String label, TextField field) {
@@ -163,13 +335,14 @@ public final class AssetMigrateApplication extends Application {
                             : rescan ? manager.rescan(id, sourcePath).snapshot()
                             : manager.importAssets(sourcePath).snapshot(), this::completed);
             if (started) {
-                inputs.setDisable(true);
-                actions.setDisable(true);
-                progress.setVisible(true);
+                busy(true);
                 status.setText(load ? "Loading inventory..." : rescan ? "Rescanning project..." : "Importing project...");
                 summary.setText("No inventory loaded.");
                 inventory.getItems().clear();
                 findings.clear();
+                analysisProject = null;
+                suggestions.getItems().clear();
+                analysisFindings.clear();
             }
         } catch (IllegalArgumentException failure) {
             status.setText("Invalid input: " + failure.getMessage());
@@ -183,9 +356,7 @@ public final class AssetMigrateApplication extends Application {
     }
 
     private void completed(ImportRunner.Outcome outcome) {
-        inputs.setDisable(false);
-        actions.setDisable(false);
-        progress.setVisible(false);
+        busy(false);
         if (outcome.snapshot() != null) showSnapshot(outcome.snapshot());
         Throwable failure = outcome.failure();
         if (failure == null) {

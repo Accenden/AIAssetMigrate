@@ -12,8 +12,10 @@ replay, and live subscriptions are implemented separately, with the limitations
 described below. The OAuth foundation provides browser authorization and validated
 in-memory credentials, not yet a saved AI account connection.
 
-Analysis, plan approval, conversion, migration, report workflows and live AI are
-not implemented. Import does not claim compatibility with any game engine.
+Deterministic category, relationship and material analysis and explicit review
+storage are available as described below. AI assistance, plan approval, conversion,
+migration and report workflows are not implemented. Import does not claim
+compatibility with any game engine.
 
 ## Build and Run
 
@@ -50,12 +52,13 @@ Maven launch commands above until application packaging is implemented.
 - `inventory`: scanning, limited format inspection and revisioned inventory storage.
 - `logging`: file-backed `LogPublisher`, replay, and asynchronous subscriptions.
 - `auth`: OpenAI public-client OAuth with PKCE, loopback callbacks, and signed identity validation.
-- `cli`: picocli import and logs commands, independent of JavaFX startup.
-- `gui`: JavaFX project import and inventory display.
+- `analysis`: conservative categorization and bounded OBJ/MTL reference analysis.
+- `cli`: picocli import, analysis, review and logs commands, independent of JavaFX startup.
+- `gui`: JavaFX import, inventory, analysis and review displays.
 - `src/test`: JUnit 5 contract and CLI tests, including temporary-directory tests.
 
-The shared facade implements import, rescan and inventory loading. Later workflow
-methods explicitly reject unsupported operations. A plan data object is not
+The shared facade implements import, rescan, inventory loading, analysis and review.
+Later workflow methods explicitly reject unsupported operations. A plan data object is not
 authorization to write files; a later execution implementation must validate
 explicit approval and source fingerprints before execution.
 
@@ -105,6 +108,32 @@ a hard link to a source asset. Import and rescan therefore cannot complete there
 saved-inventory loading remains available.
 Inventory snapshots are limited to 64 MiB; per-file warnings and long paths can
 cause a large scan to reach that limit before its 100,000-entry traversal limit.
+
+## Analysis and Review
+
+Run an analysis against the latest saved inventory:
+
+```bash
+bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigrateCli \
+  -Dexec.args='analyze categories --project PROJECT-UUID --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+```
+
+The analysis kind can be `categories`, `relationships`, or `materials`. Suggestions
+are not accepted automatically. The JavaFX Analysis and Review tab can submit an
+explicit decision; the CLI can also do so, for example:
+
+```bash
+bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigrateCli \
+  -Dexec.args='review --project PROJECT-UUID --asset ASSET-UUID --kind CATEGORY --decision ACCEPTED --value category=Characters --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+```
+
+Relationship reviews use `--value targetAssetId=ASSET-UUID`; material reviews
+also require `--value reference=ORIGINAL-REFERENCE`. Decisions are saved for the
+current inventory revision and are not carried forward automatically on rescan.
+Analysis is rule-based, not AI-assisted. OBJ/MTL inspection uses bounded,
+fingerprint-checked UTF-8 content and reports unsupported, missing or ambiguous
+references; it is not a complete parser. Reviews do not modify source files or
+apply mappings. Migration plans and execution remain unimplemented.
 
 ## File Logs
 

@@ -38,6 +38,9 @@ public interface AssetManager {
     /** Saves explicit user decisions, invalidating affected plan approvals. */
     List<ReviewedChange> review(UUID projectId, List<ReviewedChange> changes);
 
+    /** Returns decisions for the current inventory, or an empty list if none are current. */
+    List<ReviewedChange> loadReviews(UUID projectId);
+
     List<Finding> checkCompatibility(UUID projectId, TargetProfile target);
 
     /** Creates a draft only; generating a plan never approves it. */
@@ -86,12 +89,16 @@ public interface AssetManager {
     }
 
     /** Suggestions are not accepted reviews and must never be applied implicitly. */
-    record Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue) {
+    record Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference) {
+        public Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue) {
+            this(id, assetId, kind, proposedValue, Optional.empty());
+        }
         public Suggestion {
             Objects.requireNonNull(id, "id");
             Objects.requireNonNull(assetId, "assetId");
             Objects.requireNonNull(kind, "kind");
             Objects.requireNonNull(proposedValue, "proposedValue");
+            Objects.requireNonNull(reference, "reference");
         }
     }
 

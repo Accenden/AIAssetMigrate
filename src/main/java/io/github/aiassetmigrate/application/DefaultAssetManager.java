@@ -1,8 +1,11 @@
 package io.github.aiassetmigrate.application;
 
 import io.github.aiassetmigrate.domain.*;
+import io.github.aiassetmigrate.analysis.CategoryAnalyzer;
+import io.github.aiassetmigrate.analysis.MaterialAnalysis;
 import io.github.aiassetmigrate.inventory.AssetScanner;
 import io.github.aiassetmigrate.inventory.FileAssetRepository;
+import io.github.aiassetmigrate.inventory.FileReviewedChangeRepository;
 import io.github.aiassetmigrate.inventory.SafeStoragePaths;
 import io.github.aiassetmigrate.logging.LogPublisher;
 
@@ -12,9 +15,12 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -307,8 +313,154 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
         if (failure != null) throw new UncheckedIOException("Cannot close project publisher", failure);
     }
-    @Override public AnalysisResult analyze(UUID id, AnalysisKind kind) { throw new UnsupportedOperationException(); }
-    @Override public List<ReviewedChange> review(UUID id, List<ReviewedChange> changes) { throw new UnsupportedOperationException(); }
+    @Override public AnalysisResult analyze(UUID id, AnalysisKind kind) {
+        Objects.requireNonNull(kind, "kind");
+        if (kind == AnalysisKind.CATEGORIES) {
+            return new CategoryAnalyzer().analyze(loadInventory(id).project().assets());
+        }
+        if (kind == AnalysisKind.RELATIONSHIPS || kind == AnalysisKind.MATERIALS) {
+            InventorySnapshot snapshot = loadInventory(id);
+            var analysis = MaterialAnalysis.analyze(snapshot, (asset, cap) -> {
+                Path file = snapshot.project().sourceRoot().resolve(asset.relativePath());
+                SafeStoragePaths.requireRegularFile(file);
+                BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (before.size() > cap) return new byte[cap + 1];
+                byte[] bytes;
+                try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                    bytes = input.readNBytes(cap + 1);
+                }
+                SafeStoragePaths.requireRegularFile(file);
+                BasicFileAttributes after = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                if (before.size() != after.size() || !before.lastModifiedTime().equals(after.lastModifiedTime())
+                        || !Objects.equals(before.fileKey(), after.fileKey())) throw new IOException("Source changed during analysis");
+                return bytes;
+            }, MaterialAnalysis.Limits.defaults());
+            Map<Path, Asset> paths = new HashMap<>();
+            Map<UUID, Asset> assets = new HashMap<>();
+            snapshot.project().assets().forEach(asset -> { paths.put(asset.relativePath(), asset); assets.put(asset.id(), asset); });
+            List<Suggestion> suggestions = new ArrayList<>();
+            List<Finding> findings = new ArrayList<>();
+            for (var file : analysis.files()) {
+                if (file.status() != MaterialAnalysis.Inspection.VERIFIED) {
+                    Asset asset = assets.get(file.assetId());
+                    findings.add(analysisFinding(asset, "INSPECTION_" + file.status(), "Reference inspection: " + file.status()));
+                }
+            }
+            for (AssetReference reference : analysis.references()) {
+                Asset owner = assets.get(reference.ownerAssetId());
+                Asset target = reference.normalizedTargetPath().map(paths::get).orElse(null);
+                if (reference.resolutionStatus() == AssetReference.ResolutionStatus.RESOLVED && target != null) {
+                    if (kind == AnalysisKind.RELATIONSHIPS
+                            || (kind == AnalysisKind.MATERIALS && reference.kind() == AssetReference.Kind.TEXTURE)) {
+                        suggestions.add(analysisSuggestion(owner.id(), kind, target.id().toString(), reference.originalText()));
+                    }
+                } else {
+                    findings.add(analysisFinding(owner, "REFERENCE_" + reference.resolutionStatus(),
+                            "Reference '" + reference.originalText() + "': " + reference.resolutionStatus()));
+                }
+            }
+            if (kind == AnalysisKind.MATERIALS) {
+                for (var mapping : analysis.mappings()) {
+                    Asset owner = assets.get(mapping.modelId());
+                    if (mapping.status() == MaterialAnalysis.MappingStatus.RESOLVED) {
+                        suggestions.add(analysisSuggestion(owner.id(), kind, mapping.materialAssetId().orElseThrow().toString(), mapping.materialName()));
+                        findings.add(analysisFinding(owner, "MATERIAL_REFERENCE", "Material '" + mapping.materialName() + "' maps to " + mapping.materialAssetId().orElseThrow()));
+                    } else {
+                        findings.add(analysisFinding(owner, "MATERIAL_" + mapping.status(), "Material '" + mapping.materialName() + "': " + mapping.status()));
+                    }
+                }
+            }
+            if (analysis.truncated()) findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(),
+                    Finding.Severity.WARNING, "ANALYSIS_LIMIT", "Reference analysis exceeded its budget"));
+            return new AnalysisResult(suggestions, findings);
+        }
+        throw new UnsupportedOperationException("Analysis not implemented: " + kind);
+    }
+
+    private static Suggestion analysisSuggestion(UUID owner, AnalysisKind kind, String target, String reference) {
+        UUID suggestionId = UUID.nameUUIDFromBytes((kind + ":" + owner + ":" + target + ":" + reference).getBytes(StandardCharsets.UTF_8));
+        return new Suggestion(suggestionId, owner, kind, target, Optional.of(reference));
+    }
+
+    private static Finding analysisFinding(Asset asset, String code, String message) {
+        return new Finding(UUID.randomUUID(), Optional.of(asset.id()), Optional.of(asset.relativePath()),
+                Finding.Severity.WARNING, code, message);
+    }
+    @Override public List<ReviewedChange> loadReviews(UUID id) {
+        InventorySnapshot inventory = loadInventory(id);
+        try {
+            return new FileReviewedChangeRepository(stateDirectory).loadLatest(id)
+                    .filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
+                    .map(FileReviewedChangeRepository.ReviewSet::changes).orElse(List.of());
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot load reviews for project " + id, e);
+        }
+    }
+
+    @Override public List<ReviewedChange> review(UUID id, List<ReviewedChange> changes) {
+        InventorySnapshot inventory = loadInventory(id);
+        List<ReviewedChange> incoming = List.copyOf(changes);
+        if (incoming.isEmpty()) throw new IllegalArgumentException("At least one decision is required");
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        for (ReviewedChange change : incoming) {
+            if (!assets.containsKey(change.assetId())) throw new IllegalArgumentException("Unknown reviewed asset");
+            Map<String, String> values = change.values();
+            switch (change.kind()) {
+                case CATEGORY -> requireValue(values, "category");
+                case RELATIONSHIP, MATERIAL_MAPPING -> {
+                    String target = requireValue(values, "targetAssetId");
+                    UUID targetId;
+                    try { targetId = UUID.fromString(target); }
+                    catch (IllegalArgumentException e) { throw new IllegalArgumentException("Invalid targetAssetId", e); }
+                    if (!assets.containsKey(targetId) || targetId.equals(change.assetId())) {
+                        throw new IllegalArgumentException("Target must be another asset in the inventory");
+                    }
+                    if (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING) requireValue(values, "reference");
+                }
+                case EXCLUSION -> requireValue(values, "reason");
+                default -> throw new UnsupportedOperationException("Review not implemented: " + change.kind());
+            }
+        }
+        try {
+            validatePaths(inventory.project().sourceRoot(), id);
+            FileReviewedChangeRepository reviews = new FileReviewedChangeRepository(stateDirectory);
+            var previous = reviews.loadLatest(id);
+            List<ReviewedChange> merged = new ArrayList<>();
+            previous.filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
+                    .ifPresent(set -> merged.addAll(set.changes()));
+            for (ReviewedChange change : incoming) {
+                merged.removeIf(old -> old.assetId().equals(change.assetId()) && old.kind() == change.kind()
+                        && (change.kind() == ReviewedChange.Kind.CATEGORY || change.kind() == ReviewedChange.Kind.EXCLUSION
+                            || (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING
+                                && Objects.equals(old.values().get("reference"), change.values().get("reference")))
+                            || (change.kind() == ReviewedChange.Kind.RELATIONSHIP
+                                && Objects.equals(old.values().get("targetAssetId"), change.values().get("targetAssetId")))));
+                merged.add(change);
+            }
+            long expected = previous.map(FileReviewedChangeRepository.ReviewSet::revision).orElse(0L);
+            try (Publisher publisher = acquireWriter(id)) {
+                publisher.publish(LogEvent.Level.INFO, "Saving reviewed changes");
+                var saved = reviews.save(inventory, expected, merged);
+                try {
+                    publisher.publish(LogEvent.Level.INFO, "Review revision " + saved.revision() + " committed");
+                } catch (IOException e) {
+                    throw new IOException("Review revision " + saved.revision() + " was committed, but completion logging failed", e);
+                }
+                return saved.changes();
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot save reviews for project " + id + ": " + e.getMessage(), e);
+        }
+    }
+
+    private static String requireValue(Map<String, String> values, String key) {
+        String value = values.get(key);
+        if (value == null || value.isBlank() || value.length() > 4096) {
+            throw new IllegalArgumentException("A nonblank " + key + " is required (maximum 4096 characters)");
+        }
+        return value;
+    }
     @Override public List<Finding> checkCompatibility(UUID id, TargetProfile target) { throw new UnsupportedOperationException(); }
     @Override public MigrationPlan createPlan(UUID id, TargetProfile target, Path output) { throw new UnsupportedOperationException(); }
     @Override public MigrationPlan approve(UUID id, int version) { throw new UnsupportedOperationException(); }

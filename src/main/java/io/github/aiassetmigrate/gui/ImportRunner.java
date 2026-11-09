@@ -24,6 +24,12 @@ final class ImportRunner implements AutoCloseable {
 
     record Managed(AssetManager manager, AutoCloseable resource) { }
     record Outcome(InventorySnapshot snapshot, Throwable failure) { }
+    record Result<T>(T value, Throwable failure) { }
+
+    @FunctionalInterface
+    interface Task<T> {
+        T run(AssetManager manager) throws Exception;
+    }
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "import-project-worker");
@@ -48,20 +54,25 @@ final class ImportRunner implements AutoCloseable {
     }
 
     synchronized boolean submit(Path state, Path logs, Operation operation, Consumer<Outcome> completion) {
+        return submitValue(state, logs, operation::run,
+                result -> completion.accept(new Outcome(result.value(), result.failure())));
+    }
+
+    synchronized <T> boolean submitValue(Path state, Path logs, Task<T> operation, Consumer<Result<T>> completion) {
         if (busy || closed) return false;
         busy = true;
         worker.execute(() -> {
-            InventorySnapshot snapshot = null;
+            T value = null;
             Throwable failure = null;
             try {
                 Managed managed = factory.open(state, logs);
                 try (AutoCloseable ignored = managed.resource()) {
-                    snapshot = operation.run(managed.manager());
+                    value = operation.run(managed.manager());
                 }
             } catch (Exception error) {
                 failure = error;
             }
-            Outcome outcome = new Outcome(snapshot, failure);
+            Result<T> outcome = new Result<>(value, failure);
             dispatcher.execute(() -> {
                 synchronized (ImportRunner.this) {
                     if (closed) return;

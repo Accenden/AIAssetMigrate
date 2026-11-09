@@ -1,15 +1,18 @@
 package io.github.aiassetmigrate.gui;
 
 import io.github.aiassetmigrate.application.ImportException;
+import io.github.aiassetmigrate.application.AssetManager;
 import io.github.aiassetmigrate.domain.Finding;
 import io.github.aiassetmigrate.domain.InventorySnapshot;
 import io.github.aiassetmigrate.domain.PathOutcome;
 import io.github.aiassetmigrate.domain.Project;
+import io.github.aiassetmigrate.domain.ReviewedChange;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
@@ -141,6 +144,59 @@ class ImportRunnerTest {
         String details = AssetMigrateApplication.formatFindings(snapshot());
         assertTrue(details.contains("WARNING [UNSUPPORTED] file.xyz: Not supported"));
         assertTrue(details.contains("Coverage UNVISITED DIRECTORY: missing"));
+    }
+
+    @Test
+    void analysisAndReviewTasksRunOffCallerThreadAndRetainResultsOnCloseFailure() throws Exception {
+        BlockingQueue<Runnable> ui = new LinkedBlockingQueue<>();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        AtomicReference<ImportRunner.Result<List<String>>> result = new AtomicReference<>();
+        try (ImportRunner runner = new ImportRunner(ui::add, (state, logs) ->
+                new ImportRunner.Managed(null, () -> { throw new IllegalStateException("close failed"); }))) {
+            assertTrue(runner.submitValue(STATE, LOGS, manager -> {
+                worker.set(Thread.currentThread());
+                return List.of("saved");
+            }, result::set));
+            Runnable completion = ui.poll(5, TimeUnit.SECONDS);
+            assertNotNull(completion);
+            completion.run();
+            assertNotSame(Thread.currentThread(), worker.get());
+            assertEquals(List.of("saved"), result.get().value());
+            assertEquals("close failed", result.get().failure().getMessage());
+        }
+    }
+
+    @Test
+    void reviewRequiresExplicitDecisionAndEncodesEditedValues() {
+        UUID asset = UUID.randomUUID();
+        UUID target = UUID.randomUUID();
+        var category = new AssetManager.Suggestion(UUID.randomUUID(), asset, AssetManager.AnalysisKind.CATEGORIES, "old");
+        assertThrows(IllegalArgumentException.class, () -> AssetMigrateApplication.makeReview(category, null, "new", ""));
+        ReviewedChange accepted = AssetMigrateApplication.makeReview(category, ReviewedChange.Decision.ACCEPTED, " new ", "");
+        assertEquals(asset, accepted.assetId());
+        assertEquals(ReviewedChange.Kind.CATEGORY, accepted.kind());
+        assertEquals(Map.of("category", "new"), accepted.values());
+        var relationship = new AssetManager.Suggestion(UUID.randomUUID(), asset, AssetManager.AnalysisKind.RELATIONSHIPS, "unused");
+        ReviewedChange rejected = AssetMigrateApplication.makeReview(relationship, ReviewedChange.Decision.REJECTED, target.toString(), "");
+        assertEquals(ReviewedChange.Decision.REJECTED, rejected.decision());
+        assertEquals(Map.of("targetAssetId", target.toString()), rejected.values());
+        assertThrows(IllegalArgumentException.class, () -> AssetMigrateApplication.makeReview(relationship, ReviewedChange.Decision.ACCEPTED, "bad UUID", ""));
+        var material = new AssetManager.Suggestion(UUID.randomUUID(), asset, AssetManager.AnalysisKind.MATERIALS, "unused");
+        assertThrows(IllegalArgumentException.class, () -> AssetMigrateApplication.makeReview(material, ReviewedChange.Decision.ACCEPTED, target.toString(), " "));
+        assertEquals(Map.of("targetAssetId", target.toString(), "reference", "textures/a.png"),
+                AssetMigrateApplication.makeReview(material, ReviewedChange.Decision.ACCEPTED, target.toString(), "textures/a.png").values());
+    }
+
+    @Test
+    void formatsAnalysisFindingsWithAssetContext() {
+        UUID asset = UUID.randomUUID();
+        Finding finding = new Finding(UUID.randomUUID(), Optional.of(asset), Optional.of(Path.of("a.obj")),
+                Finding.Severity.WARNING, "MISSING", "Missing reference");
+        String text = AssetMigrateApplication.formatAnalysisFindings(List.of(finding));
+        assertTrue(text.contains("WARNING [MISSING] a.obj"));
+        assertTrue(text.contains(asset.toString()));
+        assertTrue(text.contains("Missing reference"));
+        assertEquals("No analysis findings.", AssetMigrateApplication.formatAnalysisFindings(List.of()));
     }
 
     private static InventorySnapshot snapshot() {
