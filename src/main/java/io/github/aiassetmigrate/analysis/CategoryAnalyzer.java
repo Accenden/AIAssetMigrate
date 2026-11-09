@@ -27,7 +27,7 @@ public final class CategoryAnalyzer {
      * or absent category signals yield Uncategorized, regardless of file type.
      * File type and metadata remain on the input assets and are never modified.
      */
-    public AnalysisResult analyze(List<Asset> assets) {
+    public AnalysisResult analyze(List<Asset> assets, long inventoryRevision) {
         List<Suggestion> suggestions = List.copyOf(assets).stream().map(asset -> {
             String path = asset.relativePath().toString();
             int extension = path.lastIndexOf('.');
@@ -49,6 +49,6 @@ public final class CategoryAnalyzer {
                     .getBytes(StandardCharsets.UTF_8));
             return new Suggestion(id, asset.id(), AnalysisKind.CATEGORIES, category);
         }).toList();
-        return new AnalysisResult(suggestions, List.of());
+        return new AnalysisResult(inventoryRevision, suggestions, List.of());
     }
 }

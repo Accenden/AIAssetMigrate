@@ -19,7 +19,7 @@ class CategoryAnalyzerTest {
         Asset character = asset("Characters/heroKnight.fbx", Asset.Type.MODEL);
         Asset weapon = asset("props/SWORD_01.png", Asset.Type.TEXTURE);
         Asset texture = asset("textures/stone.png", Asset.Type.TEXTURE);
-        var result = analyzer.analyze(List.of(character, weapon, texture));
+        var result = analyzer.analyze(List.of(character, weapon, texture), 1);
 
         assertEquals(List.of("Characters", "Weapons", "Textures"), result.suggestions().stream()
                 .map(s -> s.proposedValue()).toList());
@@ -38,17 +38,17 @@ class CategoryAnalyzerTest {
                 asset("misc/swordfish.fbx", Asset.Type.MODEL),
                 asset("misc/object.weapon", Asset.Type.OTHER));
         assertEquals(List.of("Uncategorized", "Uncategorized", "Uncategorized", "Uncategorized"),
-                analyzer.analyze(assets).suggestions().stream().map(s -> s.proposedValue()).toList());
+                analyzer.analyze(assets, 1).suggestions().stream().map(s -> s.proposedValue()).toList());
     }
 
     @Test
     void resultsAreRepeatableAndImmutable() {
         var assets = List.of(asset("weapons/rifle.fbx", Asset.Type.MODEL));
-        var result = analyzer.analyze(assets);
-        assertEquals(result, analyzer.analyze(assets));
+        var result = analyzer.analyze(assets, 1);
+        assertEquals(result, analyzer.analyze(assets, 1));
         assertThrows(UnsupportedOperationException.class, () -> result.suggestions().clear());
-        assertTrue(analyzer.analyze(List.of()).suggestions().isEmpty());
-        assertThrows(NullPointerException.class, () -> analyzer.analyze(null));
+        assertTrue(analyzer.analyze(List.of(), 1).suggestions().isEmpty());
+        assertThrows(NullPointerException.class, () -> analyzer.analyze(null, 1));
     }
 
     private static Asset asset(String path, Asset.Type type) {

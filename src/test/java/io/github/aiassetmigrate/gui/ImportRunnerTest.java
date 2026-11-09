@@ -9,6 +9,7 @@ import io.github.aiassetmigrate.domain.Project;
 import io.github.aiassetmigrate.domain.ReviewedChange;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
@@ -197,6 +198,27 @@ class ImportRunnerTest {
         assertTrue(text.contains(asset.toString()));
         assertTrue(text.contains("Missing reference"));
         assertEquals("No analysis findings.", AssetMigrateApplication.formatAnalysisFindings(List.of()));
+    }
+
+    @Test
+    void analysisContextDisplaysAndSubmitsTheReturnedRevision() {
+        UUID project = UUID.randomUUID();
+        var suggestion = new AssetManager.Suggestion(UUID.randomUUID(), UUID.randomUUID(),
+                AssetManager.AnalysisKind.CATEGORIES, "Characters");
+        var analysis = new AssetManager.AnalysisResult(7L, List.of(suggestion), List.of());
+        var context = new AssetMigrateApplication.AnalysisContext(project, STATE, LOGS, analysis);
+        var change = AssetMigrateApplication.makeReview(suggestion, ReviewedChange.Decision.ACCEPTED, "Characters", "");
+        AtomicReference<Object[]> arguments = new AtomicReference<>();
+        AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                new Class<?>[]{AssetManager.class}, (proxy, method, args) -> {
+                    assertEquals("review", method.getName());
+                    arguments.set(args);
+                    return List.of(change);
+                });
+
+        assertEquals("Analysis inventory revision: 7", context.revisionText());
+        assertEquals(List.of(change), context.review(manager, change));
+        assertArrayEquals(new Object[]{project, 7L, List.of(change)}, arguments.get());
     }
 
     private static InventorySnapshot snapshot() {

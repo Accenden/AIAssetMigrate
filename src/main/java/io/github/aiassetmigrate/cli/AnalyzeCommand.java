@@ -42,6 +42,7 @@ public final class AnalyzeCommand implements Callable<Integer> {
                 result = manager.analyze(projectId, AssetManager.AnalysisKind.valueOf(kind.name().toUpperCase(java.util.Locale.ROOT)));
             }
             var out = spec.commandLine().getOut();
+            out.println("Inventory revision: " + result.inventoryRevision());
             out.println("Suggestions (" + result.suggestions().size() + "):");
             for (var suggestion : result.suggestions()) {
                 out.printf("  ID: %s Asset ID: %s Kind: %s Value: %s%n", suggestion.id(), suggestion.assetId(),

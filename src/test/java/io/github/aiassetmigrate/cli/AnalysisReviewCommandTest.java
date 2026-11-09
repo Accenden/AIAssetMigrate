@@ -31,7 +31,7 @@ class AnalysisReviewCommandTest {
                 assertEquals("analyze", method);
                 assertEquals(project, args[0]);
                 assertEquals(AssetManager.AnalysisKind.valueOf(kind.toUpperCase(java.util.Locale.ROOT)), args[1]);
-                return new AssetManager.AnalysisResult(List.of(new AssetManager.Suggestion(suggestion, asset,
+                return new AssetManager.AnalysisResult(42L, List.of(new AssetManager.Suggestion(suggestion, asset,
                         (AssetManager.AnalysisKind) args[1], "value\nunsafe")),
                         List.of(new Finding(UUID.randomUUID(), Optional.of(asset), Optional.of(Path.of("model.obj")),
                                 Finding.Severity.WARNING, "WARN", "inspect")));
@@ -45,6 +45,7 @@ class AnalysisReviewCommandTest {
             assertEquals(0, cli.execute(kind, "--project", project.toString(), "--state-directory", "state",
                     "--log-directory", "logs"));
             assertTrue(closed.get());
+            assertTrue(out.toString().contains("Inventory revision: 42"));
             assertTrue(out.toString().contains(suggestion.toString()));
             assertTrue(out.toString().contains("value\\u000aunsafe"));
             assertTrue(out.toString().contains("WARNING WARN"));
@@ -62,7 +63,8 @@ class AnalysisReviewCommandTest {
             if (method.equals("close")) { closed.set(true); return null; }
             assertEquals("review", method);
             assertEquals(project, args[0]);
-            @SuppressWarnings("unchecked") List<ReviewedChange> changes = (List<ReviewedChange>) args[1];
+            assertEquals(42L, args[1]);
+            @SuppressWarnings("unchecked") List<ReviewedChange> changes = (List<ReviewedChange>) args[2];
             assertEquals(1, changes.size());
             ReviewedChange change = changes.getFirst();
             assertEquals(asset, change.assetId());
@@ -76,11 +78,26 @@ class AnalysisReviewCommandTest {
         StringWriter out = new StringWriter();
         CommandLine cli = new CommandLine(new ReviewCommand((state, logs) -> manager)).setOut(new PrintWriter(out));
         assertEquals(0, cli.execute("--project", project.toString(), "--asset", asset.toString(),
-                "--kind", "MATERIAL_MAPPING", "--decision", "ACCEPTED", "--value", "targetAssetId=" + target,
+                "--inventory-revision", "42", "--kind", "MATERIAL_MAPPING", "--decision", "ACCEPTED", "--value", "targetAssetId=" + target,
                 "--value", "reference=textures/a=b.png", "--state-directory", "state", "--log-directory", "logs"));
         assertTrue(closed.get());
         assertTrue(out.toString().contains("Decision: ACCEPTED"));
         assertTrue(out.toString().contains("reference=textures/a=b.png"));
+    }
+
+    @Test
+    void reviewRequiresPositiveInventoryRevisionBeforeManagerCreation() {
+        for (String revision : List.of("0", "-1", "not-a-number", "9223372036854775808")) {
+            var review = new CommandLine(new ReviewCommand((state, logs) -> { throw new AssertionError(); }))
+                    .setErr(new PrintWriter(new StringWriter()));
+            assertEquals(2, review.execute("--project", UUID.randomUUID().toString(), "--asset", UUID.randomUUID().toString(),
+                    "--kind", "CATEGORY", "--decision", "ACCEPTED", "--inventory-revision", revision,
+                    "--state-directory", "state", "--log-directory", "logs"));
+        }
+        var review = new CommandLine(new ReviewCommand((state, logs) -> { throw new AssertionError(); }))
+                .setErr(new PrintWriter(new StringWriter()));
+        assertEquals(2, review.execute("--project", UUID.randomUUID().toString(), "--asset", UUID.randomUUID().toString(),
+                "--kind", "CATEGORY", "--decision", "ACCEPTED", "--state-directory", "state", "--log-directory", "logs"));
     }
 
     @Test

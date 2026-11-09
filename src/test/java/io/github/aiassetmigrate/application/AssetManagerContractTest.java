@@ -14,10 +14,11 @@ class AssetManagerContractTest {
         var suggestions = new ArrayList<AssetManager.Suggestion>();
         suggestions.add(new AssetManager.Suggestion(UUID.randomUUID(), UUID.randomUUID(),
                 AssetManager.AnalysisKind.CATEGORIES, "Characters"));
-        var result = new AssetManager.AnalysisResult(suggestions, List.of());
+        var result = new AssetManager.AnalysisResult(1, suggestions, List.of());
         suggestions.clear();
         assertEquals(1, result.suggestions().size());
         assertThrows(UnsupportedOperationException.class, () -> result.suggestions().clear());
+        assertThrows(IllegalArgumentException.class, () -> new AssetManager.AnalysisResult(0, List.of(), List.of()));
     }
 
     @Test

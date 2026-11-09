@@ -56,13 +56,22 @@ public final class AssetMigrateApplication extends Application {
     private final ProgressIndicator progress = new ProgressIndicator();
     private final VBox analysisPane = new VBox(8);
     private final TableView<AssetManager.Suggestion> suggestions = new TableView<>();
+    private final Label analysisRevision = new Label("No analysis loaded.");
     private final TextArea analysisFindings = new TextArea();
     private final TextField reviewValue = new TextField();
     private final TextField reviewReference = new TextField();
     private final ComboBox<ReviewedChange.Decision> decision = new ComboBox<>();
-    private UUID analysisProject;
-    private Path analysisState;
-    private Path analysisLogs;
+    private AnalysisContext analysisContext;
+
+    record AnalysisContext(UUID project, Path state, Path logs, AssetManager.AnalysisResult result) {
+        String revisionText() {
+            return "Analysis inventory revision: " + result.inventoryRevision();
+        }
+
+        List<ReviewedChange> review(AssetManager manager, ReviewedChange change) {
+            return manager.review(project, result.inventoryRevision(), List.of(change));
+        }
+    }
 
     @Override
     public void start(Stage stage) {
@@ -178,7 +187,7 @@ public final class AssetMigrateApplication extends Application {
         Button submitReview = new Button("Save Explicit Review");
         submitReview.setOnAction(event -> review());
         HBox reviewActions = new HBox(8, decision, submitReview);
-        analysisPane.getChildren().addAll(explanation, analyzeActions, new Label("Suggestions"), suggestions,
+        analysisPane.getChildren().addAll(explanation, analyzeActions, analysisRevision, new Label("Suggestions"), suggestions,
                 new Label("Analysis findings"), analysisFindings, new Label("Selected suggestion review"),
                 reviewValue, reviewReference, reviewActions);
         VBox.setVgrow(suggestions, Priority.ALWAYS);
@@ -206,9 +215,8 @@ public final class AssetMigrateApplication extends Application {
             if (runner.submitValue(statePath, logPath, manager -> manager.analyze(id, kind), result -> {
                 busy(false);
                 if (result.value() != null) {
-                    analysisProject = id;
-                    analysisState = statePath;
-                    analysisLogs = logPath;
+                    analysisContext = new AnalysisContext(id, statePath, logPath, result.value());
+                    analysisRevision.setText(analysisContext.revisionText());
                     suggestions.getItems().setAll(result.value().suggestions());
                     analysisFindings.setText(formatAnalysisFindings(result.value().findings()));
                 }
@@ -217,9 +225,7 @@ public final class AssetMigrateApplication extends Application {
             })) {
                 busy(true);
                 status.setText("Analyzing latest inventory...");
-                analysisProject = null;
-                suggestions.getItems().clear();
-                analysisFindings.clear();
+                clearAnalysis();
             }
         } catch (IllegalArgumentException failure) {
             status.setText("Invalid input: " + failure.getMessage());
@@ -233,11 +239,12 @@ public final class AssetMigrateApplication extends Application {
             Path statePath = requiredPath(state, "State directory");
             Path logPath = requiredPath(logs, "Log directory");
             UUID id = UUID.fromString(projectId.getText().trim());
-            if (!id.equals(analysisProject) || !statePath.equals(analysisState) || !logPath.equals(analysisLogs)) {
+            AnalysisContext context = analysisContext;
+            if (context == null || !id.equals(context.project()) || !statePath.equals(context.state()) || !logPath.equals(context.logs())) {
                 throw new IllegalArgumentException("Project or directories changed; run analysis again before reviewing.");
             }
             ReviewedChange change = makeReview(selected, decision.getValue(), reviewValue.getText(), reviewReference.getText());
-            if (runner.submitValue(statePath, logPath, manager -> manager.review(id, List.of(change)), result -> {
+            if (runner.submitValue(statePath, logPath, manager -> context.review(manager, change), result -> {
                 busy(false);
                 if (result.value() != null) {
                     suggestions.getItems().remove(selected);
@@ -252,6 +259,13 @@ public final class AssetMigrateApplication extends Application {
         } catch (IllegalArgumentException failure) {
             status.setText("Invalid input: " + failure.getMessage());
         }
+    }
+
+    private void clearAnalysis() {
+        analysisContext = null;
+        analysisRevision.setText("No analysis loaded.");
+        suggestions.getItems().clear();
+        analysisFindings.clear();
     }
 
     static ReviewedChange makeReview(AssetManager.Suggestion suggestion, ReviewedChange.Decision decision,
@@ -340,9 +354,7 @@ public final class AssetMigrateApplication extends Application {
                 summary.setText("No inventory loaded.");
                 inventory.getItems().clear();
                 findings.clear();
-                analysisProject = null;
-                suggestions.getItems().clear();
-                analysisFindings.clear();
+                clearAnalysis();
             }
         } catch (IllegalArgumentException failure) {
             status.setText("Invalid input: " + failure.getMessage());

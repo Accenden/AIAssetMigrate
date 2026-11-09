@@ -35,8 +35,8 @@ public interface AssetManager {
 
     AnalysisResult analyze(UUID projectId, AnalysisKind kind);
 
-    /** Saves explicit user decisions, invalidating affected plan approvals. */
-    List<ReviewedChange> review(UUID projectId, List<ReviewedChange> changes);
+    /** Saves explicit decisions only for the inventory revision the user reviewed. */
+    List<ReviewedChange> review(UUID projectId, long expectedInventoryRevision, List<ReviewedChange> changes);
 
     /** Returns decisions for the current inventory, or an empty list if none are current. */
     List<ReviewedChange> loadReviews(UUID projectId);
@@ -102,8 +102,9 @@ public interface AssetManager {
         }
     }
 
-    record AnalysisResult(List<Suggestion> suggestions, List<Finding> findings) {
+    record AnalysisResult(long inventoryRevision, List<Suggestion> suggestions, List<Finding> findings) {
         public AnalysisResult {
+            if (inventoryRevision < 1) throw new IllegalArgumentException("Inventory revision must be positive");
             suggestions = List.copyOf(suggestions);
             findings = List.copyOf(findings);
         }

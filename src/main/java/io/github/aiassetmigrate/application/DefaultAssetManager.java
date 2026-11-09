@@ -316,7 +316,8 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     @Override public AnalysisResult analyze(UUID id, AnalysisKind kind) {
         Objects.requireNonNull(kind, "kind");
         if (kind == AnalysisKind.CATEGORIES) {
-            return new CategoryAnalyzer().analyze(loadInventory(id).project().assets());
+            InventorySnapshot snapshot = loadInventory(id);
+            return new CategoryAnalyzer().analyze(snapshot.project().assets(), snapshot.project().inventoryRevision());
         }
         if (kind == AnalysisKind.RELATIONSHIPS || kind == AnalysisKind.MATERIALS) {
             InventorySnapshot snapshot = loadInventory(id);
@@ -372,7 +373,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             }
             if (analysis.truncated()) findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(),
                     Finding.Severity.WARNING, "ANALYSIS_LIMIT", "Reference analysis exceeded its budget"));
-            return new AnalysisResult(suggestions, findings);
+            return new AnalysisResult(snapshot.project().inventoryRevision(), suggestions, findings);
         }
         throw new UnsupportedOperationException("Analysis not implemented: " + kind);
     }
@@ -397,8 +398,13 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
     }
 
-    @Override public List<ReviewedChange> review(UUID id, List<ReviewedChange> changes) {
+    @Override public List<ReviewedChange> review(UUID id, long expectedInventoryRevision, List<ReviewedChange> changes) {
+        if (expectedInventoryRevision < 1) throw new IllegalArgumentException("Inventory revision must be positive");
         InventorySnapshot inventory = loadInventory(id);
+        if (inventory.project().inventoryRevision() != expectedInventoryRevision) {
+            throw new IllegalStateException("Inventory revision changed: reviewed " + expectedInventoryRevision
+                    + ", current " + inventory.project().inventoryRevision() + "; analyze again");
+        }
         List<ReviewedChange> incoming = List.copyOf(changes);
         if (incoming.isEmpty()) throw new IllegalArgumentException("At least one decision is required");
         Map<UUID, Asset> assets = new HashMap<>();

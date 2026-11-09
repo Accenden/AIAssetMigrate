@@ -3,6 +3,8 @@ package io.github.aiassetmigrate.cli;
 import io.github.aiassetmigrate.application.AssetManager;
 import io.github.aiassetmigrate.application.DefaultAssetManager;
 import io.github.aiassetmigrate.domain.ReviewedChange;
+import picocli.CommandLine.ITypeConverter;
+import picocli.CommandLine.TypeConversionException;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Option;
@@ -22,6 +24,9 @@ import java.util.concurrent.Callable;
 public final class ReviewCommand implements Callable<Integer> {
     @Option(names = "--project", required = true, paramLabel = "UUID", description = "Project UUID.")
     private UUID projectId;
+    @Option(names = "--inventory-revision", required = true, paramLabel = "REVISION",
+            converter = PositiveRevision.class, description = "Positive inventory revision returned by analysis.")
+    private long inventoryRevision;
     @Option(names = "--asset", required = true, paramLabel = "UUID", description = "Asset UUID.")
     private UUID assetId;
     @Option(names = "--kind", required = true, description = "Change kind: ${COMPLETION-CANDIDATES}.")
@@ -44,6 +49,18 @@ public final class ReviewCommand implements Callable<Integer> {
     public ReviewCommand() { this(DefaultAssetManager::new); }
     ReviewCommand(ImportCommand.ManagerFactory managerFactory) { this.managerFactory = managerFactory; }
 
+    public static final class PositiveRevision implements ITypeConverter<Long> {
+        @Override public Long convert(String value) {
+            try {
+                long revision = Long.parseLong(value);
+                if (revision > 0) return revision;
+            } catch (NumberFormatException ignored) {
+                // Report all invalid revisions consistently.
+            }
+            throw new TypeConversionException("Inventory revision must be a positive integer: " + value);
+        }
+    }
+
     @Override public Integer call() {
         boolean submitted = false;
         try {
@@ -53,7 +70,7 @@ public final class ReviewCommand implements Callable<Integer> {
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();
             }) {
-                saved = manager.review(projectId, List.of(change));
+                saved = manager.review(projectId, inventoryRevision, List.of(change));
                 submitted = true;
             }
             var out = spec.commandLine().getOut();

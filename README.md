@@ -124,12 +124,14 @@ explicit decision; the CLI can also do so, for example:
 
 ```bash
 bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigrateCli \
-  -Dexec.args='review --project PROJECT-UUID --asset ASSET-UUID --kind CATEGORY --decision ACCEPTED --value category=Characters --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+  -Dexec.args='review --project PROJECT-UUID --inventory-revision 1 --asset ASSET-UUID --kind CATEGORY --decision ACCEPTED --value category=Characters --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
 ```
 
 Relationship reviews use `--value targetAssetId=ASSET-UUID`; material reviews
 also require `--value reference=ORIGINAL-REFERENCE`. Decisions are saved for the
 current inventory revision and are not carried forward automatically on rescan.
+Use the inventory revision printed by `analyze`; a review of an older revision
+is rejected if the project has been rescanned, so run analysis again first.
 Analysis is rule-based, not AI-assisted. OBJ/MTL inspection uses bounded,
 fingerprint-checked UTF-8 content and reports unsupported, missing or ambiguous
 references; it is not a complete parser. Reviews do not modify source files or
