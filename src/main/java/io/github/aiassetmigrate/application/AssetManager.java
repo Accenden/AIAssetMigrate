@@ -1,6 +1,7 @@
 package io.github.aiassetmigrate.application;
 
 import io.github.aiassetmigrate.domain.*;
+import io.github.aiassetmigrate.analysis.OrganizationPreview;
 
 import java.nio.file.Path;
 import java.util.List;
@@ -40,6 +41,9 @@ public interface AssetManager {
 
     /** Returns decisions for the current inventory, or an empty list if none are current. */
     List<ReviewedChange> loadReviews(UUID projectId);
+
+    /** Read-only lexical output preview for an exact inventory revision, not approval to write. */
+    OrganizationPreview.Result previewOrganization(UUID projectId, long expectedInventoryRevision);
 
     List<Finding> checkCompatibility(UUID projectId, TargetProfile target);
 

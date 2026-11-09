@@ -35,8 +35,9 @@ public final class ReviewCommand implements Callable<Integer> {
     private ReviewedChange.Decision decision;
     @Option(names = "--value", paramLabel = "KEY=VALUE", description = {
             "Structured value; repeat for multiple entries.",
-            "CATEGORY: category; RELATIONSHIP: targetAssetId;",
-            "MATERIAL_MAPPING: targetAssetId and reference; EXCLUSION: reason."})
+            "CATEGORY: category; RELATIONSHIP: targetAssetId and optional reference;",
+            "MATERIAL_MAPPING: targetAssetId and reference; EXCLUSION: reason;",
+            "NAME: name=FILE; FOLDER: folder=RELATIVE (empty for root)."})
     private Map<String, String> values = new LinkedHashMap<>();
     @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;
@@ -73,16 +74,7 @@ public final class ReviewCommand implements Callable<Integer> {
                 saved = manager.review(projectId, inventoryRevision, List.of(change));
                 submitted = true;
             }
-            var out = spec.commandLine().getOut();
-            out.println("Reviewed changes (" + saved.size() + "):");
-            for (var item : saved) {
-                out.printf("  ID: %s Asset ID: %s Kind: %s Decision: %s Reviewed at: %s%n",
-                        item.id(), item.assetId(), item.kind(), item.decision(), item.reviewedAt());
-                new TreeMap<>(item.values()).forEach((key, value) ->
-                        out.printf("    %s=%s%n", ImportCommand.safe(key), ImportCommand.safe(value)));
-            }
-            out.flush();
-            if (out.checkError()) throw new java.io.IOException("Could not write review output");
+            printReviews(spec.commandLine().getOut(), saved);
             return 0;
         } catch (Exception e) {
             var err = spec.commandLine().getErr();
@@ -90,5 +82,17 @@ public final class ReviewCommand implements Callable<Integer> {
             if (submitted) err.println("The review was submitted and may have been saved.");
             return 1;
         }
+    }
+
+    static void printReviews(java.io.PrintWriter out, List<ReviewedChange> reviews) throws java.io.IOException {
+        out.println("Reviewed changes (" + reviews.size() + "):");
+        for (var item : reviews) {
+            out.printf("  ID: %s Asset ID: %s Kind: %s Decision: %s Reviewed at: %s%n",
+                    item.id(), item.assetId(), item.kind(), item.decision(), item.reviewedAt());
+            new TreeMap<>(item.values()).forEach((key, value) ->
+                    out.printf("    %s=%s%n", ImportCommand.safe(key), ImportCommand.safe(value)));
+        }
+        out.flush();
+        if (out.checkError()) throw new java.io.IOException("Could not write review output");
     }
 }

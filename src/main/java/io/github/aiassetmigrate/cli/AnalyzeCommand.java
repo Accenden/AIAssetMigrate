@@ -15,7 +15,7 @@ import java.util.concurrent.Callable;
 @Command(name = "analyze", mixinStandardHelpOptions = true,
         description = "Inspect suggestions and findings without accepting changes.")
 public final class AnalyzeCommand implements Callable<Integer> {
-    enum Kind { categories, relationships, materials }
+    enum Kind { categories, relationships, materials, names, folders }
 
     @Parameters(index = "0", paramLabel = "KIND", description = "Analysis kind: ${COMPLETION-CANDIDATES}.")
     private Kind kind;

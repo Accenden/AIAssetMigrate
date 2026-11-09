@@ -118,7 +118,7 @@ bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigr
   -Dexec.args='analyze categories --project PROJECT-UUID --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
 ```
 
-The analysis kind can be `categories`, `relationships`, or `materials`. Suggestions
+The analysis kind can be `categories`, `relationships`, `materials`, `names`, or `folders`. Suggestions
 are not accepted automatically. The JavaFX Analysis and Review tab can submit an
 explicit decision; the CLI can also do so, for example:
 
@@ -127,7 +127,10 @@ bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigr
   -Dexec.args='review --project PROJECT-UUID --inventory-revision 1 --asset ASSET-UUID --kind CATEGORY --decision ACCEPTED --value category=Characters --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
 ```
 
-Relationship reviews use `--value targetAssetId=ASSET-UUID`; material reviews
+Relationship reviews use `--value targetAssetId=ASSET-UUID` and can provide
+`--value reference=ORIGINAL-REFERENCE` so a later correction to that reference
+replaces the previous target. Legacy relationship reviews without a reference
+remain separate decisions and must be rejected explicitly if no longer wanted. Material reviews
 also require `--value reference=ORIGINAL-REFERENCE`. Decisions are saved for the
 current inventory revision and are not carried forward automatically on rescan.
 Use the inventory revision printed by `analyze`; a review of an older revision
@@ -135,7 +138,27 @@ is rejected if the project has been rescanned, so run analysis again first.
 Analysis is rule-based, not AI-assisted. OBJ/MTL inspection uses bounded,
 fingerprint-checked UTF-8 content and reports unsupported, missing or ambiguous
 references; it is not a complete parser. Reviews do not modify source files or
-apply mappings. Migration plans and execution remain unimplemented.
+apply mappings. Manually entered mappings are user assertions, not proof that a
+reference exists in the source. Use `reviews --project PROJECT-UUID` with the
+state and log directory options to list saved decisions, or use **Load Saved
+Reviews** in the GUI.
+
+An isolated SIWC inference client and bounded HTTPS transport are included as
+integration groundwork. They are not connected to the CLI, GUI or analysis
+facade, and no live provider request is made by the application. Account
+storage, refresh, model discovery, user consent to send metadata, and live
+provider verification are still required before enabling AI assistance.
+
+Name and folder analysis starts with the current names and folders. Edit and
+explicitly accept a `NAME` review (`--value name=FILE`) or `FOLDER` review
+(`--value folder=RELATIVE-FOLDER`, with an empty value for the output root), then
+run `preview-organization --project PROJECT-UUID --inventory-revision 1` with the
+state and log directory options. The GUI also provides an organization preview.
+The preview is read-only and checks lexical destination conflicts, reference
+coverage and inventory revision; it does not inspect an output directory or grant
+approval. Unresolved references remain blocking even when manually reviewed until
+planning supports validating and applying those corrections. Migration plans and
+execution remain unimplemented.
 
 ## File Logs
 

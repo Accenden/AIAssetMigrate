@@ -3,6 +3,7 @@ package io.github.aiassetmigrate.application;
 import io.github.aiassetmigrate.domain.*;
 import io.github.aiassetmigrate.analysis.CategoryAnalyzer;
 import io.github.aiassetmigrate.analysis.MaterialAnalysis;
+import io.github.aiassetmigrate.analysis.OrganizationPreview;
 import io.github.aiassetmigrate.inventory.AssetScanner;
 import io.github.aiassetmigrate.inventory.FileAssetRepository;
 import io.github.aiassetmigrate.inventory.FileReviewedChangeRepository;
@@ -321,31 +322,30 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
         if (kind == AnalysisKind.RELATIONSHIPS || kind == AnalysisKind.MATERIALS) {
             InventorySnapshot snapshot = loadInventory(id);
-            var analysis = MaterialAnalysis.analyze(snapshot, (asset, cap) -> {
-                Path file = snapshot.project().sourceRoot().resolve(asset.relativePath());
-                SafeStoragePaths.requireRegularFile(file);
-                BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                if (before.size() > cap) return new byte[cap + 1];
-                byte[] bytes;
-                try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-                    bytes = input.readNBytes(cap + 1);
-                }
-                SafeStoragePaths.requireRegularFile(file);
-                BasicFileAttributes after = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-                if (before.size() != after.size() || !before.lastModifiedTime().equals(after.lastModifiedTime())
-                        || !Objects.equals(before.fileKey(), after.fileKey())) throw new IOException("Source changed during analysis");
-                return bytes;
-            }, MaterialAnalysis.Limits.defaults());
+            var analysis = inspectReferences(snapshot);
             Map<Path, Asset> paths = new HashMap<>();
             Map<UUID, Asset> assets = new HashMap<>();
             snapshot.project().assets().forEach(asset -> { paths.put(asset.relativePath(), asset); assets.put(asset.id(), asset); });
             List<Suggestion> suggestions = new ArrayList<>();
             List<Finding> findings = new ArrayList<>();
+            Set<UUID> inspected = new HashSet<>();
             for (var file : analysis.files()) {
+                inspected.add(file.assetId());
                 if (file.status() != MaterialAnalysis.Inspection.VERIFIED) {
                     Asset asset = assets.get(file.assetId());
                     findings.add(analysisFinding(asset, "INSPECTION_" + file.status(), "Reference inspection: " + file.status()));
                 }
+            }
+            for (Asset asset : snapshot.project().assets()) {
+                if ((asset.type() == Asset.Type.MODEL || asset.type() == Asset.Type.MATERIAL)
+                        && !inspected.contains(asset.id())) {
+                    findings.add(analysisFinding(asset, "INSPECTION_UNSUPPORTED",
+                            "Reference inspection is not supported for this format"));
+                }
+            }
+            if (snapshot.scanStatus() != InventorySnapshot.ScanStatus.COMPLETE) {
+                findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.WARNING,
+                        "INCOMPLETE_INVENTORY", "Reference analysis cannot cover paths omitted by the inventory scan"));
             }
             for (AssetReference reference : analysis.references()) {
                 Asset owner = assets.get(reference.ownerAssetId());
@@ -375,7 +375,72 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     Finding.Severity.WARNING, "ANALYSIS_LIMIT", "Reference analysis exceeded its budget"));
             return new AnalysisResult(snapshot.project().inventoryRevision(), suggestions, findings);
         }
+        if (kind == AnalysisKind.NAMES || kind == AnalysisKind.FOLDERS) {
+            InventorySnapshot snapshot = loadInventory(id);
+            List<Suggestion> suggestions = snapshot.project().assets().stream().map(asset -> {
+                Path path = asset.relativePath();
+                String value = kind == AnalysisKind.NAMES ? path.getFileName().toString()
+                        : path.getParent() == null ? "" : path.getParent().toString().replace('\\', '/');
+                return new Suggestion(UUID.nameUUIDFromBytes((kind + ":" + asset.id() + ":" + value)
+                        .getBytes(StandardCharsets.UTF_8)), asset.id(), kind, value);
+            }).toList();
+            return new AnalysisResult(snapshot.project().inventoryRevision(), suggestions, List.of());
+        }
         throw new UnsupportedOperationException("Analysis not implemented: " + kind);
+    }
+
+    private MaterialAnalysis.Result inspectReferences(InventorySnapshot snapshot) {
+        return MaterialAnalysis.analyze(snapshot, (asset, cap) -> {
+            Path file = snapshot.project().sourceRoot().resolve(asset.relativePath());
+            SafeStoragePaths.requireRegularFile(file);
+            BasicFileAttributes before = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (before.size() > cap) return new byte[cap + 1];
+            byte[] bytes;
+            try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                bytes = input.readNBytes(cap + 1);
+            }
+            SafeStoragePaths.requireRegularFile(file);
+            BasicFileAttributes after = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (before.size() != after.size() || !before.lastModifiedTime().equals(after.lastModifiedTime())
+                    || !Objects.equals(before.fileKey(), after.fileKey())) throw new IOException("Source changed during analysis");
+            return bytes;
+        }, MaterialAnalysis.Limits.defaults());
+    }
+
+    @Override public OrganizationPreview.Result previewOrganization(UUID id, long expectedInventoryRevision) {
+        if (expectedInventoryRevision < 1) throw new IllegalArgumentException("Inventory revision must be positive");
+        InventorySnapshot inventory = loadInventory(id);
+        if (inventory.project().inventoryRevision() != expectedInventoryRevision) {
+            throw new IllegalStateException("Inventory revision changed; analyze again");
+        }
+        List<ReviewedChange> decisions = loadReviews(id);
+        var references = inspectReferences(inventory);
+        InventorySnapshot inspected = new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(),
+                inventory.project(), inventory.findings(), inventory.scanStatus(), inventory.scannedAt(),
+                inventory.pathOutcomes(), references.references());
+        var result = OrganizationPreview.preview(inspected, id, expectedInventoryRevision, decisions);
+        List<OrganizationPreview.Finding> findings = new ArrayList<>(result.findings());
+        Set<UUID> excluded = new HashSet<>();
+        result.entries().stream().filter(OrganizationPreview.Entry::excluded).forEach(entry -> excluded.add(entry.assetId()));
+        Set<UUID> inspectedIds = new HashSet<>();
+        for (var file : references.files()) {
+            inspectedIds.add(file.assetId());
+            if (file.status() != MaterialAnalysis.Inspection.VERIFIED && !excluded.contains(file.assetId())) {
+                findings.add(new OrganizationPreview.Finding("INSPECTION_" + file.status(), Optional.of(file.assetId()),
+                        "Reference coverage is incomplete"));
+            }
+        }
+        for (Asset asset : inventory.project().assets()) {
+            if ((asset.type() == Asset.Type.MODEL || asset.type() == Asset.Type.MATERIAL)
+                    && !inspectedIds.contains(asset.id()) && !excluded.contains(asset.id())) {
+                findings.add(new OrganizationPreview.Finding("INSPECTION_UNSUPPORTED", Optional.of(asset.id()),
+                        "Reference inspection is not supported for this format"));
+            }
+        }
+        if (references.truncated()) findings.add(new OrganizationPreview.Finding("ANALYSIS_LIMIT", Optional.empty(),
+                "Reference analysis exceeded its budget"));
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed while previewing; analyze again");
+        return new OrganizationPreview.Result(id, expectedInventoryRevision, result.entries(), findings);
     }
 
     private static Suggestion analysisSuggestion(UUID owner, AnalysisKind kind, String target, String reference) {
@@ -390,9 +455,13 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     @Override public List<ReviewedChange> loadReviews(UUID id) {
         InventorySnapshot inventory = loadInventory(id);
         try {
-            return new FileReviewedChangeRepository(stateDirectory).loadLatest(id)
+            List<ReviewedChange> result = new FileReviewedChangeRepository(stateDirectory).loadLatest(id)
                     .filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
                     .map(FileReviewedChangeRepository.ReviewSet::changes).orElse(List.of());
+            if (!loadInventory(id).equals(inventory)) {
+                throw new IllegalStateException("Inventory changed while loading reviews; retry");
+            }
+            return result;
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot load reviews for project " + id, e);
         }
@@ -422,9 +491,26 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     if (!assets.containsKey(targetId) || targetId.equals(change.assetId())) {
                         throw new IllegalArgumentException("Target must be another asset in the inventory");
                     }
-                    if (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING) requireValue(values, "reference");
+                    if (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING) {
+                        requireValue(values, "reference");
+                        Asset.Type ownerType = assets.get(change.assetId()).type();
+                        Asset.Type targetType = assets.get(targetId).type();
+                        if (!((ownerType == Asset.Type.MODEL && targetType == Asset.Type.MATERIAL)
+                                || (ownerType == Asset.Type.MATERIAL && targetType == Asset.Type.TEXTURE))) {
+                            throw new IllegalArgumentException("Material mappings require a model and material, or a material and texture");
+                        }
+                    } else if (values.containsKey("reference")) {
+                        requireValue(values, "reference");
+                    }
                 }
                 case EXCLUSION -> requireValue(values, "reason");
+                case NAME -> requireValue(values, "name");
+                case FOLDER -> {
+                    String folder = values.get("folder");
+                    if (folder == null || folder.length() > 4096) {
+                        throw new IllegalArgumentException("A folder value is required (maximum 4096 characters)");
+                    }
+                }
                 default -> throw new UnsupportedOperationException("Review not implemented: " + change.kind());
             }
         }
@@ -438,10 +524,14 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             for (ReviewedChange change : incoming) {
                 merged.removeIf(old -> old.assetId().equals(change.assetId()) && old.kind() == change.kind()
                         && (change.kind() == ReviewedChange.Kind.CATEGORY || change.kind() == ReviewedChange.Kind.EXCLUSION
+                            || change.kind() == ReviewedChange.Kind.NAME || change.kind() == ReviewedChange.Kind.FOLDER
                             || (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING
                                 && Objects.equals(old.values().get("reference"), change.values().get("reference")))
                             || (change.kind() == ReviewedChange.Kind.RELATIONSHIP
-                                && Objects.equals(old.values().get("targetAssetId"), change.values().get("targetAssetId")))));
+                                && (change.values().containsKey("reference")
+                                    ? Objects.equals(old.values().get("reference"), change.values().get("reference"))
+                                    : !old.values().containsKey("reference")
+                                        && Objects.equals(old.values().get("targetAssetId"), change.values().get("targetAssetId"))))));
                 merged.add(change);
             }
             long expected = previous.map(FileReviewedChangeRepository.ReviewSet::revision).orElse(0L);

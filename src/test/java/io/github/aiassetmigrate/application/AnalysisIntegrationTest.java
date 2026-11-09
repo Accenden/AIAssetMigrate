@@ -129,4 +129,100 @@ class AnalysisIntegrationTest {
             }
         }
     }
+
+    @Test void materialReviewsRequireCompatibleAssetTypes() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        Files.writeString(source.resolve("other.obj"), "v 1 0 0\n");
+        Files.writeString(source.resolve("hero.mtl"), "newmtl body\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            var assets = snapshot.project().assets().stream().collect(java.util.stream.Collectors.toMap(
+                    asset -> asset.relativePath().toString(), asset -> asset.id()));
+            var valid = new ReviewedChange(UUID.randomUUID(), assets.get("hero.obj"),
+                    ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Decision.ACCEPTED,
+                    Map.of("targetAssetId", assets.get("hero.mtl").toString(), "reference", "body"), Instant.now());
+            var invalid = new ReviewedChange(UUID.randomUUID(), assets.get("hero.obj"),
+                    ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Decision.ACCEPTED,
+                    Map.of("targetAssetId", assets.get("other.obj").toString(), "reference", "body"), Instant.now());
+            UUID project = snapshot.project().id();
+            long revision = snapshot.project().inventoryRevision();
+            assertThrows(IllegalArgumentException.class, () -> manager.review(project, revision, List.of(invalid)));
+            assertTrue(manager.loadReviews(project).isEmpty());
+            assertEquals(List.of(valid), manager.review(project, revision, List.of(valid)));
+        }
+    }
+
+    @Test void unsupportedModelReferenceInspectionIsReported() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("character.fbx"), "; FBX ASCII\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            var result = manager.analyze(snapshot.project().id(), AssetManager.AnalysisKind.RELATIONSHIPS);
+            assertTrue(result.suggestions().isEmpty());
+            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("INSPECTION_UNSUPPORTED")
+                    && f.sourceRelativePath().orElseThrow().equals(Path.of("character.fbx"))));
+        }
+    }
+
+    @Test void referenceBasedRelationshipCorrectionReplacesOnlySameReference() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        Files.writeString(source.resolve("a.mtl"), "newmtl body\n");
+        Files.writeString(source.resolve("b.mtl"), "newmtl body\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            var assets = snapshot.project().assets().stream().collect(java.util.stream.Collectors.toMap(
+                    asset -> asset.relativePath().toString(), asset -> asset.id()));
+            UUID owner = assets.get("hero.obj"), project = snapshot.project().id();
+            long revision = snapshot.project().inventoryRevision();
+            var first = new ReviewedChange(UUID.randomUUID(), owner, ReviewedChange.Kind.RELATIONSHIP,
+                    ReviewedChange.Decision.ACCEPTED, Map.of("targetAssetId", assets.get("a.mtl").toString(),
+                            "reference", "missing.mtl"), Instant.now());
+            var correction = new ReviewedChange(UUID.randomUUID(), owner, ReviewedChange.Kind.RELATIONSHIP,
+                    ReviewedChange.Decision.ACCEPTED, Map.of("targetAssetId", assets.get("b.mtl").toString(),
+                            "reference", "missing.mtl"), Instant.now());
+            manager.review(project, revision, List.of(first));
+            assertEquals(List.of(correction), manager.review(project, revision, List.of(correction)));
+            assertEquals(List.of(correction), manager.loadReviews(project));
+        }
+    }
+
+    @Test void organizationPreviewAppliesReviewsWithoutWritingAndBlocksCollisions() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("a.obj"), "v 0 0 0\n");
+        Files.writeString(source.resolve("b.obj"), "v 1 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id();
+            long revision = snapshot.project().inventoryRevision();
+            var names = manager.analyze(project, AssetManager.AnalysisKind.NAMES);
+            assertEquals(revision, names.inventoryRevision());
+            assertEquals(2, names.suggestions().size());
+            var changes = snapshot.project().assets().stream().map(asset -> new ReviewedChange(
+                    UUID.randomUUID(), asset.id(), ReviewedChange.Kind.NAME, ReviewedChange.Decision.ACCEPTED,
+                    Map.of("name", "same.obj"), Instant.now())).toList();
+            manager.review(project, revision, changes);
+            var preview = manager.previewOrganization(project, revision);
+            assertTrue(preview.blocked());
+            assertTrue(preview.findings().stream().anyMatch(finding -> finding.code().equals("DESTINATION_CONFLICT")));
+            assertEquals("v 0 0 0\n", Files.readString(source.resolve("a.obj")));
+            assertEquals("v 1 0 0\n", Files.readString(source.resolve("b.obj")));
+            manager.rescan(project, source);
+            assertThrows(IllegalStateException.class, () -> manager.previewOrganization(project, revision));
+        }
+    }
+
+    @Test void organizationPreviewBlocksMissingReferencesAndUninspectedModels() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("hero.obj"), "mtllib missing.mtl\nv 0 0 0\n");
+        Files.writeString(source.resolve("character.fbx"), "; FBX ASCII\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            var preview = manager.previewOrganization(snapshot.project().id(), snapshot.project().inventoryRevision());
+            assertTrue(preview.blocked());
+            assertTrue(preview.findings().stream().anyMatch(f -> f.code().equals("UNRESOLVED_REFERENCE")));
+            assertTrue(preview.findings().stream().anyMatch(f -> f.code().equals("INSPECTION_UNSUPPORTED")));
+        }
+    }
 }

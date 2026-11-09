@@ -2,6 +2,7 @@ package io.github.aiassetmigrate.gui;
 
 import io.github.aiassetmigrate.application.ImportException;
 import io.github.aiassetmigrate.application.AssetManager;
+import io.github.aiassetmigrate.analysis.OrganizationPreview;
 import io.github.aiassetmigrate.domain.Asset;
 import io.github.aiassetmigrate.domain.Finding;
 import io.github.aiassetmigrate.domain.InventorySnapshot;
@@ -26,6 +27,7 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
@@ -58,6 +60,10 @@ public final class AssetMigrateApplication extends Application {
     private final TableView<AssetManager.Suggestion> suggestions = new TableView<>();
     private final Label analysisRevision = new Label("No analysis loaded.");
     private final TextArea analysisFindings = new TextArea();
+    private final TextArea savedReviews = new TextArea();
+    private final TextArea organizationPreview = new TextArea();
+    private final TextField reviewAsset = new TextField();
+    private final ComboBox<ReviewedChange.Kind> reviewKind = new ComboBox<>();
     private final TextField reviewValue = new TextField();
     private final TextField reviewReference = new TextField();
     private final ComboBox<ReviewedChange.Decision> decision = new ComboBox<>();
@@ -70,6 +76,27 @@ public final class AssetMigrateApplication extends Application {
 
         List<ReviewedChange> review(AssetManager manager, ReviewedChange change) {
             return manager.review(project, result.inventoryRevision(), List.of(change));
+        }
+
+        List<ReviewedChange> loadReviews(AssetManager manager) {
+            checkRevision(manager);
+            List<ReviewedChange> reviews = manager.loadReviews(project);
+            checkRevision(manager);
+            return reviews;
+        }
+
+        OrganizationPreview.Result preview(AssetManager manager) {
+            OrganizationPreview.Result preview = manager.previewOrganization(project, result.inventoryRevision());
+            if (!project.equals(preview.projectId()) || result.inventoryRevision() != preview.inventoryRevision()) {
+                throw new IllegalStateException("Preview does not match the analyzed project and revision.");
+            }
+            return preview;
+        }
+
+        private void checkRevision(AssetManager manager) {
+            if (manager.loadInventory(project).project().inventoryRevision() != result.inventoryRevision()) {
+                throw new IllegalStateException("Inventory revision changed; run analysis again before loading reviews.");
+            }
         }
     }
 
@@ -163,33 +190,64 @@ public final class AssetMigrateApplication extends Application {
         Button categories = new Button("Analyze Categories");
         Button relationships = new Button("Analyze Relationships");
         Button materials = new Button("Analyze Materials");
+        Button names = new Button("Analyze Names");
+        Button folders = new Button("Analyze Folders");
         categories.setOnAction(event -> analyze(AssetManager.AnalysisKind.CATEGORIES));
         relationships.setOnAction(event -> analyze(AssetManager.AnalysisKind.RELATIONSHIPS));
         materials.setOnAction(event -> analyze(AssetManager.AnalysisKind.MATERIALS));
-        HBox analyzeActions = new HBox(8, categories, relationships, materials);
+        names.setOnAction(event -> analyze(AssetManager.AnalysisKind.NAMES));
+        folders.setOnAction(event -> analyze(AssetManager.AnalysisKind.FOLDERS));
+        FlowPane analyzeActions = new FlowPane(8, 8, categories, relationships, materials, names, folders);
         suggestionColumn("Asset ID", suggestion -> suggestion.assetId().toString(), 260);
         suggestionColumn("Kind", suggestion -> suggestion.kind().toString(), 120);
         suggestionColumn("Proposed value", AssetManager.Suggestion::proposedValue, 360);
         suggestions.setPlaceholder(new Label("Run analysis to display suggestions."));
         suggestions.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
-            reviewValue.setText(selected == null ? "" : selected.proposedValue());
-            reviewReference.setText(selected == null ? "" : selected.reference().orElse(""));
+            if (selected == null) return;
+            reviewAsset.setText(selected.assetId().toString());
+            reviewKind.setValue(suggestionKind(selected.kind()));
+            reviewValue.setText(selected.proposedValue());
+            reviewReference.setText(selected.reference().orElse(""));
             decision.setValue(null);
         });
         analysisFindings.setEditable(false);
         analysisFindings.setWrapText(true);
         analysisFindings.setPromptText("Analysis findings appear here.");
         analysisFindings.setPrefRowCount(4);
-        reviewValue.setPromptText("Category or target asset UUID (editable)");
-        reviewReference.setPromptText("Original reference (required for material mapping)");
+        reviewAsset.setPromptText("Asset UUID to review");
+        reviewKind.getItems().setAll(ReviewedChange.Kind.CATEGORY, ReviewedChange.Kind.RELATIONSHIP,
+                ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Kind.EXCLUSION,
+                ReviewedChange.Kind.NAME, ReviewedChange.Kind.FOLDER);
+        reviewKind.setPromptText("Choose review kind");
+        reviewValue.setPromptText("Category, target UUID, exclusion reason, filename, or folder (blank for root)");
+        reviewReference.setPromptText("Original reference (required for material mapping; optional for relationship)");
         decision.getItems().setAll(ReviewedChange.Decision.ACCEPTED, ReviewedChange.Decision.REJECTED);
         decision.setPromptText("Choose decision");
         Button submitReview = new Button("Save Explicit Review");
         submitReview.setOnAction(event -> review());
-        HBox reviewActions = new HBox(8, decision, submitReview);
+        Button manualReview = new Button("New Manual Review");
+        manualReview.setOnAction(event -> clearReview());
+        Button loadReviews = new Button("Load Saved Reviews");
+        loadReviews.setOnAction(event -> loadReviews());
+        savedReviews.setEditable(false);
+        savedReviews.setWrapText(true);
+        savedReviews.setPrefRowCount(5);
+        savedReviews.setPromptText("Load saved reviews for the analyzed inventory revision.");
+        projectId.textProperty().addListener((observable, oldValue, newValue) -> clearDisplayedResults());
+        state.textProperty().addListener((observable, oldValue, newValue) -> clearDisplayedResults());
+        logs.textProperty().addListener((observable, oldValue, newValue) -> clearDisplayedResults());
+        Button preview = new Button("Preview Organization");
+        preview.setOnAction(event -> previewOrganization());
+        organizationPreview.setEditable(false);
+        organizationPreview.setWrapText(true);
+        organizationPreview.setPrefRowCount(8);
+        organizationPreview.setPromptText("Read-only preview; not approval and no assets are written.");
+        HBox reviewActions = new HBox(8, decision, submitReview, manualReview);
         analysisPane.getChildren().addAll(explanation, analyzeActions, analysisRevision, new Label("Suggestions"), suggestions,
-                new Label("Analysis findings"), analysisFindings, new Label("Selected suggestion review"),
-                reviewValue, reviewReference, reviewActions);
+                new Label("Analysis findings"), analysisFindings, new Label("Explicit review (select a suggestion or enter manually)"),
+                reviewAsset, reviewKind, reviewValue, reviewReference, reviewActions,
+                new Label("Saved reviews for analyzed revision"), loadReviews, savedReviews,
+                new Label("Organization preview: read-only, not approval, no assets written"), preview, organizationPreview);
         VBox.setVgrow(suggestions, Priority.ALWAYS);
     }
 
@@ -220,7 +278,7 @@ public final class AssetMigrateApplication extends Application {
                     suggestions.getItems().setAll(result.value().suggestions());
                     analysisFindings.setText(formatAnalysisFindings(result.value().findings()));
                 }
-                status.setText(result.failure() == null ? "Analysis complete. Select a suggestion to review."
+                status.setText(result.failure() == null ? "Analysis complete. Select a suggestion or enter a manual review."
                         : failureText(result.failure(), null) + (result.value() != null ? "\nAnalysis results were obtained, but cleanup failed." : ""));
             })) {
                 busy(true);
@@ -234,27 +292,72 @@ public final class AssetMigrateApplication extends Application {
 
     private void review() {
         try {
-            AssetManager.Suggestion selected = suggestions.getSelectionModel().getSelectedItem();
-            if (selected == null) throw new IllegalArgumentException("Select a suggestion.");
             Path statePath = requiredPath(state, "State directory");
             Path logPath = requiredPath(logs, "Log directory");
             UUID id = UUID.fromString(projectId.getText().trim());
-            AnalysisContext context = analysisContext;
-            if (context == null || !id.equals(context.project()) || !statePath.equals(context.state()) || !logPath.equals(context.logs())) {
-                throw new IllegalArgumentException("Project or directories changed; run analysis again before reviewing.");
-            }
-            ReviewedChange change = makeReview(selected, decision.getValue(), reviewValue.getText(), reviewReference.getText());
+            AnalysisContext context = requireAnalysisContext(id, statePath, logPath);
+            ReviewedChange change = makeReview(reviewAsset.getText(), reviewKind.getValue(), decision.getValue(),
+                    reviewValue.getText(), reviewReference.getText());
             if (runner.submitValue(statePath, logPath, manager -> context.review(manager, change), result -> {
                 busy(false);
-                if (result.value() != null) {
-                    suggestions.getItems().remove(selected);
-                }
+                if (result.value() != null) clearReview();
                 status.setText(result.failure() == null ? "Review saved: " + change.decision()
                         : failureText(result.failure(), null) + (result.value() != null
                         ? "\nThe review call returned, but cleanup failed; it may have been saved." : "\nThe review may have been saved; verify before retrying."));
             })) {
                 busy(true);
+                clearDisplayedResults();
                 status.setText("Saving explicit review...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void previewOrganization() {
+        organizationPreview.clear();
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID id = UUID.fromString(projectId.getText().trim());
+            AnalysisContext context = requireAnalysisContext(id, statePath, logPath);
+            if (runner.submitValue(statePath, logPath, context::preview, result -> {
+                busy(false);
+                if (result.value() != null) organizationPreview.setText(formatPreview(result.value()));
+                status.setText(result.failure() == null ? "Read-only preview complete; this is not approval."
+                        : failureText(result.failure(), null) + (result.value() != null ? "\nPreview was obtained, but cleanup failed." : ""));
+            })) {
+                busy(true);
+                status.setText("Preparing read-only organization preview...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private AnalysisContext requireAnalysisContext(UUID id, Path statePath, Path logPath) {
+        AnalysisContext context = analysisContext;
+        if (context == null || !id.equals(context.project()) || !statePath.equals(context.state()) || !logPath.equals(context.logs())) {
+            throw new IllegalArgumentException("Project or directories changed; run analysis again before reviewing.");
+        }
+        return context;
+    }
+
+    private void loadReviews() {
+        savedReviews.clear();
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID id = UUID.fromString(projectId.getText().trim());
+            AnalysisContext context = requireAnalysisContext(id, statePath, logPath);
+            if (runner.submitValue(statePath, logPath, context::loadReviews, result -> {
+                busy(false);
+                if (result.value() != null) savedReviews.setText(formatReviews(result.value()));
+                status.setText(result.failure() == null ? "Saved reviews loaded for analyzed revision " + context.result().inventoryRevision() + "."
+                        : failureText(result.failure(), null) + (result.value() != null ? "\nReviews were obtained, but cleanup failed." : ""));
+            })) {
+                busy(true);
+                status.setText("Loading saved reviews...");
             }
         } catch (IllegalArgumentException failure) {
             status.setText("Invalid input: " + failure.getMessage());
@@ -266,34 +369,95 @@ public final class AssetMigrateApplication extends Application {
         analysisRevision.setText("No analysis loaded.");
         suggestions.getItems().clear();
         analysisFindings.clear();
+        clearDisplayedResults();
+        clearReview();
+    }
+
+    private void clearDisplayedResults() {
+        savedReviews.clear();
+        organizationPreview.clear();
+    }
+
+    private void clearReview() {
+        suggestions.getSelectionModel().clearSelection();
+        reviewAsset.clear();
+        reviewKind.setValue(null);
+        reviewValue.clear();
+        reviewReference.clear();
+        decision.setValue(null);
+    }
+
+    private static ReviewedChange.Kind suggestionKind(AssetManager.AnalysisKind kind) {
+        return switch (kind) {
+            case CATEGORIES -> ReviewedChange.Kind.CATEGORY;
+            case RELATIONSHIPS -> ReviewedChange.Kind.RELATIONSHIP;
+            case MATERIALS -> ReviewedChange.Kind.MATERIAL_MAPPING;
+            case NAMES -> ReviewedChange.Kind.NAME;
+            case FOLDERS -> ReviewedChange.Kind.FOLDER;
+        };
     }
 
     static ReviewedChange makeReview(AssetManager.Suggestion suggestion, ReviewedChange.Decision decision,
                                      String value, String reference) {
+        return makeReview(suggestion.assetId().toString(), suggestionKind(suggestion.kind()), decision, value, reference);
+    }
+
+    static ReviewedChange makeReview(String asset, ReviewedChange.Kind kind, ReviewedChange.Decision decision,
+                                     String value, String reference) {
+        UUID assetId = UUID.fromString(asset.trim());
+        if (kind == null) throw new IllegalArgumentException("Choose a review kind.");
         if (decision == null) throw new IllegalArgumentException("Choose ACCEPTED or REJECTED.");
         String edited = value.trim();
-        if (edited.isEmpty()) throw new IllegalArgumentException("Review value is required.");
-        ReviewedChange.Kind kind;
+        if (edited.isEmpty() && kind != ReviewedChange.Kind.FOLDER) throw new IllegalArgumentException("Review value is required.");
         Map<String, String> values;
-        switch (suggestion.kind()) {
-            case CATEGORIES -> {
-                kind = ReviewedChange.Kind.CATEGORY;
-                values = Map.of("category", edited);
-            }
-            case RELATIONSHIPS, MATERIALS -> {
+        switch (kind) {
+            case CATEGORY -> values = Map.of("category", edited);
+            case EXCLUSION -> values = Map.of("reason", edited);
+            case NAME -> values = Map.of("name", edited);
+            case FOLDER -> values = Map.of("folder", edited);
+            case RELATIONSHIP, MATERIAL_MAPPING -> {
                 String target = UUID.fromString(edited).toString();
-                if (suggestion.kind() == AssetManager.AnalysisKind.MATERIALS) {
+                if (kind == ReviewedChange.Kind.MATERIAL_MAPPING) {
                     if (reference.isBlank()) throw new IllegalArgumentException("Original reference is required for material mapping.");
-                    kind = ReviewedChange.Kind.MATERIAL_MAPPING;
                     values = Map.of("targetAssetId", target, "reference", reference);
                 } else {
-                    kind = ReviewedChange.Kind.RELATIONSHIP;
-                    values = Map.of("targetAssetId", target);
+                    values = reference.isBlank() ? Map.of("targetAssetId", target)
+                            : Map.of("targetAssetId", target, "reference", reference);
                 }
             }
-            default -> throw new IllegalArgumentException("Unsupported suggestion kind: " + suggestion.kind());
+            default -> throw new IllegalArgumentException("Unsupported review kind: " + kind);
         }
-        return new ReviewedChange(UUID.randomUUID(), suggestion.assetId(), kind, decision, values, Instant.now());
+        return new ReviewedChange(UUID.randomUUID(), assetId, kind, decision, values, Instant.now());
+    }
+
+    static String formatPreview(OrganizationPreview.Result preview) {
+        StringBuilder text = new StringBuilder("Read-only preview, not approval. Inventory revision: ")
+                .append(preview.inventoryRevision()).append("\nStatus: ")
+                .append(preview.blocked() ? "BLOCKED" : "No blocking findings").append("\nEntries:\n");
+        for (OrganizationPreview.Entry entry : preview.entries()) {
+            text.append("Asset: ").append(entry.assetId()).append(" | Source: ").append(entry.source())
+                    .append(" | Destination: ").append(entry.destination().orElse("(none)"))
+                    .append(" | Excluded: ").append(entry.excluded()).append('\n');
+        }
+        text.append("Blocking findings:\n");
+        if (preview.findings().isEmpty()) text.append("None\n");
+        for (OrganizationPreview.Finding finding : preview.findings()) {
+            text.append('[').append(finding.code()).append("] ");
+            finding.assetId().ifPresent(id -> text.append("Asset: ").append(id).append(" | "));
+            text.append(finding.message()).append('\n');
+        }
+        return text.toString();
+    }
+
+    static String formatReviews(List<ReviewedChange> reviews) {
+        if (reviews.isEmpty()) return "No saved reviews for this inventory revision.";
+        StringBuilder text = new StringBuilder();
+        for (ReviewedChange review : reviews) {
+            text.append("Asset: ").append(review.assetId()).append(" | Kind: ").append(review.kind())
+                    .append(" | Decision: ").append(review.decision()).append(" | Values: ")
+                    .append(review.values()).append('\n');
+        }
+        return text.toString();
     }
 
     static String formatAnalysisFindings(List<Finding> items) {
