@@ -13,9 +13,11 @@ described below. The OAuth foundation provides browser authorization and validat
 in-memory credentials, not yet a saved AI account connection.
 
 Deterministic category, relationship and material analysis and explicit review
-storage are available as described below. AI assistance, plan approval, conversion,
-migration and report workflows are not implemented. Import does not claim
-compatibility with any game engine.
+storage and limited target compatibility assessment are available as described
+below. Copy-only draft plans, explicit approval and migration are available with
+the restrictions below. AI assistance, conversion, reference rewriting and report
+workflows are not implemented. Import and format-level checks do not establish
+successful import or rendering in a target engine.
 
 ## Build and Run
 
@@ -53,11 +55,12 @@ Maven launch commands above until application packaging is implemented.
 - `logging`: file-backed `LogPublisher`, replay, and asynchronous subscriptions.
 - `auth`: OpenAI public-client OAuth with PKCE, loopback callbacks, and signed identity validation.
 - `analysis`: conservative categorization and bounded OBJ/MTL reference analysis.
+- `compatibility`: versioned, documented format rules and coverage findings.
 - `cli`: picocli import, analysis, review and logs commands, independent of JavaFX startup.
 - `gui`: JavaFX import, inventory, analysis and review displays.
 - `src/test`: JUnit 5 contract and CLI tests, including temporary-directory tests.
 
-The shared facade implements import, rescan, inventory loading, analysis and review.
+The shared facade implements import, rescan, inventory loading, analysis, review and compatibility checks.
 Later workflow methods explicitly reject unsupported operations. A plan data object is not
 authorization to write files; a later execution implementation must validate
 explicit approval and source fingerprints before execution.
@@ -157,8 +160,8 @@ state and log directory options. The GUI also provides an organization preview.
 The preview is read-only and checks lexical destination conflicts, reference
 coverage and inventory revision; it does not inspect an output directory or grant
 approval. Unresolved references remain blocking even when manually reviewed until
-planning supports validating and applying those corrections. Migration plans and
-execution remain unimplemented.
+planning supports validating and applying those corrections. The copy-only plan
+workflow is described below.
 
 To generate rule-based proposals instead, use `analyze-organization` with
 `--name-style preserve|snake-case|kebab-case` and `--folder-style preserve|by-type`,
@@ -167,6 +170,62 @@ the same rules. These are combined proposals for the current inventory, not save
 reviews. Review each desired change explicitly and run the organization preview
 again before proceeding; its reference and destination checks use the saved
 decisions rather than the unaccepted rule proposals.
+
+## Compatibility
+
+The CLI can list available profiles or assess an imported inventory:
+
+```sh
+bash ./mvnw exec:java '-Dexec.args=compatibility --list-targets --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+bash ./mvnw exec:java '-Dexec.args=compatibility --project PROJECT-UUID --target unity --target-version 6000.0 --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+```
+
+The GUI also provides target selection and compatibility assessment. Results
+identify the target and inventory revision and retain import and reference
+findings. Format candidates come from the target's documented format list, not
+from a complete decode or actual engine import. Unsupported reference inspection,
+incomplete inventories, missing references and unverified content are reported.
+Installed converters are not probed and no executable conversion choices are
+claimed. The assessment does not approve or perform migration.
+
+Godot 4.3 is a version-specific reference profile based on its official
+[3D format](https://docs.godotengine.org/en/4.3/tutorials/assets_pipeline/importing_3d_scenes/available_formats.html)
+and [image import](https://docs.godotengine.org/en/4.3/tutorials/assets_pipeline/importing_images.html)
+documentation. That documentation marks the engine version as no longer supported;
+the profile should not be assumed to describe other versions.
+The Unity 6000.0 profile is based on the official Unity 6.0 documentation for
+[model formats](https://docs.unity3d.com/6000.0/Documentation/Manual/3D-formats.html)
+and [texture import](https://docs.unity3d.com/6000.0/Documentation/Manual/ImportingTextures.html).
+Material fidelity and unsupported or undocumented requirements remain unknown.
+
+## Copy-Only Migration
+
+Use `plan --project PROJECT-UUID --target unity --target-version 6000.0 --output
+/absolute/output` with the state and log directory options to create a draft.
+Inspect its sources, destinations and findings using `show-plan --plan PLAN-UUID`.
+Then explicitly use `approve --plan PLAN-UUID --version 1`, followed by the
+separate `migrate --plan PLAN-UUID` command. Use `show-run --plan PLAN-UUID` to
+inspect the recorded outcome, including an interrupted run. The GUI provides the
+same separate draft, approval and migration steps.
+
+Only reviewed, copy-only layouts without blocking findings can be approved.
+Approval and execution recheck the inventory, review revision and commands; each
+approved plan can be run once. The output root and all destination parent folders
+must already exist and be separate from source, state and log directories. Existing
+output files are never intentionally overwritten. Source contents are fingerprinted
+and the copied bytes checked before no-replace publication. A failed run can leave
+earlier copies in place; there is no rollback or crash-durable output guarantee.
+Retryable preflight errors are checked before the single-use run is reserved. If
+execution begins and is interrupted, the saved run remains incomplete and the
+same plan cannot be run again.
+
+This implementation requires filesystem file identities, Unix source link counts,
+hard-link publication and directory forcing; unsupported providers fail closed.
+Path and identity rechecks are best effort against hostile concurrent filesystem
+replacement, not a handle-anchored sandbox. Source, output, state and log paths and
+their ancestors must remain trusted against concurrent manipulation. Unsupported
+reference rewrites, material mappings and conversions remain blocking or unavailable;
+no such operations are silently performed.
 
 ## File Logs
 

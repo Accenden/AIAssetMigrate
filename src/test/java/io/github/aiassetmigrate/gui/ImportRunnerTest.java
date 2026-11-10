@@ -446,6 +446,71 @@ class ImportRunnerTest {
         assertTrue(text.contains("None"));
     }
 
+    @Test
+    void compatibilityLoadsTargetsAndAssessesOnWorker() throws Exception {
+        UUID project = UUID.randomUUID();
+        UUID asset = UUID.randomUUID();
+        var target = new AssetManager.TargetProfile("engine", "1.2");
+        var finding = new Finding(UUID.randomUUID(), Optional.of(asset), Optional.of(Path.of("models/a.obj")),
+                Finding.Severity.WARNING, "FORMAT", "Unsupported format");
+        var assessment = new AssetManager.CompatibilityResult(7L, target, List.of(finding));
+        var request = new AssetMigrateApplication.CompatibilityRequest(project, target);
+        List<String> calls = new ArrayList<>();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                new Class<?>[]{AssetManager.class}, (proxy, method, args) -> {
+                    worker.set(Thread.currentThread());
+                    calls.add(method.getName());
+                    if (method.getName().equals("supportedTargets")) return List.of(target);
+                    assertArrayEquals(new Object[]{project, target}, args);
+                    return assessment;
+                });
+        BlockingQueue<Runnable> ui = new LinkedBlockingQueue<>();
+        AtomicReference<ImportRunner.Result<List<AssetManager.TargetProfile>>> targets = new AtomicReference<>();
+        AtomicReference<ImportRunner.Result<AssetManager.CompatibilityResult>> result = new AtomicReference<>();
+        try (ImportRunner runner = new ImportRunner(ui::add, (state, logs) ->
+                new ImportRunner.Managed(manager, () -> { throw new IllegalStateException("close failed"); }))) {
+            assertTrue(runner.submitValue(STATE, LOGS, AssetManager::supportedTargets, targets::set));
+            Runnable completion = ui.poll(5, TimeUnit.SECONDS);
+            assertNotNull(completion);
+            completion.run();
+            assertEquals(List.of(target), targets.get().value());
+            assertEquals("close failed", targets.get().failure().getMessage());
+            assertTrue(runner.submitValue(STATE, LOGS, request::assess, result::set));
+            completion = ui.poll(5, TimeUnit.SECONDS);
+            assertNotNull(completion);
+            completion.run();
+            assertSame(assessment, result.get().value());
+            assertEquals("close failed", result.get().failure().getMessage());
+            assertEquals(List.of("supportedTargets", "assessCompatibility"), calls);
+            assertNotSame(Thread.currentThread(), worker.get());
+        }
+        String text = AssetMigrateApplication.formatCompatibility(assessment);
+        for (String expected : List.of("not full validation or approval", "revision: 7", "engine / 1.2",
+                "WARNING [FORMAT]", "models/a.obj", asset.toString(), "Unsupported format")) {
+            assertTrue(text.contains(expected), expected);
+        }
+        String empty = AssetMigrateApplication.formatCompatibility(new AssetManager.CompatibilityResult(8L, target, List.of()));
+        assertTrue(empty.contains("No compatibility findings"));
+        assertTrue(empty.contains("not full validation or approval"));
+    }
+
+    @Test
+    void compatibilityRejectsMismatchedTargetAndInvalidatesStaleCallbacks() {
+        var target = new AssetManager.TargetProfile("engine", "1");
+        var request = new AssetMigrateApplication.CompatibilityRequest(UUID.randomUUID(), target);
+        AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                new Class<?>[]{AssetManager.class}, (proxy, method, args) ->
+                        new AssetManager.CompatibilityResult(1L, new AssetManager.TargetProfile("engine", "2"), List.of()));
+        assertThrows(IllegalStateException.class, () -> request.assess(manager));
+        var generation = new AssetMigrateApplication.CompatibilityGeneration();
+        long captured = generation.current();
+        assertTrue(generation.isCurrent(captured));
+        generation.invalidate();
+        assertFalse(generation.isCurrent(captured));
+        assertTrue(generation.isCurrent(generation.current()));
+    }
+
     private static InventorySnapshot snapshot() {
         return snapshot(1);
     }

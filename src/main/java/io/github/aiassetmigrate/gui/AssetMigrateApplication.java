@@ -8,6 +8,9 @@ import io.github.aiassetmigrate.domain.Finding;
 import io.github.aiassetmigrate.domain.InventorySnapshot;
 import io.github.aiassetmigrate.domain.PathOutcome;
 import io.github.aiassetmigrate.domain.ReviewedChange;
+import io.github.aiassetmigrate.domain.MigrationPlan;
+import io.github.aiassetmigrate.domain.MigrationRun;
+import io.github.aiassetmigrate.domain.PlanStatus;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyStringWrapper;
@@ -33,10 +36,13 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
+import javafx.util.StringConverter;
 
 import java.io.File;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -60,6 +66,10 @@ public final class AssetMigrateApplication extends Application {
     private final HBox actions = new HBox(10);
     private final ProgressIndicator progress = new ProgressIndicator();
     private final VBox analysisPane = new VBox(8);
+    private final VBox compatibilityPane = new VBox(8);
+    private final ComboBox<AssetManager.TargetProfile> compatibilityTarget = new ComboBox<>();
+    private final TextArea compatibilityResults = new TextArea();
+    private final CompatibilityGeneration compatibilityGeneration = new CompatibilityGeneration();
     private final TableView<AssetManager.Suggestion> suggestions = new TableView<>();
     private final Label analysisRevision = new Label("No analysis loaded.");
     private final TextArea analysisFindings = new TextArea();
@@ -73,6 +83,102 @@ public final class AssetMigrateApplication extends Application {
     private final ComboBox<AssetManager.NameStyle> nameStyle = new ComboBox<>();
     private final ComboBox<AssetManager.FolderStyle> folderStyle = new ComboBox<>();
     private AnalysisContext analysisContext;
+    private final VBox planPane = new VBox(8);
+    private final TextField outputRoot = new TextField();
+    private final TextArea planDetails = new TextArea();
+    private final CompatibilityGeneration planGeneration = new CompatibilityGeneration();
+    private PlanContext planContext;
+
+    record PlanRequest(UUID project, Path state, Path logs, Path output, AssetManager.TargetProfile target) {
+        PlanContext create(AssetManager manager) {
+            MigrationPlan plan = manager.createPlan(project, target, output);
+            if (!project.equals(plan.projectId()) || !target.id().equals(plan.targetProfile())
+                    || !target.version().equals(plan.targetProfileVersion()) || !output.equals(plan.outputRoot())
+                    || plan.status() != PlanStatus.DRAFT) {
+                throw new IllegalStateException("Created plan does not match the requested draft context.");
+            }
+            InventorySnapshot inventory = manager.loadInventory(plan.projectId(), plan.inventoryRevision());
+            return PlanContext.fromInventory(this, plan, inventory);
+        }
+    }
+
+    record PlanContext(PlanRequest request, MigrationPlan plan, Map<UUID, Path> sources, List<String> sourceErrors) {
+        PlanContext {
+            sources = Map.copyOf(sources);
+            sourceErrors = List.copyOf(sourceErrors);
+        }
+
+        static PlanContext fromInventory(PlanRequest request, MigrationPlan plan, InventorySnapshot inventory) {
+            Map<UUID, Path> sources = new HashMap<>();
+            List<String> errors = new ArrayList<>();
+            if (!plan.projectId().equals(inventory.project().id())
+                    || plan.inventoryRevision() != inventory.project().inventoryRevision()) {
+                errors.add("Inventory project or revision does not match the plan; source paths cannot be verified.");
+            } else {
+                for (Asset asset : inventory.project().assets()) {
+                    if (sources.putIfAbsent(asset.id(), asset.relativePath()) != null) {
+                        errors.add("Duplicate inventory asset ID: " + asset.id());
+                    }
+                }
+            }
+            for (var command : plan.commands()) {
+                if (!sources.containsKey(command.assetId())) errors.add("Unknown source asset ID: " + command.assetId());
+            }
+            for (var change : plan.reviewedChanges()) {
+                if (!sources.containsKey(change.assetId())) errors.add("Unknown reviewed asset ID: " + change.assetId());
+            }
+            return new PlanContext(request, plan, sources, errors);
+        }
+
+        boolean sourcesVerified() {
+            return sourceErrors.isEmpty() && plan.commands().stream().allMatch(command -> sources.containsKey(command.assetId()))
+                    && plan.reviewedChanges().stream().allMatch(change -> sources.containsKey(change.assetId()));
+        }
+
+        MigrationPlan approve(AssetManager manager) {
+            if (plan.status() != PlanStatus.DRAFT) throw new IllegalStateException("Display a draft before approval.");
+            if (!sourcesVerified()) throw new IllegalStateException("Source paths could not be verified; approval is blocked.");
+            MigrationPlan approved = manager.approve(plan.id(), plan.version());
+            if (!sameExceptStatus(plan, approved) || approved.status() != PlanStatus.APPROVED) {
+                throw new IllegalStateException("Approval returned a different plan; reload and review it.");
+            }
+            return approved;
+        }
+
+        MigrationRun migrate(AssetManager manager) {
+            if (plan.status() != PlanStatus.APPROVED) throw new IllegalStateException("Explicitly approve the displayed plan first.");
+            if (!sourcesVerified()) {
+                throw new IllegalStateException("Source paths could not be verified; migration is blocked.");
+            }
+            if (!plan.equals(manager.loadPlan(plan.id()))) {
+                throw new IllegalStateException("Stored plan changed; create and review a new draft.");
+            }
+            return manager.migrate(plan.id());
+        }
+    }
+
+    private static boolean sameExceptStatus(MigrationPlan a, MigrationPlan b) {
+        return a.id().equals(b.id()) && a.projectId().equals(b.projectId()) && a.version() == b.version()
+                && a.inventoryRevision() == b.inventoryRevision() && a.targetProfile().equals(b.targetProfile())
+                && a.targetProfileVersion().equals(b.targetProfileVersion()) && a.outputRoot().equals(b.outputRoot())
+                && a.reviewedChanges().equals(b.reviewedChanges()) && a.commands().equals(b.commands())
+                && a.findings().equals(b.findings()) && a.createdAt().equals(b.createdAt());
+    }
+
+    static final class CompatibilityGeneration {
+        private long value;
+        long current() { return value; }
+        void invalidate() { value++; }
+        boolean isCurrent(long captured) { return value == captured; }
+    }
+
+    record CompatibilityRequest(UUID project, AssetManager.TargetProfile target) {
+        AssetManager.CompatibilityResult assess(AssetManager manager) {
+            var result = manager.assessCompatibility(project, target);
+            if (!target.equals(result.target())) throw new IllegalStateException("Compatibility result target does not match the requested target.");
+            return result;
+        }
+    }
 
     record AnalysisContext(UUID project, Path state, Path logs, AssetManager.AnalysisResult result) {
         String revisionText() {
@@ -158,13 +264,19 @@ public final class AssetMigrateApplication extends Application {
         results.setDividerPositions(0.65);
         VBox top = new VBox(10, title, note, inputs, actions, statusRow, summary);
         setupAnalysis();
+        setupCompatibility();
+        setupPlan();
         Tab inventoryTab = new Tab("Inventory", results);
         ScrollPane analysisScroll = new ScrollPane(analysisPane);
         analysisScroll.setFitToWidth(true);
         Tab analysisTab = new Tab("Analysis and Review", analysisScroll);
+        Tab compatibilityTab = new Tab("Target Compatibility", compatibilityPane);
+        Tab planTab = new Tab("Copy Migration Plan", planPane);
         inventoryTab.setClosable(false);
         analysisTab.setClosable(false);
-        TabPane tabs = new TabPane(inventoryTab, analysisTab);
+        compatibilityTab.setClosable(false);
+        planTab.setClosable(false);
+        TabPane tabs = new TabPane(inventoryTab, analysisTab, compatibilityTab, planTab);
         BorderPane root = new BorderPane(tabs);
         root.setTop(top);
         BorderPane.setMargin(tabs, new Insets(12, 0, 0, 0));
@@ -187,6 +299,246 @@ public final class AssetMigrateApplication extends Application {
                 Platform.exit();
             });
         }
+    }
+
+    private void setupPlan() {
+        Label note = new Label("Copy-only draft: review all commands and findings. Creating a draft does not approve or execute it. Select a supported target in Target Compatibility.");
+        note.setWrapText(true);
+        outputRoot.setPromptText("Explicit output root directory");
+        Button create = new Button("Create Copy-Only Draft");
+        Button approve = new Button("Approve Displayed Plan Version");
+        Button migrate = new Button("Run Approved Copy Migration");
+        create.setOnAction(event -> createPlan());
+        approve.setOnAction(event -> approvePlan());
+        migrate.setOnAction(event -> migratePlan());
+        planDetails.setEditable(false);
+        planDetails.setWrapText(false);
+        planDetails.setPromptText("No plan displayed.");
+        planPane.getChildren().addAll(note, new Label("Output root"), outputRoot,
+                new FlowPane(8, 8, create, approve, migrate), new Label("Full plan and blockers"), planDetails);
+        VBox.setVgrow(planDetails, Priority.ALWAYS);
+        projectId.textProperty().addListener((o, a, b) -> clearPlan());
+        state.textProperty().addListener((o, a, b) -> clearPlan());
+        logs.textProperty().addListener((o, a, b) -> clearPlan());
+        outputRoot.textProperty().addListener((o, a, b) -> clearPlan());
+        source.textProperty().addListener((o, a, b) -> clearPlan());
+        revision.textProperty().addListener((o, a, b) -> clearPlan());
+        compatibilityTarget.valueProperty().addListener((o, a, b) -> clearPlan());
+    }
+
+    private void clearPlan() {
+        planGeneration.invalidate();
+        planContext = null;
+        planDetails.clear();
+    }
+
+    private PlanRequest planRequest() {
+        AssetManager.TargetProfile target = compatibilityTarget.getValue();
+        if (target == null) throw new IllegalArgumentException("Select a supported target in Target Compatibility.");
+        return new PlanRequest(UUID.fromString(projectId.getText().trim()), requiredPath(state, "State directory"),
+                requiredPath(logs, "Log directory"), requiredPath(outputRoot, "Output root").normalize(), target);
+    }
+
+    private PlanContext requirePlan() {
+        if (planContext == null || !planContext.request().equals(planRequest())) {
+            throw new IllegalArgumentException("Inputs changed or no plan is displayed; create and review a draft.");
+        }
+        return planContext;
+    }
+
+    private void createPlan() {
+        clearPlan();
+        try {
+            PlanRequest request = planRequest();
+            long generation = planGeneration.current();
+            if (runner.submitValue(request.state(), request.logs(), request::create, result -> {
+                busy(false);
+                if (!planGeneration.isCurrent(generation)) return;
+                if (result.failure() == null && result.value() != null) {
+                    planContext = result.value();
+                    planDetails.setText(formatPlan(planContext));
+                    status.setText(planContext.sourceErrors().isEmpty()
+                            ? "Draft created only. Review it before explicit approval."
+                            : "Source verification failed; approval is blocked. Review the errors in the plan.");
+                } else status.setText(failureText(result.failure(), null) + "\nA draft may have been created; no approval or migration was requested.");
+            })) {
+                busy(true);
+                status.setText("Creating copy-only draft...");
+            }
+        } catch (IllegalArgumentException failure) { status.setText("Invalid input: " + failure.getMessage()); }
+    }
+
+    private void approvePlan() {
+        try {
+            PlanContext context = requirePlan();
+            if (!context.sourcesVerified()) throw new IllegalArgumentException("Source paths could not be verified; approval is blocked.");
+            long generation = planGeneration.current();
+            if (runner.submitValue(context.request().state(), context.request().logs(), context::approve, result -> {
+                busy(false);
+                if (!planGeneration.isCurrent(generation)) return;
+                if (result.failure() == null && result.value() != null) {
+                    planContext = new PlanContext(context.request(), result.value(), context.sources(), context.sourceErrors());
+                    planDetails.setText(formatPlan(planContext));
+                    status.setText("Displayed plan version approved. Migration has not been run.");
+                } else {
+                    clearPlan();
+                    status.setText(failureText(result.failure(), null) + "\nApproval may have succeeded; create and review a new draft before proceeding.");
+                }
+            })) { busy(true); status.setText("Approving the displayed plan version..."); }
+        } catch (IllegalArgumentException failure) { status.setText("Invalid input: " + failure.getMessage()); }
+    }
+
+    private void migratePlan() {
+        try {
+            PlanContext context = requirePlan();
+            if (context.plan().status() != PlanStatus.APPROVED) throw new IllegalArgumentException("Explicitly approve the displayed plan first.");
+            long generation = planGeneration.current();
+            if (runner.submitValue(context.request().state(), context.request().logs(), context::migrate, result -> {
+                busy(false);
+                if (!planGeneration.isCurrent(generation)) return;
+                clearPlan();
+                status.setText(result.failure() == null ? formatRun(result.value())
+                        : failureText(result.failure(), null) + "\nMigration may have started; inspect output and run history before retrying.");
+            })) { busy(true); status.setText("Running approved copy migration..."); }
+        } catch (IllegalArgumentException failure) { status.setText("Invalid input: " + failure.getMessage()); }
+    }
+
+    static String formatRun(MigrationRun run) {
+        StringBuilder text = new StringBuilder("Migration run ").append(run.id()).append(" status: ").append(run.status());
+        run.message().ifPresent(message -> text.append("\n").append(message));
+        new java.util.TreeMap<>(run.stepStatuses()).forEach((id, stepStatus) -> {
+            text.append("\n").append(id).append(": ").append(stepStatus);
+            String detail = run.stepDetails().get(id);
+            if (detail != null && !detail.isBlank()) text.append(" - ").append(detail);
+        });
+        return text.toString();
+    }
+
+    static String formatPlan(PlanContext context) {
+        MigrationPlan plan = context.plan();
+        StringBuilder text = new StringBuilder("Copy-only migration plan\nPlan ID: ").append(plan.id())
+                .append("\nProject: ").append(plan.projectId()).append("\nPlan version: ").append(plan.version())
+                .append("\nInventory revision: ").append(plan.inventoryRevision()).append("\nStatus: ").append(plan.status())
+                .append("\nTarget: ").append(plan.targetProfile()).append(" / ").append(plan.targetProfileVersion())
+                .append("\nOutput root: ").append(plan.outputRoot()).append("\nCommands (complete):\n");
+        if (plan.commands().isEmpty()) text.append("None\n");
+        for (var command : plan.commands()) {
+            text.append("Source asset ID: ").append(command.assetId()).append(" | Source relative path: ")
+                    .append(context.sources().containsKey(command.assetId()) ? context.sources().get(command.assetId()) : "<unknown>").append('\n')
+                    .append(command).append('\n');
+        }
+        text.append("Reviewed decisions (complete):\n");
+        if (plan.reviewedChanges().isEmpty()) text.append("None\n");
+        for (ReviewedChange change : plan.reviewedChanges()) {
+            text.append("Review ID: ").append(change.id()).append(" | Asset ID: ").append(change.assetId())
+                    .append(" | Source relative path: ")
+                    .append(context.sources().containsKey(change.assetId()) ? context.sources().get(change.assetId()) : "<unknown>")
+                    .append(" | Kind: ").append(change.kind()).append(" | Decision: ").append(change.decision())
+                    .append(" | Values: ").append(change.values()).append(" | Reviewed at: ").append(change.reviewedAt()).append('\n');
+        }
+        text.append("Source verification errors:\n");
+        if (context.sourceErrors().isEmpty()) text.append("None\n");
+        for (String error : context.sourceErrors()) text.append("ERROR: ").append(error).append('\n');
+        text.append("Blockers and other findings:\n");
+        if (plan.findings().isEmpty()) text.append("None\n");
+        for (Finding finding : plan.findings()) text.append(finding).append('\n');
+        return text.toString();
+    }
+
+    private void setupCompatibility() {
+        Label note = new Label("Checks the latest saved inventory against a target. This is not full validation or approval. Results may become stale if the project changes elsewhere.");
+        note.setWrapText(true);
+        compatibilityTarget.setPromptText("Load and select a target");
+        compatibilityTarget.setConverter(new StringConverter<>() {
+            @Override public String toString(AssetManager.TargetProfile target) {
+                return target == null ? "" : target.id() + " / " + target.version();
+            }
+            @Override public AssetManager.TargetProfile fromString(String value) { throw new UnsupportedOperationException(); }
+        });
+        Button loadTargets = new Button("Load Supported Targets");
+        loadTargets.setOnAction(event -> loadCompatibilityTargets());
+        Button assess = new Button("Check Target Compatibility");
+        assess.setOnAction(event -> assessCompatibility());
+        compatibilityResults.setEditable(false);
+        compatibilityResults.setWrapText(true);
+        compatibilityResults.setPromptText("Compatibility findings appear here.");
+        compatibilityPane.getChildren().addAll(note, new FlowPane(8, 8, loadTargets, compatibilityTarget, assess), compatibilityResults);
+        VBox.setVgrow(compatibilityResults, Priority.ALWAYS);
+        projectId.textProperty().addListener((observable, oldValue, newValue) -> clearCompatibility());
+        state.textProperty().addListener((observable, oldValue, newValue) -> clearCompatibility());
+        logs.textProperty().addListener((observable, oldValue, newValue) -> clearCompatibility());
+        compatibilityTarget.valueProperty().addListener((observable, oldValue, newValue) -> clearCompatibility());
+    }
+
+    private void loadCompatibilityTargets() {
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            clearCompatibility();
+            long generation = compatibilityGeneration.current();
+            if (runner.submitValue(statePath, logPath, AssetManager::supportedTargets, result -> {
+                busy(false);
+                if (!compatibilityGeneration.isCurrent(generation)) {
+                    status.setText("Inputs changed; supported target results discarded.");
+                    return;
+                }
+                if (result.value() != null) compatibilityTarget.getItems().setAll(result.value());
+                status.setText(result.failure() == null ? "Supported targets loaded."
+                        : failureText(result.failure(), null) + (result.value() != null ? "\nTargets were obtained, but cleanup failed." : ""));
+            })) {
+                busy(true);
+                status.setText("Loading supported targets...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void assessCompatibility() {
+        clearCompatibility();
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID id = UUID.fromString(projectId.getText().trim());
+            AssetManager.TargetProfile target = compatibilityTarget.getValue();
+            if (target == null) throw new IllegalArgumentException("Choose a supported target.");
+            var request = new CompatibilityRequest(id, target);
+            long generation = compatibilityGeneration.current();
+            if (runner.submitValue(statePath, logPath, request::assess, result -> {
+                busy(false);
+                if (!compatibilityGeneration.isCurrent(generation)) {
+                    status.setText("Inputs changed; compatibility results discarded.");
+                    return;
+                }
+                if (result.value() != null) compatibilityResults.setText(formatCompatibility(result.value()));
+                status.setText(result.failure() == null ? "Target compatibility check complete; not full validation or approval."
+                        : failureText(result.failure(), null) + (result.value() != null ? "\nCompatibility results were obtained, but cleanup failed." : ""));
+            })) {
+                busy(true);
+                status.setText("Checking target compatibility...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void clearCompatibility() {
+        compatibilityGeneration.invalidate();
+        compatibilityResults.clear();
+    }
+
+    static String formatCompatibility(AssetManager.CompatibilityResult result) {
+        StringBuilder text = new StringBuilder("Target compatibility findings (not full validation or approval).\nInventory revision: ")
+                .append(result.inventoryRevision()).append("\nTarget: ").append(result.target().id())
+                .append(" / ").append(result.target().version()).append("\nFindings:\n");
+        if (result.findings().isEmpty()) return text.append("No compatibility findings.\n").toString();
+        for (Finding finding : result.findings()) {
+            text.append(finding.severity()).append(" [").append(finding.code()).append("] ");
+            finding.sourceRelativePath().ifPresent(path -> text.append(path).append(": "));
+            finding.assetId().ifPresent(id -> text.append("asset ").append(id).append(": "));
+            text.append(finding.message()).append('\n');
+        }
+        return text.toString();
     }
 
     private void setupAnalysis() {
@@ -280,6 +632,8 @@ public final class AssetMigrateApplication extends Application {
         inputs.setDisable(value);
         actions.setDisable(value);
         analysisPane.setDisable(value);
+        compatibilityPane.setDisable(value);
+        planPane.setDisable(value);
         progress.setVisible(value);
     }
 
@@ -333,6 +687,8 @@ public final class AssetMigrateApplication extends Application {
             })) {
                 busy(true);
                 clearDisplayedResults();
+                clearCompatibility();
+                clearPlan();
                 status.setText("Saving explicit review...");
             }
         } catch (IllegalArgumentException failure) {
@@ -540,6 +896,8 @@ public final class AssetMigrateApplication extends Application {
                             : manager.importAssets(sourcePath).snapshot(), this::completed);
             if (started) {
                 busy(true);
+                clearCompatibility();
+                clearPlan();
                 status.setText(load ? "Loading inventory..." : rescan ? "Rescanning project..." : "Importing project...");
                 summary.setText("No inventory loaded.");
                 inventory.getItems().clear();

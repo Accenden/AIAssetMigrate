@@ -33,4 +33,24 @@ public record InventorySnapshot(int schemaVersion, int inspectionVersion, Projec
             throw new IllegalArgumentException("Scan cannot precede project creation");
         }
     }
+
+    /** Scan status also reflects warnings; coverage requires all recorded paths to be accounted for. */
+    public boolean hasCompleteCoverage() {
+        if (pathOutcomes.isEmpty()) return scanStatus == ScanStatus.COMPLETE;
+        boolean rootTraversed = false;
+        java.util.Set<java.nio.file.Path> files = new java.util.HashSet<>();
+        java.util.Set<java.nio.file.Path> paths = new java.util.HashSet<>();
+        for (PathOutcome outcome : pathOutcomes) {
+            if (!paths.add(outcome.relativePath())) return false;
+            if (outcome.kind() == PathOutcome.Kind.DIRECTORY) {
+                if (outcome.status() != PathOutcome.Status.TRAVERSED) return false;
+                if (outcome.relativePath().toString().isEmpty()) rootTraversed = true;
+            } else {
+                if (outcome.status() != PathOutcome.Status.INVENTORIED) return false;
+                files.add(outcome.relativePath());
+            }
+        }
+        if (!rootTraversed || files.size() != project.assets().size()) return false;
+        return project.assets().stream().allMatch(asset -> files.remove(asset.relativePath())) && files.isEmpty();
+    }
 }

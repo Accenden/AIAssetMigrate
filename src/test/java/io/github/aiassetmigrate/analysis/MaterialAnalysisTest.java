@@ -43,12 +43,12 @@ class MaterialAnalysisTest {
         assertTrue(result.references().stream().allMatch(r -> r.resolutionStatus() == AssetReference.ResolutionStatus.RESOLVED));
     }
 
-    @Test void classifiesUnsafeMissingSkippedAndAmbiguous() throws Exception {
+    @Test void classifiesUnsafeUnresolvedSkippedAndAmbiguous() throws Exception {
         asset("a.obj", Asset.Type.MODEL, "mtllib ../escape.mtl absent.mtl skip/x.mtl MAT.mtl\nusemtl x\n");
         asset("mat.mtl", Asset.Type.MATERIAL, "newmtl x\n");
         var result = analyze(snapshot(InventorySnapshot.ScanStatus.COMPLETE,
                 List.of(new PathOutcome(Path.of("skip"), PathOutcome.Kind.DIRECTORY, PathOutcome.Status.SKIPPED))));
-        assertEquals(List.of(AssetReference.ResolutionStatus.UNSAFE, AssetReference.ResolutionStatus.MISSING,
+        assertEquals(List.of(AssetReference.ResolutionStatus.UNSAFE, AssetReference.ResolutionStatus.UNRESOLVED,
                 AssetReference.ResolutionStatus.SKIPPED, AssetReference.ResolutionStatus.CASE_AMBIGUOUS),
                 result.references().stream().map(AssetReference::resolutionStatus).toList());
         assertEquals(MaterialAnalysis.MappingStatus.UNVERIFIED, result.mappings().getFirst().status());

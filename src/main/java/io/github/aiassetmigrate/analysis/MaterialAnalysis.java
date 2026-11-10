@@ -60,6 +60,7 @@ public final class MaterialAnalysis {
 
     private static final class Run {
         final InventorySnapshot snapshot; final Content content; final Limits limits;
+        final boolean completeCoverage;
         final List<Asset> assets; final Map<Path, List<Asset>> paths = new HashMap<>();
         final Map<String, Integer> foldedPaths = new HashMap<>();
         final List<AssetReference> references = new ArrayList<>();
@@ -70,6 +71,7 @@ public final class MaterialAnalysis {
 
         Run(InventorySnapshot snapshot, Content content, Limits limits) {
             this.snapshot = snapshot; this.content = content; this.limits = limits;
+            this.completeCoverage = snapshot.hasCompleteCoverage();
             assets = snapshot.project().assets().stream().sorted(Comparator.comparing((Asset a) -> a.relativePath().toString())
                     .thenComparing(Asset::id)).toList();
             assets.forEach(a -> {
@@ -188,7 +190,7 @@ public final class MaterialAnalysis {
                     || (o.kind() == PathOutcome.Kind.DIRECTORY && (o.relativePath().toString().isEmpty() || target.startsWith(o.relativePath()))))
                     && (o.status() == PathOutcome.Status.SKIPPED || o.status() == PathOutcome.Status.FAILED || o.status() == PathOutcome.Status.UNVISITED)))
                 status = AssetReference.ResolutionStatus.SKIPPED;
-            else status = snapshot.scanStatus() == InventorySnapshot.ScanStatus.COMPLETE
+            else status = completeCoverage
                     ? AssetReference.ResolutionStatus.MISSING : AssetReference.ResolutionStatus.UNRESOLVED;
             return ref(owner, kind, value, target, status);
         }

@@ -50,14 +50,26 @@ public interface AssetManager {
 
     List<Finding> checkCompatibility(UUID projectId, TargetProfile target);
 
+    /** Lists explicitly supported, versioned compatibility profiles. */
+    List<TargetProfile> supportedTargets();
+
+    /** Performs a read-only compatibility assessment bound to an inventory revision. */
+    CompatibilityResult assessCompatibility(UUID projectId, TargetProfile target);
+
     /** Creates a draft only; generating a plan never approves it. */
     MigrationPlan createPlan(UUID projectId, TargetProfile target, Path outputRoot);
+
+    /** Loads a saved plan for inspection; status alone is not execution authority. */
+    MigrationPlan loadPlan(UUID planId);
 
     /** Requires explicit user approval of the exact displayed plan version. */
     MigrationPlan approve(UUID planId, int version);
 
     /** Rechecks approval, source fingerprints, tools, and paths before any write. */
     MigrationRun migrate(UUID planId);
+
+    /** Loads the single-use run record for a plan, including interrupted runs. */
+    MigrationRun loadRun(UUID planId);
 
     Report validate(UUID runId);
 
@@ -96,6 +108,14 @@ public interface AssetManager {
             if (id.isBlank() || version.isBlank()) {
                 throw new IllegalArgumentException("Target profile ID and version must not be blank");
             }
+        }
+    }
+
+    record CompatibilityResult(long inventoryRevision, TargetProfile target, List<Finding> findings) {
+        public CompatibilityResult {
+            if (inventoryRevision < 1) throw new IllegalArgumentException("Inventory revision must be positive");
+            Objects.requireNonNull(target, "target");
+            findings = List.copyOf(findings);
         }
     }
 

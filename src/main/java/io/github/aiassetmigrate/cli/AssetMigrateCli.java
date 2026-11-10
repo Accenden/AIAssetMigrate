@@ -9,8 +9,10 @@ import picocli.CommandLine.Spec;
         version = "AIAssetMigrate 0.1.0-SNAPSHOT",
         description = "Prepare game assets for migration.",
         subcommands = {ImportCommand.class, RescanCommand.class, LogsCommand.class,
-                AnalyzeCommand.class, AnalyzeOrganizationCommand.class, ReviewCommand.class, ReviewsCommand.class, PreviewOrganizationCommand.class},
-        footer = "Approval, migration, and AI are not implemented yet.")
+                AnalyzeCommand.class, AnalyzeOrganizationCommand.class, ReviewCommand.class, ReviewsCommand.class, PreviewOrganizationCommand.class,
+                CompatibilityCommand.class, PlanCommands.Plan.class, PlanCommands.Show.class,
+                PlanCommands.Approve.class, PlanCommands.Migrate.class, PlanCommands.ShowRun.class},
+        footer = "AI is not implemented yet.")
 public final class AssetMigrateCli implements Runnable {
     @Spec
     private CommandSpec spec;

@@ -5,6 +5,10 @@ import io.github.aiassetmigrate.analysis.CategoryAnalyzer;
 import io.github.aiassetmigrate.analysis.MaterialAnalysis;
 import io.github.aiassetmigrate.analysis.OrganizationPreview;
 import io.github.aiassetmigrate.analysis.OrganizationRulesAnalyzer;
+import io.github.aiassetmigrate.compatibility.CompatibilityEngine;
+import io.github.aiassetmigrate.migration.CopyPlanBuilder;
+import io.github.aiassetmigrate.migration.CopyExecutor;
+import io.github.aiassetmigrate.migration.FileMigrationPlanRepository;
 import io.github.aiassetmigrate.inventory.AssetScanner;
 import io.github.aiassetmigrate.inventory.FileAssetRepository;
 import io.github.aiassetmigrate.inventory.FileReviewedChangeRepository;
@@ -344,7 +348,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                             "Reference inspection is not supported for this format"));
                 }
             }
-            if (snapshot.scanStatus() != InventorySnapshot.ScanStatus.COMPLETE) {
+            if (!snapshot.hasCompleteCoverage()) {
                 findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.WARNING,
                         "INCOMPLETE_INVENTORY", "Reference analysis cannot cover paths omitted by the inventory scan"));
             }
@@ -509,11 +513,19 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     }
                 }
                 case EXCLUSION -> requireValue(values, "reason");
-                case NAME -> requireValue(values, "name");
+                case NAME -> {
+                    String name = requireValue(values, "name");
+                    if (change.decision() == ReviewedChange.Decision.ACCEPTED && !OrganizationPreview.validName(name)) {
+                        throw new IllegalArgumentException("Accepted name must be a portable filename");
+                    }
+                }
                 case FOLDER -> {
                     String folder = values.get("folder");
                     if (folder == null || folder.length() > 4096) {
                         throw new IllegalArgumentException("A folder value is required (maximum 4096 characters)");
+                    }
+                    if (change.decision() == ReviewedChange.Decision.ACCEPTED && !OrganizationPreview.validFolder(folder)) {
+                        throw new IllegalArgumentException("Accepted folder must be a portable relative path");
                     }
                 }
                 default -> throw new UnsupportedOperationException("Review not implemented: " + change.kind());
@@ -562,10 +574,181 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
         return value;
     }
-    @Override public List<Finding> checkCompatibility(UUID id, TargetProfile target) { throw new UnsupportedOperationException(); }
-    @Override public MigrationPlan createPlan(UUID id, TargetProfile target, Path output) { throw new UnsupportedOperationException(); }
-    @Override public MigrationPlan approve(UUID id, int version) { throw new UnsupportedOperationException(); }
-    @Override public MigrationRun migrate(UUID id) { throw new UnsupportedOperationException(); }
+    @Override public List<TargetProfile> supportedTargets() {
+        ensureOpen();
+        return CompatibilityEngine.profiles();
+    }
+
+    @Override public List<Finding> checkCompatibility(UUID id, TargetProfile target) {
+        return assessCompatibility(id, target).findings();
+    }
+
+    @Override public CompatibilityResult assessCompatibility(UUID id, TargetProfile target) {
+        InventorySnapshot inventory = loadInventory(id);
+        if (!CompatibilityEngine.profiles().contains(Objects.requireNonNull(target, "target"))) {
+            throw new IllegalArgumentException("Unknown target profile or version: " + target);
+        }
+        var inspectedReferences = inspectReferences(inventory);
+        InventorySnapshot inspected = new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(),
+                inventory.project(), inventory.findings(), inventory.scanStatus(), inventory.scannedAt(),
+                inventory.pathOutcomes(), inspectedReferences.references());
+        List<Finding> findings = new ArrayList<>(inventory.findings());
+        findings.addAll(CompatibilityEngine.check(inspected, target));
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        Set<UUID> inspectedIds = new HashSet<>();
+        for (var file : inspectedReferences.files()) {
+            inspectedIds.add(file.assetId());
+            if (file.status() != MaterialAnalysis.Inspection.VERIFIED) {
+                findings.add(analysisFinding(assets.get(file.assetId()), "INSPECTION_" + file.status(),
+                        "Reference inspection: " + file.status()));
+            }
+        }
+        for (Asset asset : inventory.project().assets()) {
+            if ((asset.type() == Asset.Type.MODEL || asset.type() == Asset.Type.MATERIAL)
+                    && !inspectedIds.contains(asset.id())) {
+                findings.add(analysisFinding(asset, "INSPECTION_UNSUPPORTED", "References were not inspected for this format"));
+            }
+        }
+        for (var mapping : inspectedReferences.mappings()) {
+            if (mapping.status() != MaterialAnalysis.MappingStatus.RESOLVED) {
+                findings.add(analysisFinding(assets.get(mapping.modelId()), "MATERIAL_" + mapping.status(),
+                        "Material '" + mapping.materialName() + "': " + mapping.status()));
+            }
+        }
+        if (inspectedReferences.truncated()) findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(),
+                Finding.Severity.WARNING, "ANALYSIS_LIMIT", "Reference analysis exceeded its budget"));
+        findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.WARNING,
+                "SOURCE_REVALIDATION_INCOMPLETE", "Only inspected OBJ and MTL source fingerprints were rechecked; other source files may have changed"));
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed during compatibility assessment; retry");
+        return new CompatibilityResult(inventory.project().inventoryRevision(), target, findings);
+    }
+    @Override public MigrationPlan createPlan(UUID id, TargetProfile target, Path output) {
+        Objects.requireNonNull(target, "target");
+        Objects.requireNonNull(output, "output");
+        if (!output.isAbsolute()) throw new IllegalArgumentException("Output root must be absolute");
+        for (Path component : output) {
+            if (component.toString().equals("..")) throw new IllegalArgumentException("Output root cannot contain parent traversal");
+        }
+        Path root = output.normalize();
+        InventorySnapshot inventory = loadInventory(id);
+        if (!supportedTargets().contains(target)) throw new IllegalArgumentException("Unknown target profile or version: " + target);
+        try {
+            validatePaths(inventory.project().sourceRoot(), id);
+            SafeStoragePaths.validateSeparation(inventory.project().sourceRoot(), root);
+            SafeStoragePaths.validateExistingPath(root);
+            if (overlap(root, stateDirectory) || overlap(root, logDirectory)) {
+                throw new IOException("Output must be separate from state and log directories");
+            }
+            var latestReviews = new FileReviewedChangeRepository(stateDirectory).loadLatest(id);
+            long reviewRevision = latestReviews.map(FileReviewedChangeRepository.ReviewSet::revision).orElse(0L);
+            List<ReviewedChange> decisions = latestReviews
+                    .filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
+                    .map(FileReviewedChangeRepository.ReviewSet::changes).orElse(List.of());
+            var preview = previewOrganization(id, inventory.project().inventoryRevision());
+            var compatibility = assessCompatibility(id, target);
+            if (!loadInventory(id).equals(inventory)) throw new IOException("Inventory changed during planning");
+            var draft = CopyPlanBuilder.draft(inventory, decisions, preview, target, root, UUID.randomUUID(),
+                    Instant.now(), compatibility.findings());
+            return new FileMigrationPlanRepository(stateDirectory).createDraft(draft, reviewRevision);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot create draft plan for project " + id, e);
+        }
+    }
+
+    @Override public MigrationPlan loadPlan(UUID planId) {
+        ensureOpen();
+        try {
+            return new FileMigrationPlanRepository(stateDirectory).load(planId).plan();
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot load plan " + planId, e);
+        }
+    }
+    @Override public MigrationPlan approve(UUID id, int version) {
+        ensureOpen();
+        try {
+            return new FileMigrationPlanRepository(stateDirectory).approve(id, version, this::validateCopyPlan);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot approve plan " + id + ": " + e.getMessage(), e);
+        }
+    }
+
+    @Override public MigrationRun migrate(UUID id) {
+        ensureOpen();
+        try {
+            var repository = new FileMigrationPlanRepository(stateDirectory);
+            MigrationPlan plan = repository.load(id).plan();
+            return repository.execute(id, plan.version(), this::validateCopyPlan, (approved, inventory, reservation) -> {
+                var inspected = inspectedInventory(inventory);
+                var result = new CopyExecutor().execute(inspected, approved, stateDirectory, logDirectory);
+                Map<UUID, StepStatus> statuses = new java.util.LinkedHashMap<>();
+                Map<UUID, String> details = new java.util.LinkedHashMap<>();
+                for (var step : result.steps()) {
+                    statuses.put(step.commandId(), switch (step.status()) {
+                        case COMPLETED -> StepStatus.SUCCESS;
+                        case FAILED -> StepStatus.FAILED;
+                        case SKIPPED -> StepStatus.SKIPPED;
+                    });
+                    if (step.detail() != null && !step.detail().isBlank()) details.put(step.commandId(), step.detail());
+                }
+                long succeeded = statuses.values().stream().filter(status -> status == StepStatus.SUCCESS).count();
+                RunStatus status = result.preflightPassed() && result.error().isEmpty() ? RunStatus.SUCCESS
+                        : succeeded > 0 ? RunStatus.PARTIAL : RunStatus.FAILED;
+                return new FileMigrationPlanRepository.ExecutionResult(status, statuses,
+                        Optional.ofNullable(result.error()).filter(message -> !message.isBlank()), details);
+            });
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot execute plan " + id + ": " + e.getMessage(), e);
+        }
+    }
+
+    @Override public MigrationRun loadRun(UUID id) {
+        ensureOpen();
+        try {
+            return new FileMigrationPlanRepository(stateDirectory).loadRun(id);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot load run for plan " + id, e);
+        }
+    }
+
+    private void validateCopyPlan(MigrationPlan plan, InventorySnapshot inventory) throws IOException {
+        if (!plan.projectId().equals(inventory.project().id())
+                || plan.inventoryRevision() != inventory.project().inventoryRevision()) throw new IOException("Plan inventory is stale");
+        TargetProfile target = new TargetProfile(plan.targetProfile(), plan.targetProfileVersion());
+        if (!supportedTargets().contains(target)) throw new IOException("Plan target is not supported");
+        validatePaths(inventory.project().sourceRoot(), plan.projectId());
+        Path output = plan.outputRoot();
+        if (!output.isAbsolute()) throw new IOException("Output must be absolute");
+        SafeStoragePaths.validateSeparation(inventory.project().sourceRoot(), output);
+        SafeStoragePaths.validateExistingPath(output);
+        if (overlap(output, stateDirectory) || overlap(output, logDirectory)) throw new IOException("Output overlaps state or logs");
+        if (plan.findings().stream().anyMatch(f -> f.severity() == Finding.Severity.ERROR || f.severity() == Finding.Severity.UNKNOWN)) {
+            throw new IOException("Plan has blocking findings");
+        }
+        var preview = previewOrganization(plan.projectId(), plan.inventoryRevision());
+        if (preview.blocked()) throw new IOException("Current organization preview has blocking findings");
+        var compatibility = assessCompatibility(plan.projectId(), target);
+        if (compatibility.inventoryRevision() != plan.inventoryRevision()
+                || compatibility.findings().stream().anyMatch(f -> f.severity() == Finding.Severity.ERROR
+                    || f.severity() == Finding.Severity.UNKNOWN)) {
+            throw new IOException("Current compatibility assessment has blocking findings");
+        }
+        if (!CopyPlanBuilder.commands(inventory, preview, plan.id()).equals(plan.commands())) {
+            throw new IOException("Plan commands do not match the reviewed organization");
+        }
+        if (plan.status() == PlanStatus.APPROVED) {
+            new CopyExecutor().validatePreflight(inspectedInventory(inventory), plan, stateDirectory, logDirectory);
+        }
+    }
+
+    private InventorySnapshot inspectedInventory(InventorySnapshot inventory) throws IOException {
+        var analysis = inspectReferences(inventory);
+        if (analysis.truncated() || analysis.files().stream().anyMatch(f -> f.status() != MaterialAnalysis.Inspection.VERIFIED)) {
+            throw new IOException("Reference inspection is incomplete or source files changed");
+        }
+        return new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(), inventory.project(),
+                inventory.findings(), inventory.scanStatus(), inventory.scannedAt(), inventory.pathOutcomes(), analysis.references());
+    }
     @Override public Report validate(UUID id) { throw new UnsupportedOperationException(); }
     @Override public List<Report> history(UUID id) { throw new UnsupportedOperationException(); }
     @Override public CommandResult command(UUID id, String request) { throw new UnsupportedOperationException(); }

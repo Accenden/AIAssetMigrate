@@ -19,6 +19,46 @@ import static org.junit.jupiter.api.Assertions.*;
 class AnalysisIntegrationTest {
     @TempDir Path directory;
 
+    @Test void compatibilityIncludesReferenceCoverageAndChangesAreReported() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path model = source.resolve("hero.obj");
+        Files.writeString(model, "mtllib missing.mtl\nv 0 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id();
+            var target = new AssetManager.TargetProfile("godot", "4.3");
+            assertTrue(manager.supportedTargets().contains(target));
+            var result = manager.assessCompatibility(project, target);
+            assertEquals(snapshot.project().inventoryRevision(), result.inventoryRevision());
+            assertEquals(target, result.target());
+            assertTrue(result.findings().stream().anyMatch(f -> f.code().startsWith("REFERENCE_")));
+            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("CONVERTER_AVAILABILITY_UNKNOWN")));
+            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("SOURCE_REVALIDATION_INCOMPLETE")));
+            assertThrows(IllegalArgumentException.class, () -> manager.assessCompatibility(project,
+                    new AssetManager.TargetProfile("godot", "unsupported")));
+            Files.writeString(model, "v 1 1 1\n");
+            assertTrue(manager.assessCompatibility(project, target).findings().stream()
+                    .anyMatch(f -> f.code().equals("INSPECTION_FINGERPRINT_MISMATCH")));
+        }
+    }
+
+    @Test void invalidAcceptedOrganizationReviewsAreRejectedBeforeSaving() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id(), asset = snapshot.project().assets().getFirst().id();
+            long revision = snapshot.project().inventoryRevision();
+            var name = new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.NAME,
+                    ReviewedChange.Decision.ACCEPTED, Map.of("name", "../hero.obj"), Instant.now());
+            var folder = new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.FOLDER,
+                    ReviewedChange.Decision.ACCEPTED, Map.of("folder", "../elsewhere"), Instant.now());
+            assertThrows(IllegalArgumentException.class, () -> manager.review(project, revision, List.of(name)));
+            assertThrows(IllegalArgumentException.class, () -> manager.review(project, revision, List.of(folder)));
+            assertTrue(manager.loadReviews(project).isEmpty());
+        }
+    }
+
     @Test void ruleSuggestionsRemainUnacceptedUntilExplicitReview() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Path model = source.resolve("Hero Knight.obj");
@@ -185,6 +225,8 @@ class AnalysisIntegrationTest {
             assertThrows(IllegalArgumentException.class, () -> manager.review(project, revision, List.of(invalid)));
             assertTrue(manager.loadReviews(project).isEmpty());
             assertEquals(List.of(valid), manager.review(project, revision, List.of(valid)));
+            assertTrue(manager.previewOrganization(project, revision).findings().stream()
+                    .anyMatch(f -> f.code().equals("REVIEWED_MAPPING_UNSUPPORTED")));
         }
     }
 

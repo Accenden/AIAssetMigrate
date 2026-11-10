@@ -66,6 +66,19 @@ class OrganizationPreviewTest {
         }
         assertTrue(has(preview(s, decision(a, ReviewedChange.Kind.NAME, ReviewedChange.Decision.ACCEPTED, Map.of())), "INVALID_DESTINATION"));
         assertFalse(preview(s, decision(a, ReviewedChange.Kind.FOLDER, ReviewedChange.Decision.ACCEPTED, Map.of("folder", ""))).blocked());
+        assertTrue(OrganizationPreview.validName("é".repeat(125) + ".png"));
+        assertFalse(OrganizationPreview.validName("é".repeat(126) + ".png"));
+        assertFalse(OrganizationPreview.validFolder("é".repeat(128)));
+    }
+
+    @Test void acceptedMaterialMappingsAreNotSilentlyTreatedAsApplied() {
+        Asset model = asset("model.obj"), material = asset("a.mtl");
+        var mapping = decision(model, ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Decision.ACCEPTED,
+                Map.of("targetAssetId", material.id().toString(), "reference", "body"));
+        var excluded = decision(model, ReviewedChange.Kind.EXCLUSION, ReviewedChange.Decision.ACCEPTED, Map.of());
+        var s = snapshot(List.of(model, material), List.of());
+        assertTrue(has(preview(s, mapping), "REVIEWED_MAPPING_UNSUPPORTED"));
+        assertFalse(has(preview(s, mapping, excluded), "REVIEWED_MAPPING_UNSUPPORTED"));
     }
 
     @Test void catchesDuplicateCaseUnicodeAndFileDirectoryConflicts() {

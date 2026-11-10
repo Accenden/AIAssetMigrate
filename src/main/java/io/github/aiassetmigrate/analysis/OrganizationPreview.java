@@ -6,6 +6,7 @@ import io.github.aiassetmigrate.domain.InventorySnapshot;
 import io.github.aiassetmigrate.domain.ReviewedChange;
 
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -62,7 +63,7 @@ public final class OrganizationPreview {
                 throw new IllegalArgumentException("Multiple decisions for the same asset and kind");
         }
         List<Finding> findings = new ArrayList<>();
-        if (snapshot.scanStatus() != InventorySnapshot.ScanStatus.COMPLETE)
+        if (!snapshot.hasCompleteCoverage())
             findings.add(finding("PARTIAL_INVENTORY", null, "Inventory coverage is incomplete"));
         List<Entry> entries = new ArrayList<>();
         Map<UUID, Entry> entryById = new HashMap<>();
@@ -86,6 +87,14 @@ public final class OrganizationPreview {
             }
             Entry entry = new Entry(asset.id(), asset.relativePath(), destination, excluded);
             entries.add(entry); entryById.put(asset.id(), entry);
+        }
+        for (ReviewedChange decision : decisions.stream().sorted(Comparator.comparing(ReviewedChange::assetId)
+                .thenComparing(ReviewedChange::id)).toList()) {
+            if (decision.kind() == ReviewedChange.Kind.MATERIAL_MAPPING && accepted(decision)
+                    && !entryById.get(decision.assetId()).excluded()) {
+                findings.add(finding("REVIEWED_MAPPING_UNSUPPORTED", decision.assetId(),
+                        "Reviewed material mappings are not applied or validated by this preview"));
+            }
         }
         record Destination(Entry entry, String key) {}
         List<Destination> destinations = entries.stream().filter(e -> e.destination().isPresent())
@@ -163,15 +172,16 @@ public final class OrganizationPreview {
         }
         return Integer.compare(left.length(), right.length());
     }
-    private static boolean validFolder(String folder) {
+    public static boolean validFolder(String folder) {
         if (folder == null) return false;
         if (folder.isEmpty()) return true;
         for (String component : folder.split("/", -1)) if (!validName(component)) return false;
         return true;
     }
-    private static boolean validName(String name) {
+    public static boolean validName(String name) {
         if (name == null || name.isEmpty() || name.equals(".") || name.equals("..") || name.endsWith(" ") || name.endsWith(".")) return false;
-        if (name.length() > 255 || name.chars().anyMatch(c -> c < 32 || c == 127 || "<>:\"/\\|?*".indexOf(c) >= 0)) return false;
+        if (name.length() > 255 || name.getBytes(StandardCharsets.UTF_8).length > 255
+                || name.chars().anyMatch(c -> c < 32 || c == 127 || "<>:\"/\\|?*".indexOf(c) >= 0)) return false;
         String stem = name.split("\\.", 2)[0].toUpperCase(Locale.ROOT);
         return !stem.matches("CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3]");
     }
