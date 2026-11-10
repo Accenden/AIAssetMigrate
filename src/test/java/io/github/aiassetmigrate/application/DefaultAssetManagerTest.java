@@ -44,12 +44,6 @@ class DefaultAssetManagerTest {
         byte[] changed = "v 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n".getBytes();
         Files.write(asset, changed);
         try (var manager = new DefaultAssetManager(state, logs)) {
-            if (!Files.getFileStore(logs).supportsFileAttributeView("unix")) {
-                assertThrows(ImportException.class, () -> manager.rescan(first.project().id(), source));
-                assertEquals(first, manager.loadInventory(first.project().id()));
-                assertArrayEquals(changed, Files.readAllBytes(asset));
-                return;
-            }
             var second = manager.rescan(first.project().id(), source).snapshot();
             assertEquals(2, second.project().inventoryRevision());
             assertEquals(first.project().id(), second.project().id());
@@ -83,7 +77,7 @@ class DefaultAssetManagerTest {
     }
 
     @Test void rejectsOverlapAndWrongRootBeforeWriting() throws Exception {
-        assertThrows(IOException.class, () -> new DefaultAssetManager(state, state.resolve("logs")));
+        assertThrows(IOException.class, () -> new DefaultAssetManager(state, state.resolve("other-logs")));
         Path inside = source.resolve("inside");
         try (var manager = new DefaultAssetManager(state, inside)) {
             assertThrows(ImportException.class, () -> manager.importAssets(source));

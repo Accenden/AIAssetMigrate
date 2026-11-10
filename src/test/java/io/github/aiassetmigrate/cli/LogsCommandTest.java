@@ -37,6 +37,20 @@ class LogsCommandTest {
     }
 
     @Test
+    void readsManagedLogsFromDirectoryInvocation() throws Exception {
+        UUID project = UUID.randomUUID();
+        Path state = directory.resolve("state");
+        try (var publisher = new LogPublisher(state.resolve("logs"), project)) {
+            publisher.publish(LogEvent.Level.INFO, "managed");
+        }
+        var output = new StringWriter();
+        var cli = new CommandLine(new AssetMigrateCli()).setOut(new PrintWriter(output));
+
+        assertEquals(0, cli.execute("logs", "--directory", state.resolve("logs").toString(), "--project", project.toString()));
+        assertTrue(output.toString().contains("managed"));
+    }
+
+    @Test
     void followsNewEventsAndStopsOnInterruption() throws Exception {
         UUID project = UUID.randomUUID();
         var output = new StringWriter();

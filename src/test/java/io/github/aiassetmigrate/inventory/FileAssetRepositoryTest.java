@@ -8,7 +8,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -180,17 +180,17 @@ class FileAssetRepositoryTest {
     }
 
     @Test
-    void atomicMoveFailurePreservesPriorRevisionAndAbandonedTemporaryFile() throws IOException {
+    void atomicPublicationFailurePreservesPriorRevisionAndAbandonedTemporaryFile() throws IOException {
         var repository = new FileAssetRepository(state);
         saveFirst(repository);
         byte[] first = Files.readAllBytes(projectDirectory().resolve("inventory-000001.json"));
         var failing = new FileAssetRepository(state, FileAssetRepository.DEFAULT_MAX_SNAPSHOT_BYTES,
                 (temporary, target) -> {
                     assertTrue(Files.isRegularFile(temporary));
-                    throw new AtomicMoveNotSupportedException(temporary.toString(), target.toString(), "injected");
+                    throw new IOException("Injected atomic publication failure");
                 });
         try (var writer = failing.beginWrite(ID, source)) {
-            assertThrows(AtomicMoveNotSupportedException.class, () -> writer.saveNextRevision(snapshot(2)));
+            assertThrows(IOException.class, () -> writer.saveNextRevision(snapshot(2)));
         }
         assertFalse(Files.exists(projectDirectory().resolve("inventory-000002.json")));
         assertEquals(snapshot(1), repository.loadLatest(ID).orElseThrow());
@@ -205,6 +205,25 @@ class FileAssetRepositoryTest {
         }
         assertTrue(Files.exists(abandoned.getFirst()));
         assertEquals(snapshot(2), repository.loadLatest(ID).orElseThrow());
+    }
+
+    @Test
+    void targetCreatedDuringPublicationIsNeverReplaced() throws IOException {
+        var repository = new FileAssetRepository(state);
+        saveFirst(repository);
+        Path target = projectDirectory().resolve("inventory-000002.json");
+        byte[] existing = "already-published".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        var racing = new FileAssetRepository(state, FileAssetRepository.DEFAULT_MAX_SNAPSHOT_BYTES,
+                (temporary, ignored) -> {
+                    Files.write(target, existing);
+                    throw new FileAlreadyExistsException(target.toString());
+                });
+        try (var writer = racing.beginWrite(ID, source)) {
+            assertThrows(FileAlreadyExistsException.class, () -> writer.saveNextRevision(snapshot(2)));
+        }
+        assertArrayEquals(existing, Files.readAllBytes(target));
+        assertThrows(IOException.class, () -> repository.loadLatest(ID));
+        assertEquals(snapshot(1), repository.loadRevision(ID, 1));
     }
 
     @Test

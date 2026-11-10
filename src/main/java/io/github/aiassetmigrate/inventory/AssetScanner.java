@@ -1,6 +1,7 @@
 package io.github.aiassetmigrate.inventory;
 
 import io.github.aiassetmigrate.domain.Asset;
+import io.github.aiassetmigrate.domain.AssetReference;
 import io.github.aiassetmigrate.domain.Finding;
 import io.github.aiassetmigrate.domain.InventorySnapshot;
 import io.github.aiassetmigrate.domain.PathOutcome;
@@ -11,6 +12,7 @@ import java.io.InterruptedIOException;
 import java.nio.file.DirectoryIteratorException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -50,15 +52,23 @@ public final class AssetScanner {
         this.io = Objects.requireNonNull(io, "io");
     }
 
-    /** PARTIAL means at least one warning, including unverified formats; path outcomes describe coverage. */
+    /** Scan status reflects path coverage; findings can describe unverified content without making a scan partial. */
     public record ScanResult(Path sourceRoot, List<Asset> assets, List<Finding> findings,
-                             InventorySnapshot.ScanStatus scanStatus, List<PathOutcome> pathOutcomes) {
+                             InventorySnapshot.ScanStatus scanStatus, List<PathOutcome> pathOutcomes,
+                             List<AssetReference> references) {
         public ScanResult {
             Objects.requireNonNull(sourceRoot, "sourceRoot");
             assets = List.copyOf(assets);
             findings = List.copyOf(findings);
             Objects.requireNonNull(scanStatus, "scanStatus");
             pathOutcomes = List.copyOf(pathOutcomes);
+            references = List.copyOf(references);
+        }
+
+        /** Kept for callers which do not yet consume scan-time references. */
+        public ScanResult(Path sourceRoot, List<Asset> assets, List<Finding> findings,
+                          InventorySnapshot.ScanStatus scanStatus, List<PathOutcome> pathOutcomes) {
+            this(sourceRoot, assets, findings, scanStatus, pathOutcomes, List.of());
         }
     }
 
@@ -89,11 +99,14 @@ public final class AssetScanner {
         state.traverse();
         interrupted();
         state.assets.sort(Comparator.comparing(asset -> portable(asset.relativePath())));
+        state.resolveReferences();
         state.findings.sort(Comparator.comparing((Finding finding) ->
                 portable(finding.sourceRelativePath().orElseThrow())).thenComparing(Finding::code));
         state.outcomes.sort(Comparator.comparing(outcome -> portable(outcome.relativePath())));
-        return new ScanResult(root, state.assets, state.findings, state.findings.isEmpty()
-                ? InventorySnapshot.ScanStatus.COMPLETE : InventorySnapshot.ScanStatus.PARTIAL, state.outcomes);
+        state.references.sort(Comparator.comparing((AssetReference reference) -> portable(state.assetPaths.get(reference.ownerAssetId())))
+                .thenComparing(AssetReference::kind).thenComparing(AssetReference::originalText)
+                .thenComparing(AssetReference::resolutionStatus));
+        return new ScanResult(root, state.assets, state.findings, scanStatus(state.outcomes), state.outcomes, state.references);
     }
 
     private final class State {
@@ -102,6 +115,9 @@ public final class AssetScanner {
         private final List<Asset> assets = new ArrayList<>();
         private final List<Finding> findings = new ArrayList<>();
         private final List<PathOutcome> outcomes = new ArrayList<>();
+        private final List<PendingReference> pendingReferences = new ArrayList<>();
+        private final List<AssetReference> references = new ArrayList<>();
+        private final Map<UUID, Path> assetPaths = new HashMap<>();
         private final ArrayDeque<DirectoryVisit> pending = new ArrayDeque<>();
         private int entries;
 
@@ -253,10 +269,16 @@ public final class AssetScanner {
                 outcome(relative, FILE, SKIPPED);
                 return SKIPPED;
             }
+            if (before.size() > limits.maxFileBytes()) {
+                problem(relative, "FILE_SIZE_LIMIT", "File exceeds the configured scan byte limit");
+                outcome(relative, FILE, SKIPPED);
+                return SKIPPED;
+            }
             try {
                 MessageDigest digest = sha256();
                 safe(file);
-                FormatInspection inspection = new FormatInspection(extension, before.size(), limits);
+                boolean hashOnlyImage = type == Asset.Type.TEXTURE;
+                FormatInspection inspection = hashOnlyImage ? null : new FormatInspection(extension, before.size(), limits);
                 long bytes = 0;
                 boolean grew = false;
                 try (InputStream input = io.open(file)) {
@@ -273,7 +295,7 @@ public final class AssetScanner {
                             break;
                         }
                         digest.update(buffer, 0, count);
-                        inspection.accept(buffer, count);
+                        if (inspection != null) inspection.accept(buffer, count);
                         bytes += count;
                     }
                 }
@@ -285,19 +307,35 @@ public final class AssetScanner {
                     outcome(relative, FILE, FAILED);
                     return FAILED;
                 }
-                FormatInspection.Result inspected = inspection.finish();
+                FormatInspection.Result inspected = inspection == null
+                        ? new FormatInspection.Result(false, Asset.InspectionStatus.NOT_PERFORMED, "SHA256_STREAM_ONLY",
+                        "SHA-256 fingerprint computed from streamed bytes only; content validation was not performed", List.of(), List.of())
+                        : inspection.finish();
                 if (inspected.corrupt()) {
                     problem(relative, "CORRUPT_FORMAT", inspected.message());
                     outcome(relative, FILE, SKIPPED);
                     return SKIPPED;
                 }
-                problem(relative, "INSPECTION_UNVERIFIED", inspected.message());
-                assets.add(new Asset(UUID.randomUUID(), relative, type,
+                Finding.Severity severity = inspected.status() == Asset.InspectionStatus.UNKNOWN
+                        ? Finding.Severity.UNKNOWN : Finding.Severity.WARNING;
+                problem(relative, Optional.empty(), severity,
+                        inspected.status() == Asset.InspectionStatus.UNKNOWN ? "INSPECTION_UNKNOWN" : "INSPECTION_UNVERIFIED",
+                        inspected.message());
+                UUID id = UUID.randomUUID();
+                assets.add(new Asset(id, relative, type,
                         HexFormat.of().formatHex(digest.digest()), Map.of(
                         Asset.FORMAT, extension, Asset.SIZE_BYTES, Long.toString(before.size()),
                         Asset.MODIFIED_AT, before.lastModifiedTime().toInstant().toString(),
-                        Asset.INSPECTION_STATUS, Asset.InspectionStatus.UNVERIFIED.name(),
+                        Asset.INSPECTION_STATUS, inspected.status().name(),
                         Asset.INSPECTION_METHOD, inspected.method())));
+                assetPaths.put(id, relative);
+                for (FormatInspection.ExtractedReference reference : inspected.references()) {
+                    pendingReferences.add(new PendingReference(id, relative, reference.kind(), reference.originalText(),
+                            reference.unresolved()));
+                }
+                for (FormatInspection.Limitation limitation : inspected.limitations()) {
+                    problem(relative, Optional.of(id), Finding.Severity.WARNING, limitation.code(), limitation.message());
+                }
                 outcome(relative, FILE, INVENTORIED);
                 return INVENTORIED;
             } catch (IOException failure) {
@@ -319,16 +357,112 @@ public final class AssetScanner {
         }
 
         private void problem(Path path, String code, String message) {
-            findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.of(path),
-                    Finding.Severity.WARNING, code, message));
+            problem(path, Optional.empty(), Finding.Severity.WARNING, code, message);
+        }
+
+        private void problem(Path path, Optional<UUID> assetId, Finding.Severity severity, String code, String message) {
+            findings.add(new Finding(UUID.randomUUID(), assetId, Optional.of(path), severity, code, message));
         }
 
         private void outcome(Path path, PathOutcome.Kind kind, PathOutcome.Status status) {
             outcomes.add(new PathOutcome(path, kind, status));
         }
+
+        private void resolveReferences() throws InterruptedIOException {
+            Map<String, List<Asset>> supported = new HashMap<>();
+            Map<String, Integer> foldedSupported = new HashMap<>();
+            Map<String, PathOutcome> pathOutcomes = new HashMap<>();
+            Map<String, Integer> foldedOutcomes = new HashMap<>();
+            for (Asset asset : assets) {
+                supported.computeIfAbsent(portable(asset.relativePath()), ignored -> new ArrayList<>()).add(asset);
+                foldedSupported.merge(folded(asset.relativePath()), 1, Integer::sum);
+            }
+            for (PathOutcome outcome : outcomes) {
+                pathOutcomes.put(portable(outcome.relativePath()), outcome);
+                if (!outcome.relativePath().toString().isEmpty()) {
+                    foldedOutcomes.merge(folded(outcome.relativePath()), 1, Integer::sum);
+                }
+            }
+            boolean complete = scanStatus(outcomes) == InventorySnapshot.ScanStatus.COMPLETE;
+            for (int index = 0; index < pendingReferences.size(); index++) {
+                if ((index & 255) == 0) interrupted();
+                PendingReference pending = pendingReferences.get(index);
+                AssetReference resolved = resolve(pending, supported, foldedSupported, pathOutcomes, foldedOutcomes, complete);
+                references.add(resolved);
+                if (resolved.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED) {
+                    problem(pending.ownerPath(), Optional.of(pending.ownerAssetId()), Finding.Severity.WARNING,
+                            "REFERENCE_" + resolved.resolutionStatus(), "Reference '" + pending.originalText()
+                                    + "' is " + resolved.resolutionStatus());
+                }
+            }
+        }
+
+        private AssetReference resolve(PendingReference pending, Map<String, List<Asset>> supported,
+                                       Map<String, Integer> foldedSupported, Map<String, PathOutcome> pathOutcomes,
+                                       Map<String, Integer> foldedOutcomes, boolean complete) {
+            if (pending.unresolved()) {
+                return reference(pending, null, AssetReference.ResolutionStatus.UNRESOLVED);
+            }
+            Path target = normalizedTarget(pending.ownerPath(), pending.originalText());
+            if (target == null) return reference(pending, null, AssetReference.ResolutionStatus.UNSAFE);
+            List<Asset> exact = supported.getOrDefault(portable(target), List.of());
+            int foldedSupportedCount = foldedSupported.getOrDefault(folded(target), 0);
+            int foldedOutcomeCount = foldedOutcomes.getOrDefault(folded(target), 0);
+            if (foldedSupportedCount > 1 || foldedOutcomeCount > 1 || (exact.isEmpty() && foldedSupportedCount > 0)) {
+                return reference(pending, target, AssetReference.ResolutionStatus.CASE_AMBIGUOUS);
+            }
+            if (exact.size() == 1) {
+                Asset.Type expected = pending.kind() == AssetReference.Kind.MATERIAL_LIBRARY
+                        ? Asset.Type.MATERIAL : Asset.Type.TEXTURE;
+                return reference(pending, target, exact.getFirst().type() == expected
+                        ? AssetReference.ResolutionStatus.RESOLVED : AssetReference.ResolutionStatus.UNRESOLVED);
+            }
+            if (skipped(target, pathOutcomes)) return reference(pending, target, AssetReference.ResolutionStatus.SKIPPED);
+            return reference(pending, target, complete ? AssetReference.ResolutionStatus.MISSING
+                    : AssetReference.ResolutionStatus.UNRESOLVED);
+        }
+
+        private static AssetReference reference(PendingReference pending, Path target,
+                                                AssetReference.ResolutionStatus status) {
+            return new AssetReference(pending.ownerAssetId(), pending.kind(), pending.originalText(),
+                    Optional.ofNullable(target), status);
+        }
+
+        private static Path normalizedTarget(Path owner, String original) {
+            if (original.isEmpty() || original.startsWith("/") || original.contains("\\")
+                    || original.contains(":") || original.indexOf('\0') >= 0) return null;
+            try {
+                Path raw = Path.of(original);
+                Path parent = owner.getParent();
+                Path target = (parent == null ? raw : parent.resolve(raw)).normalize();
+                if (target.isAbsolute() || target.getRoot() != null || target.toString().isEmpty() || target.startsWith("..")) {
+                    return null;
+                }
+                for (Path component : target) {
+                    if (!portableName(component.toString())) return null;
+                }
+                return target;
+            } catch (InvalidPathException exception) {
+                return null;
+            }
+        }
+
+        private static boolean skipped(Path target, Map<String, PathOutcome> outcomes) {
+            Path current = target;
+            while (current != null) {
+                PathOutcome outcome = outcomes.get(portable(current));
+                if (outcome != null && (outcome.status() == SKIPPED || outcome.status() == FAILED
+                        || outcome.status() == UNVISITED)) return true;
+                current = current.getParent();
+            }
+            PathOutcome root = outcomes.get("");
+            return root != null && (root.status() == SKIPPED || root.status() == FAILED || root.status() == UNVISITED);
+        }
     }
 
     private record DirectoryVisit(Path path, int depth) {}
+    private record PendingReference(UUID ownerAssetId, Path ownerPath, AssetReference.Kind kind, String originalText,
+                                    boolean unresolved) {}
 
     private static boolean same(BasicFileAttributes before, BasicFileAttributes after) {
         return Objects.equals(before.fileKey(), after.fileKey()) && before.size() == after.size()
@@ -342,6 +476,13 @@ public final class AssetScanner {
     }
 
     private static String portable(Path path) { return path.toString().replace('\\', '/'); }
+
+    private static String folded(Path path) { return portable(path).toUpperCase(Locale.ROOT); }
+
+    private static InventorySnapshot.ScanStatus scanStatus(List<PathOutcome> outcomes) {
+        return outcomes.stream().allMatch(outcome -> outcome.status() == INVENTORIED || outcome.status() == TRAVERSED)
+                ? InventorySnapshot.ScanStatus.COMPLETE : InventorySnapshot.ScanStatus.PARTIAL;
+    }
 
     private static MessageDigest sha256() {
         try {

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.io.TempDir;
 import picocli.CommandLine;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
@@ -38,21 +39,24 @@ class ImportCommandTest {
         StringWriter errors = new StringWriter();
         CommandLine cli = command((state, logs) -> {
             assertEquals(Path.of("state"), state);
-            assertEquals(Path.of("logs"), logs);
+            assertEquals(Path.of("state", "logs"), logs);
             return manager;
         }, output, errors);
 
-        assertEquals(0, cli.execute("source", "--state-directory", "state", "--log-directory", "logs"));
+        assertEquals(3, cli.execute("source", "--state-dir", "state"));
         assertTrue(closed.get());
         assertTrue(errors.toString().isEmpty());
         String text = output.toString();
         assertTrue(text.contains("Project ID: " + id));
         assertTrue(text.contains("Revision: 3"));
+        assertTrue(text.contains("Source root: " + snapshot.project().sourceRoot()));
         assertTrue(text.contains("Scan status: PARTIAL"));
         assertTrue(text.contains("mesh.obj [MODEL]"));
         assertTrue(text.contains("format: obj"));
         assertTrue(text.contains("WARNING UNVERIFIED mesh.obj: needs inspection"));
         assertTrue(text.contains("UNVISITED DIRECTORY blocked"));
+        assertTrue(text.contains("Logs: aiassetmigrate logs --directory " + Path.of("state", "logs")
+                + " --project " + id));
     }
 
     @Test
@@ -64,7 +68,7 @@ class ImportCommandTest {
         StringWriter errors = new StringWriter();
         CommandLine cli = command((state, logs) -> manager(null, failure, closed, false), new StringWriter(), errors);
 
-        assertEquals(1, cli.execute("source", "--state-directory", "state", "--log-directory", "logs"));
+        assertEquals(1, cli.execute("source", "--state-dir", "state"));
         assertTrue(closed.get());
         assertTrue(errors.toString().contains("completion failed"));
         assertTrue(errors.toString().contains("Project ID: " + id));
@@ -78,7 +82,7 @@ class ImportCommandTest {
         CommandLine cli = command((state, logs) -> manager(snapshot(id), null, new AtomicBoolean(), true),
                 new StringWriter(), errors);
 
-        assertEquals(1, cli.execute("source", "--state-directory", "state", "--log-directory", "logs"));
+        assertEquals(1, cli.execute("source", "--state-dir", "state"));
         assertTrue(errors.toString().contains("close failed"));
         assertTrue(errors.toString().contains("Project ID: " + id));
         assertTrue(errors.toString().contains("Committed revision: 3"));
@@ -99,17 +103,16 @@ class ImportCommandTest {
                 }))
                 .setErr(new PrintWriter(errors));
 
-        assertEquals(1, cli.execute("source", "--state-directory", "state", "--log-directory", "logs"));
+        assertEquals(1, cli.execute("source", "--state-dir", "state"));
         assertTrue(errors.toString().contains("Could not write inventory output"));
         assertTrue(errors.toString().contains("Project ID: " + id));
         assertTrue(errors.toString().contains("Committed revision: 3"));
     }
 
     @Test
-    void requiresSourceAndBothDirectoriesBeforeCreatingManager() {
+    void requiresSourceAndStateDirectoryBeforeCreatingManager() {
         for (String[] args : new String[][] {
-                {}, {"source"}, {"source", "--state-directory", "state"},
-                {"source", "--log-directory", "logs"}
+                {}, {"source"}, {"--state-dir", "state"}
         }) {
             CommandLine cli = command((state, logs) -> { throw new AssertionError("manager created"); },
                     new StringWriter(), new StringWriter());
@@ -122,7 +125,7 @@ class ImportCommandTest {
         StringWriter errors = new StringWriter();
         CommandLine cli = command((state, logs) -> { throw new IOException("unavailable"); },
                 new StringWriter(), errors);
-        assertEquals(1, cli.execute("source", "--state-directory", "state", "--log-directory", "logs"));
+        assertEquals(1, cli.execute("source", "--state-dir", "state"));
         assertTrue(errors.toString().contains("unavailable"));
     }
 
@@ -132,7 +135,7 @@ class ImportCommandTest {
         ImportException failure = new ImportException("scan failed", new IOException("source unavailable"));
         CommandLine cli = command((state, logs) -> manager(null, failure, new AtomicBoolean(), false),
                 new StringWriter(), errors);
-        assertEquals(1, cli.execute("source", "--state-directory", "state", "--log-directory", "logs"));
+        assertEquals(1, cli.execute("source", "--state-dir", "state"));
         assertTrue(errors.toString().contains("source unavailable"));
         assertFalse(errors.toString().contains("Committed revision:"));
     }
@@ -146,20 +149,66 @@ class ImportCommandTest {
         CommandLine cli = new CommandLine(new AssetMigrateCli())
                 .setOut(new PrintWriter(output)).setErr(new PrintWriter(errors));
         String state = temp.resolve("state").toString();
-        String logs = temp.resolve("logs").toString();
 
-        assertEquals(0, cli.execute("import", source.toString(), "--state-directory", state, "--log-directory", logs),
+        assertEquals(3, cli.execute("import", source.toString(), "--state-directory", state),
                 errors.toString());
         assertTrue(output.toString().contains("Project ID:"));
         assertTrue(output.toString().contains("Revision: 1"));
         assertTrue(output.toString().contains("notes.txt"));
         assertEquals("preserve me", Files.readString(unsupported));
         assertNotEquals(0, cli.execute("import", temp.resolve("missing").toString(),
-                "--state-directory", state, "--log-directory", logs));
+                "--state-directory", state));
         Path unsafeState = source.resolve("state");
         assertNotEquals(0, cli.execute("import", source.toString(),
-                "--state-directory", unsafeState.toString(), "--log-directory", logs));
+                "--state-directory", unsafeState.toString()));
         assertFalse(Files.exists(unsafeState));
+    }
+
+    @Test
+    void projectOptionDispatchesToRescanAndAcceptsManagedLegacyLogDirectory() {
+        UUID id = UUID.randomUUID();
+        AtomicBoolean rescanned = new AtomicBoolean();
+        AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                new Class<?>[] { AssetManager.class, AutoCloseable.class }, (proxy, method, args) -> {
+                    if (method.getName().equals("rescan")) {
+                        rescanned.set(true);
+                        assertEquals(id, args[0]);
+                        assertEquals(Path.of("source"), args[1]);
+                        return new AssetManager.ImportResult(snapshot(id));
+                    }
+                    if (method.getName().equals("importAssets")) throw new AssertionError("must rescan");
+                    if (method.getName().equals("close")) return null;
+                    throw new UnsupportedOperationException(method.getName());
+                });
+        CommandLine cli = command((state, logs) -> {
+            assertEquals(Path.of("state", "logs"), logs);
+            return manager;
+        }, new StringWriter(), new StringWriter());
+
+        assertEquals(3, cli.execute("source", "--state-dir", "state", "--project", id.toString(),
+                "--log-directory", Path.of("state", "logs").toString()));
+        assertTrue(rescanned.get());
+    }
+
+    @Test
+    void rejectsConflictingLegacyLogDirectoryBeforeCreatingManager() {
+        CommandLine cli = command((state, logs) -> { throw new AssertionError("manager created"); },
+                new StringWriter(), new StringWriter());
+
+        assertEquals(2, cli.execute("source", "--state-dir", "state", "--log-directory", "other-logs"));
+    }
+
+    @Test
+    void interruptionReturns130() {
+        CommandLine cli = command((state, logs) -> manager(null,
+                new ImportException("interrupted", new InterruptedIOException("stopped")), new AtomicBoolean(), false),
+                new StringWriter(), new StringWriter());
+
+        try {
+            assertEquals(130, cli.execute("source", "--state-dir", "state"));
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     private static CommandLine command(ImportCommand.ManagerFactory factory, StringWriter out, StringWriter err) {

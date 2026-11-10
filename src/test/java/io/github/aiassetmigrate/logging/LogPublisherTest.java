@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static java.nio.file.StandardOpenOption.APPEND;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class LogPublisherTest {
@@ -108,6 +109,7 @@ class LogPublisherTest {
 
     @Test
     void incompleteTailIsDeferredByReadersAndBlocksWriterReopen() throws Exception {
+        assumeTrue(unixLinkCountsAvailable(), "reopening needs verified link counts");
         try (var publisher = new LogPublisher(directory, project)) {
             publisher.publish(LogEvent.Level.INFO, "complete");
         }
@@ -206,6 +208,35 @@ class LogPublisherTest {
     }
 
     @Test
+    void unavailableLinkCountsAllowRestartForAnchoredStrictSidecars() throws Exception {
+        assumeFalse(unixLinkCountsAvailable(), "Unix link counts available");
+        var delivered = new CountDownLatch(1);
+        try (var publisher = new LogPublisher(directory, project, true);
+             var subscription = publisher.subscribe(0, event -> delivered.countDown(), error -> fail(error))) {
+            LogEvent event = publisher.publish(LogEvent.Level.INFO, "fresh");
+            assertTrue(delivered.await(5, TimeUnit.SECONDS));
+            assertEquals(List.of(event), LogPublisher.readLogs(directory, project, 0));
+        }
+
+        try (var publisher = new LogPublisher(directory, project, true)) {
+            assertEquals(2, publisher.publish(LogEvent.Level.INFO, "after restart").sequence());
+        }
+        assertEquals(List.of(1L, 2L), LogPublisher.readLogs(directory, project, 0).stream()
+                .map(LogEvent::sequence).toList());
+    }
+
+    @Test
+    void unavailableLinkCountsRejectPreexistingLogSidecars() throws Exception {
+        assumeFalse(unixLinkCountsAvailable(), "Unix link counts available");
+        for (String suffix : List.of(".log", ".lock", ".gate", ".commit")) {
+            UUID id = UUID.randomUUID();
+            Files.createFile(directory.resolve(id + suffix));
+            if (suffix.equals(".log")) Files.createFile(directory.resolve(id + ".commit"));
+            assertThrows(IOException.class, () -> new LogPublisher(directory, id, true), suffix);
+        }
+    }
+
+    @Test
     void strictFallbackNeverOpensExistingHardLinkedLogOrSidecar() throws Exception {
         Path asset = Files.createFile(directory.resolve("source-asset"));
         for (String suffix : List.of(".log", ".lock", ".gate", ".commit")) {
@@ -238,7 +269,7 @@ class LogPublisherTest {
             catch (UnsupportedOperationException | IOException | SecurityException e) {
                 assumeTrue(false, "Symbolic links unavailable");
             }
-            assertThrows(IOException.class, () -> new LogPublisher(directory, id));
+            assertThrows(IOException.class, () -> new LogPublisher(directory, id, true));
             if (suffix.equals(".log")) {
                 assertThrows(IOException.class, () -> LogPublisher.readLogs(directory, id, 0));
             }
@@ -247,13 +278,13 @@ class LogPublisherTest {
     }
 
     @Test
-    void hardLinkedExistingSidecarsAreAlwaysRejected() throws Exception {
+    void strictPublisherRejectsHardLinkedExistingSidecars() throws Exception {
         Path target = Files.createFile(directory.resolve("protected-source"));
         for (String suffix : List.of(".log", ".lock", ".gate", ".commit")) {
             UUID id = UUID.randomUUID();
             try { Files.createLink(directory.resolve(id + suffix), target); }
             catch (UnsupportedOperationException | IOException e) { assumeTrue(false, "Hard links unavailable"); }
-            assertThrows(IOException.class, () -> new LogPublisher(directory, id));
+            assertThrows(IOException.class, () -> new LogPublisher(directory, id, true));
             assertEquals(0, Files.size(target));
         }
     }
@@ -295,6 +326,7 @@ class LogPublisherTest {
 
     @Test
     void injectedFailuresPreserveTailAndNeverPrematurelyCommit() throws Exception {
+        assumeTrue(unixLinkCountsAvailable(), "reopening needs verified link counts");
         for (CommittedLog.Stage stage : CommittedLog.Stage.values()) {
             UUID id = UUID.randomUUID();
             AtomicBoolean armed = new AtomicBoolean();
@@ -330,6 +362,7 @@ class LogPublisherTest {
     }
 
     private void checkSeparateJvmReader(boolean failForce) throws Exception {
+        assumeTrue(unixLinkCountsAvailable(), "cross-process reads need verified link counts");
         UUID id = UUID.randomUUID();
         CountDownLatch appended = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -411,5 +444,9 @@ class LogPublisherTest {
                 System.out.println("REJECTED");
             }
         }
+    }
+
+    private boolean unixLinkCountsAvailable() throws IOException {
+        return Files.getFileStore(directory).supportsFileAttributeView("unix");
     }
 }

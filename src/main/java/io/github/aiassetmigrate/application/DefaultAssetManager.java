@@ -67,6 +67,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         @Override void close() throws IOException;
     }
 
+    /** Uses the F01 state layout, including logs under {@code <state-directory>/logs}. */
+    public DefaultAssetManager(Path stateDirectory) throws IOException {
+        this(stateDirectory, Objects.requireNonNull(stateDirectory, "stateDirectory").resolve("logs"));
+    }
+
     public DefaultAssetManager(Path stateDirectory, Path logDirectory) throws IOException {
         this(stateDirectory, logDirectory, new AssetScanner(), (directory, id) -> {
             LogPublisher publisher = new LogPublisher(directory, id, true);
@@ -88,7 +93,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         SafeStoragePaths.validateExistingPath(logDirectory);
         this.stateDirectory = stateDirectory.toAbsolutePath().normalize();
         this.logDirectory = logDirectory.toAbsolutePath().normalize();
-        if (overlap(this.stateDirectory, this.logDirectory)) {
+        if (overlap(this.stateDirectory, this.logDirectory) && !usesManagedLogDirectory()) {
             throw new IOException("State and log directories must be separate");
         }
         this.repository = new FileAssetRepository(stateDirectory);
@@ -184,6 +189,9 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                         List<Finding> findings = scan.findings().stream().map(finding -> new Finding(
                                 finding.id(), finding.assetId().map(assetId -> idMap.getOrDefault(assetId, assetId)),
                                 finding.sourceRelativePath(), finding.severity(), finding.code(), finding.message())).toList();
+                        List<AssetReference> references = scan.references().stream().map(reference -> new AssetReference(
+                                idMap.getOrDefault(reference.ownerAssetId(), reference.ownerAssetId()), reference.kind(),
+                                reference.originalText(), reference.normalizedTargetPath(), reference.resolutionStatus())).toList();
                         long revision = previous.isPresent() ? Math.incrementExact(previous.get().project().inventoryRevision()) : 1;
                         Instant created = previous.map(value -> value.project().createdAt()).orElse(started);
                         Instant scannedAt = Instant.now();
@@ -191,7 +199,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                         var project = new Project(id, scan.sourceRoot(), revision, assets, created);
                         var snapshot = new InventorySnapshot(InventorySnapshot.CURRENT_SCHEMA_VERSION,
                                 InventorySnapshot.CURRENT_INSPECTION_VERSION, project, findings,
-                                scan.scanStatus(), scannedAt, scan.pathOutcomes(), List.of());
+                                scan.scanStatus(), scannedAt, scan.pathOutcomes(), references);
                         publisher.publish(LogEvent.Level.INFO, "Saving inventory revision " + revision);
                         validatePaths(sourceRoot, id, true);
                         writer.saveNextRevision(snapshot);
@@ -225,7 +233,9 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         SafeStoragePaths.validateSeparation(sourceRoot, logDirectory);
         SafeStoragePaths.validateExistingPath(stateDirectory);
         SafeStoragePaths.validateExistingPath(logDirectory);
-        if (overlap(stateDirectory, logDirectory)) throw new IOException("State and log directories must be separate");
+        if (overlap(stateDirectory, logDirectory) && !usesManagedLogDirectory()) {
+            throw new IOException("State and log directories must be separate");
+        }
         validateLogFile(LogPublisher.logFile(logDirectory, id), publisherOpen);
         validateLogFile(logDirectory.resolve(id + ".lock"), publisherOpen);
         validateLogFile(logDirectory.resolve(id + ".gate"), publisherOpen);
@@ -237,7 +247,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         try {
             SafeStoragePaths.requireRegularFile(path);
             if (Files.size(path) > MAX_EXISTING_LOG_BYTES) throw new IOException("Log file is too large: " + path);
-            validateLogLinkCount(path, Files.getFileStore(path).supportsFileAttributeView("unix"), publisherOpen);
+            // On providers without Unix link counts, the strict publisher verifies its
+            // durable identity anchor when it opens the sidecar.
+            if (Files.getFileStore(path).supportsFileAttributeView("unix")) {
+                validateLogLinkCount(path, true, publisherOpen);
+            }
         } catch (NoSuchFileException missing) {
             // The publisher creates missing files after all paths have been validated.
         }
@@ -262,6 +276,10 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     private static boolean overlap(Path first, Path second) {
         return first.startsWith(second) || second.startsWith(first);
+    }
+
+    private boolean usesManagedLogDirectory() {
+        return logDirectory.equals(stateDirectory.resolve("logs"));
     }
 
     private synchronized Publisher acquireWriter(UUID id) throws IOException {

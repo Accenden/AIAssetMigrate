@@ -23,7 +23,7 @@ class CopyWorkflowIntegrationTest {
         Files.writeString(original, "v 0 0 0\n");
         try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
             var snapshot = manager.importAssets(source).snapshot();
-            assertEquals(InventorySnapshot.ScanStatus.PARTIAL, snapshot.scanStatus());
+            assertEquals(InventorySnapshot.ScanStatus.COMPLETE, snapshot.scanStatus());
             assertTrue(snapshot.hasCompleteCoverage());
             UUID project = snapshot.project().id();
             var name = new ReviewedChange(UUID.randomUUID(), snapshot.project().assets().getFirst().id(),

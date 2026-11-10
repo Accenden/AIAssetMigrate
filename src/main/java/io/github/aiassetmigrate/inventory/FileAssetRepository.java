@@ -21,7 +21,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import static java.nio.file.LinkOption.NOFOLLOW_LINKS;
-import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
 import static java.nio.file.StandardOpenOption.*;
 
 /**
@@ -38,11 +37,11 @@ public final class FileAssetRepository {
     private final Path stateDirectory;
     private final int maxSnapshotBytes;
     private final InventoryJsonCodec codec = new InventoryJsonCodec();
-    private final AtomicMover mover;
+    private final AtomicPublisher publisher;
 
     @FunctionalInterface
-    interface AtomicMover {
-        void move(Path source, Path target) throws IOException;
+    interface AtomicPublisher {
+        void publish(Path source, Path target) throws IOException;
     }
 
     public FileAssetRepository(Path stateDirectory) throws IOException {
@@ -50,10 +49,10 @@ public final class FileAssetRepository {
     }
 
     public FileAssetRepository(Path stateDirectory, int maxSnapshotBytes) throws IOException {
-        this(stateDirectory, maxSnapshotBytes, (source, target) -> Files.move(source, target, ATOMIC_MOVE));
+        this(stateDirectory, maxSnapshotBytes, (temporary, target) -> Files.createLink(target, temporary));
     }
 
-    FileAssetRepository(Path stateDirectory, int maxSnapshotBytes, AtomicMover mover) throws IOException {
+    FileAssetRepository(Path stateDirectory, int maxSnapshotBytes, AtomicPublisher publisher) throws IOException {
         Objects.requireNonNull(stateDirectory, "stateDirectory");
         if (maxSnapshotBytes < 1) {
             throw new IllegalArgumentException("maxSnapshotBytes must be positive");
@@ -61,7 +60,7 @@ public final class FileAssetRepository {
         SafeStoragePaths.validateExistingPath(stateDirectory);
         this.stateDirectory = stateDirectory.toAbsolutePath().normalize();
         this.maxSnapshotBytes = maxSnapshotBytes;
-        this.mover = Objects.requireNonNull(mover, "mover");
+        this.publisher = Objects.requireNonNull(publisher, "publisher");
     }
 
     /** Returns empty only when no revision exists; corruption never triggers fallback. */
@@ -221,11 +220,17 @@ public final class FileAssetRepository {
             checkInterrupted();
             SafeStoragePaths.validateExistingPath(directory);
             SafeStoragePaths.requireRegularFile(temporary);
-            // All cooperating writers hold project.lock, so an existing target is never replaced.
+            // Create a second directory entry for the already-forced temporary file. Unlike an
+            // atomic move, createLink fails if another actor created the revision in this interval.
             if (exists(target)) {
                 throw new IOException("Inventory revision already exists: " + target);
             }
-            mover.move(temporary, target);
+            publisher.publish(temporary, target);
+            try {
+                Files.delete(temporary);
+            } catch (IOException ignored) {
+                // The published revision is authoritative. A leftover .tmp is intentionally ignored.
+            }
             return snapshot;
         }
 

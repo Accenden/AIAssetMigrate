@@ -26,15 +26,12 @@ public record InventorySnapshot(int schemaVersion, int inspectionVersion, Projec
         if (schemaVersion < 1 || inspectionVersion < 1 || project.inventoryRevision() < 1) {
             throw new IllegalArgumentException("Snapshot versions and revision must be positive");
         }
-        if (!project.sourceRoot().isAbsolute()) {
-            throw new IllegalArgumentException("Snapshot source root must be absolute");
-        }
         if (scannedAt.isBefore(project.createdAt())) {
             throw new IllegalArgumentException("Scan cannot precede project creation");
         }
     }
 
-    /** Scan status also reflects warnings; coverage requires all recorded paths to be accounted for. */
+    /** Coverage requires all recorded paths to be accounted for, independently of warning findings. */
     public boolean hasCompleteCoverage() {
         if (pathOutcomes.isEmpty()) return scanStatus == ScanStatus.COMPLETE;
         boolean rootTraversed = false;

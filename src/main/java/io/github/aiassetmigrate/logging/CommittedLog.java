@@ -9,12 +9,16 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -43,19 +47,31 @@ final class CommittedLog {
     final Path directory, log, gate, marker, owner;
     final UUID project;
     final Faults faults;
+    private final boolean strictUnverifiableLinks;
+    private final ConcurrentHashMap<Path, Object> freshFileKeys = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Path, Path> freshFileAnchors = new ConcurrentHashMap<>();
 
     CommittedLog(Path directory, UUID project, Faults faults) throws IOException {
+        this(directory, project, faults, false);
+    }
+
+    CommittedLog(Path directory, UUID project, Faults faults, boolean strictUnverifiableLinks) throws IOException {
         SafeStoragePaths.validateExistingPath(directory);
         this.directory = directory.toAbsolutePath().normalize();
         this.project = project;
         this.faults = faults;
+        this.strictUnverifiableLinks = strictUnverifiableLinks;
         log = this.directory.resolve(project + ".log");
         gate = this.directory.resolve(project + ".gate");
         marker = this.directory.resolve(project + ".commit");
         owner = this.directory.resolve(project + ".lock");
     }
 
-    static void safeFile(Path path) throws IOException {
+    boolean supportsUnixLinkCounts() throws IOException {
+        return Files.getFileStore(directory).supportsFileAttributeView("unix");
+    }
+
+    void safeFile(Path path) throws IOException {
         SafeStoragePaths.requireRegularFile(path);
         try {
             Object links = Files.getAttribute(path, "unix:nlink", NOFOLLOW_LINKS);
@@ -63,20 +79,87 @@ final class CommittedLog {
                 throw new IOException("File must have exactly one link: " + path);
             }
         } catch (UnsupportedOperationException | IllegalArgumentException e) {
-            throw new IOException("Cannot verify file link count: " + path, e);
+            if (!strictUnverifiableLinks) {
+                return;
+            }
+            BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS);
+            Object expectedKey = freshFileKeys.get(path);
+            if (expectedKey != null && attributes.fileKey() != null && expectedKey.equals(attributes.fileKey())) {
+                return;
+            }
+            Path anchor = freshFileAnchors.get(path);
+            if (anchor == null) anchor = identityAnchor(path);
+            if (!Files.exists(anchor, NOFOLLOW_LINKS)) {
+                throw new IOException("Cannot verify link count or fresh identity: " + path, e);
+            }
+            SafeStoragePaths.requireRegularFile(anchor);
+            if (!Files.isSameFile(path, anchor)) throw new IOException("Cannot verify link count or fresh identity: " + path, e);
         }
     }
 
-    static FileChannel open(Path path, boolean createNewOnly) throws IOException {
-        if (!createNewOnly && Files.exists(path, NOFOLLOW_LINKS)) safeFile(path);
-        FileChannel result = FileChannel.open(path, createNewOnly ? CREATE_NEW : CREATE, READ, WRITE, NOFOLLOW_LINKS);
+    FileChannel open(Path path, boolean createNewOnly) throws IOException {
+        FileChannel result;
         try {
+            result = FileChannel.open(path, CREATE_NEW, READ, WRITE, NOFOLLOW_LINKS);
+        } catch (FileAlreadyExistsException existing) {
+            if (createNewOnly) throw existing;
+            safeFile(path);
+            result = FileChannel.open(path, READ, WRITE, NOFOLLOW_LINKS);
+            try {
+                safeFile(path);
+                return result;
+            } catch (IOException | RuntimeException e) {
+                result.close();
+                throw e;
+            }
+        }
+        try {
+            trustFresh(path);
             safeFile(path);
             return result;
         } catch (IOException | RuntimeException e) {
             result.close();
             throw e;
         }
+    }
+
+    private void trustFresh(Path path) throws IOException {
+        SafeStoragePaths.requireRegularFile(path);
+        Object key = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS).fileKey();
+        if (!strictUnverifiableLinks || key != null) {
+            if (key != null) {
+                freshFileKeys.put(path, key);
+            }
+            return;
+        }
+        Path anchor = identityAnchor(path);
+        try {
+            Files.createLink(anchor, path);
+        } catch (FileAlreadyExistsException existing) {
+            SafeStoragePaths.requireRegularFile(anchor);
+            if (!Files.isSameFile(path, anchor)) throw existing;
+        }
+        freshFileAnchors.put(path, anchor);
+    }
+
+    void forgetFresh(Path path) throws IOException {
+        freshFileKeys.remove(path);
+        Path anchor = freshFileAnchors.remove(path);
+        if (anchor == null && strictUnverifiableLinks) {
+            anchor = identityAnchor(path);
+        }
+        if (anchor != null) {
+            Files.deleteIfExists(anchor);
+        }
+    }
+
+    void clearFreshTrust() throws IOException {
+        freshFileAnchors.clear();
+        freshFileKeys.clear();
+    }
+
+    private Path identityAnchor(Path path) {
+        return directory.resolve("." + path.getFileName() + ".identity");
     }
 
     interface Operation<T> { T run() throws IOException; }
@@ -163,8 +246,11 @@ final class CommittedLog {
             if (Files.exists(marker, NOFOLLOW_LINKS)) safeFile(marker);
             safeFile(temporary);
             faults.at(Stage.REPLACE);
+            forgetFresh(marker);
             Files.move(temporary, marker, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             created = false;
+            forgetFresh(temporary);
+            trustFresh(marker);
             safeFile(marker);
             faults.at(Stage.DIRECTORY_FORCE);
             syncDirectory();
@@ -182,7 +268,10 @@ final class CommittedLog {
         for (Path path = directory; path != null; path = path.getParent()) {
             try (FileChannel dir = FileChannel.open(path, READ, NOFOLLOW_LINKS)) {
                 dir.force(true);
-            } catch (UnsupportedOperationException e) {
+            } catch (AccessDeniedException | UnsupportedOperationException e) {
+                if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows")) {
+                    return;
+                }
                 throw new IOException("Directory durability unavailable; recovery required: " + path, e);
             }
         }

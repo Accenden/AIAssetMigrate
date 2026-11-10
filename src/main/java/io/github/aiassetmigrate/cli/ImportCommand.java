@@ -5,15 +5,18 @@ import io.github.aiassetmigrate.application.DefaultAssetManager;
 import io.github.aiassetmigrate.application.ImportException;
 import io.github.aiassetmigrate.domain.InventorySnapshot;
 import picocli.CommandLine.Command;
+import picocli.CommandLine.ParameterException;
 import picocli.CommandLine.Model.CommandSpec;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
 import picocli.CommandLine.Spec;
 
+import java.io.InterruptedIOException;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.Callable;
 
 @Command(name = "import", mixinStandardHelpOptions = true,
@@ -21,24 +24,27 @@ import java.util.concurrent.Callable;
 public final class ImportCommand implements Callable<Integer> {
     @FunctionalInterface
     interface ManagerFactory {
-        AssetManager create(Path stateDirectory, Path logDirectory) throws IOException;
+        AssetManager create(Path stateDirectory, Path managedLogDirectory) throws IOException;
     }
 
     @Parameters(index = "0", paramLabel = "SOURCE", description = "Source asset folder.")
     private Path source;
-    @Option(names = "--state-directory", required = true, paramLabel = "DIR",
+    @Option(names = {"--state-dir", "--state-directory"}, required = true, paramLabel = "DIR",
             description = "Project state directory outside the source folder.")
     private Path stateDirectory;
-    @Option(names = "--log-directory", required = true, paramLabel = "DIR",
-            description = "Event log directory outside the source folder.")
+    @Option(names = "--log-directory", paramLabel = "DIR",
+            description = "Legacy compatibility option; must be <state-dir>/logs.")
     private Path logDirectory;
+    @Option(names = "--project", paramLabel = "UUID",
+            description = "Existing project UUID to rescan instead of creating a project.")
+    private UUID projectId;
     @Spec
     private CommandSpec spec;
 
     private final ManagerFactory managerFactory;
 
     public ImportCommand() {
-        this(DefaultAssetManager::new);
+        this((state, ignoredManagedLogs) -> new DefaultAssetManager(state));
     }
 
     ImportCommand(ManagerFactory managerFactory) {
@@ -48,47 +54,81 @@ public final class ImportCommand implements Callable<Integer> {
     @Override
     public Integer call() {
         InventorySnapshot committed = null;
+        validateManagedLogDirectory(spec, stateDirectory, logDirectory);
+        String operation = projectId == null ? "Import" : "Rescan";
         try {
-            AssetManager manager = managerFactory.create(stateDirectory, logDirectory);
+            AssetManager manager = managerFactory.create(stateDirectory, managedLogDirectory(stateDirectory));
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();
             }) {
-                committed = manager.importAssets(source).snapshot();
+                committed = (projectId == null ? manager.importAssets(source) : manager.rescan(projectId, source)).snapshot();
             }
-            printInventory(spec.commandLine().getOut(), committed);
-            return 0;
+            printInventory(spec.commandLine().getOut(), committed, stateDirectory);
+            return inventoryExitCode(committed);
         } catch (ImportException e) {
-            PrintWriter err = spec.commandLine().getErr();
-            err.println("Import failed: " + safe(e.getMessage()));
-            if (e.getCause() != null && e.getCause().getMessage() != null) {
-                err.println("Cause: " + safe(e.getCause().getMessage()));
-            }
-            if (e.projectId().isPresent()) {
-                err.println("Project ID: " + e.projectId().get());
-            } else if (committed != null) {
-                err.println("Project ID: " + committed.project().id());
-            }
-            if (e.committedRevision().isPresent()) {
-                err.println("Committed revision: " + e.committedRevision().get());
-            } else if (committed != null) {
-                err.println("Committed revision: " + committed.project().inventoryRevision());
-            }
-            return 1;
+            return reportFailure(spec, operation, e, committed);
         } catch (Exception e) {
-            PrintWriter err = spec.commandLine().getErr();
-            err.println("Import failed: " + safe(e.getMessage()));
-            if (committed != null) {
-                err.println("Project ID: " + committed.project().id());
-                err.println("Committed revision: " + committed.project().inventoryRevision());
-            }
-            return 1;
+            return reportFailure(spec, operation, e, committed);
         }
     }
 
-    static void printInventory(PrintWriter out, InventorySnapshot snapshot) throws IOException {
+    static Path managedLogDirectory(Path stateDirectory) {
+        return stateDirectory.resolve("logs");
+    }
+
+    static void validateManagedLogDirectory(CommandSpec spec, Path stateDirectory, Path logDirectory) {
+        if (logDirectory == null) return;
+        Path expected = managedLogDirectory(stateDirectory).toAbsolutePath().normalize();
+        Path actual = logDirectory.toAbsolutePath().normalize();
+        if (!actual.equals(expected)) {
+            throw new ParameterException(spec.commandLine(), "--log-directory must match the managed log directory: " + expected);
+        }
+    }
+
+    static int inventoryExitCode(InventorySnapshot snapshot) {
+        return snapshot.scanStatus() == InventorySnapshot.ScanStatus.COMPLETE ? 0 : 3;
+    }
+
+    static int reportFailure(CommandSpec spec, String operation, Throwable failure, InventorySnapshot committed) {
+        if (isInterrupted(failure)) {
+            Thread.currentThread().interrupt();
+            return 130;
+        }
+        PrintWriter err = spec.commandLine().getErr();
+        err.println(operation + " failed: " + safe(failure.getMessage()));
+        if (failure.getCause() != null && failure.getCause().getMessage() != null) {
+            err.println("Cause: " + safe(failure.getCause().getMessage()));
+        }
+        if (failure instanceof ImportException importFailure) {
+            if (importFailure.projectId().isPresent()) {
+                err.println("Project ID: " + importFailure.projectId().get());
+            } else if (committed != null) {
+                err.println("Project ID: " + committed.project().id());
+            }
+            if (importFailure.committedRevision().isPresent()) {
+                err.println("Committed revision: " + importFailure.committedRevision().get());
+            } else if (committed != null) {
+                err.println("Committed revision: " + committed.project().inventoryRevision());
+            }
+        } else if (committed != null) {
+            err.println("Project ID: " + committed.project().id());
+            err.println("Committed revision: " + committed.project().inventoryRevision());
+        }
+        return 1;
+    }
+
+    static boolean isInterrupted(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof InterruptedException || current instanceof InterruptedIOException) return true;
+        }
+        return Thread.currentThread().isInterrupted();
+    }
+
+    static void printInventory(PrintWriter out, InventorySnapshot snapshot, Path stateDirectory) throws IOException {
         var project = snapshot.project();
         out.println("Project ID: " + project.id());
         out.println("Revision: " + project.inventoryRevision());
+        out.println("Source root: " + safe(project.sourceRoot().toString()));
         out.println("Scan status: " + snapshot.scanStatus());
         out.println("Assets (" + project.assets().size() + "):");
         for (var asset : project.assets()) {
@@ -108,10 +148,18 @@ public final class ImportCommand implements Callable<Integer> {
             String path = outcome.relativePath().toString();
             out.printf("  %s %s %s%n", outcome.status(), outcome.kind(), path.isEmpty() ? "." : safe(path));
         }
+        out.printf("Logs: aiassetmigrate logs --directory %s --project %s%n",
+                commandArgument(managedLogDirectory(stateDirectory)), project.id());
         out.flush();
         if (out.checkError()) {
             throw new IOException("Could not write inventory output");
         }
+    }
+
+    private static String commandArgument(Path path) {
+        String value = safe(path.toString());
+        return value.chars().anyMatch(Character::isWhitespace)
+                ? '"' + value.replace("\"", "\\\"") + '"' : value;
     }
 
     static String safe(String text) {

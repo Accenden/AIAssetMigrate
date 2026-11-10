@@ -23,31 +23,34 @@ class FormatInspectionTest {
     @TempDir Path root;
 
     @Test
-    void checkedHeadersAndInconclusiveFormatsRemainUnverified() throws Exception {
+    void imagesAreHashOnlyWhileOtherFormatsRemainBoundedlyInspected() throws Exception {
         Files.write(root.resolve("image.png"), AssetScannerTest.pngHeader());
         Files.write(root.resolve("image.jpg"), AssetScannerTest.jpegHeader());
         Files.write(root.resolve("image.jpeg"), AssetScannerTest.jpegHeader());
         Files.writeString(root.resolve("model.obj"), "v 0 0 0\n");
         Files.writeString(root.resolve("material.mtl"), "newmtl test\n");
-        Files.writeString(root.resolve("model.fbx"), "; FBX ASCII\n");
+        Files.writeString(root.resolve("model.fbx"), "; FBX 7.4.0 project file\n");
         byte[] binary = "Kaydara FBX Binary  \0\u001a\0\u00e8\u001c\0\0".getBytes(StandardCharsets.ISO_8859_1);
         Files.write(root.resolve("binary.fbx"), binary);
         var result = new AssetScanner().scan(root);
         Map<String, Asset> assets = result.assets().stream().collect(Collectors.toMap(a -> a.relativePath().toString(), a -> a));
         assertEquals(7, assets.size());
         assertEquals(7, result.findings().stream().filter(f -> f.code().equals("INSPECTION_UNVERIFIED")).count());
-        assertTrue(assets.values().stream().allMatch(a -> a.metadata().get(Asset.INSPECTION_STATUS).equals("UNVERIFIED")));
-        assertEquals("PNG_IHDR", assets.get("image.png").metadata().get(Asset.INSPECTION_METHOD));
-        assertEquals("JPEG_START_MARKER", assets.get("image.jpeg").metadata().get(Asset.INSPECTION_METHOD));
+        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
+        for (String image : List.of("image.png", "image.jpg", "image.jpeg")) {
+            assertEquals("NOT_PERFORMED", assets.get(image).metadata().get(Asset.INSPECTION_STATUS));
+            assertEquals("SHA256_STREAM_ONLY", assets.get(image).metadata().get(Asset.INSPECTION_METHOD));
+        }
+        assertEquals("BASIC_CHECKED", assets.get("model.obj").metadata().get(Asset.INSPECTION_STATUS));
         assertEquals("FBX_BINARY_HEADER", assets.get("binary.fbx").metadata().get(Asset.INSPECTION_METHOD));
-        assertEquals("FBX_INCONCLUSIVE", assets.get("model.fbx").metadata().get(Asset.INSPECTION_METHOD));
+        assertEquals("FBX_ASCII_HEADER", assets.get("model.fbx").metadata().get(Asset.INSPECTION_METHOD));
         assertArrayEquals(binary, Files.readAllBytes(root.resolve("binary.fbx")));
         assertTrue(result.pathOutcomes().stream().filter(o -> o.kind() == PathOutcome.Kind.FILE)
                 .allMatch(o -> o.status() == PathOutcome.Status.INVENTORIED));
     }
 
     @Test
-    void corruptHeadersAndEmptyBinaryFormatsAreSkippedButSiblingsRemain() throws Exception {
+    void arbitraryImagesAndUnknownFbxHeadersAreInventoriedWithoutClaimingValidity() throws Exception {
         byte[] badCrc = AssetScannerTest.pngHeader();
         badCrc[32] ^= 1;
         byte[] badDimensions = AssetScannerTest.pngHeader();
@@ -62,11 +65,13 @@ class FormatInspectionTest {
         Files.writeString(root.resolve("ok.obj"), "v 0 0 0\n");
         Files.writeString(root.resolve("unknown.xyz"), "data");
         var result = new AssetScanner().scan(root);
-        assertEquals(1, result.assets().size());
-        assertEquals(Path.of("ok.obj"), result.assets().getFirst().relativePath());
-        assertEquals(7, result.findings().stream().filter(f -> f.code().equals("CORRUPT_FORMAT")).count());
+        assertEquals(8, result.assets().size());
+        assertTrue(result.assets().stream().anyMatch(asset -> asset.relativePath().equals(Path.of("ok.obj"))));
+        assertEquals(0, result.findings().stream().filter(f -> f.code().equals("CORRUPT_FORMAT")).count());
+        assertEquals(2, result.findings().stream().filter(f -> f.code().equals("INSPECTION_UNKNOWN")).count());
         assertEquals(1, result.findings().stream().filter(f -> f.code().equals("UNSUPPORTED_EXTENSION")).count());
-        assertEquals(8, result.pathOutcomes().stream().filter(o -> o.status() == PathOutcome.Status.SKIPPED).count());
+        assertEquals(1, result.pathOutcomes().stream().filter(o -> o.status() == PathOutcome.Status.SKIPPED).count());
+        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
         assertArrayEquals(badCrc, Files.readAllBytes(root.resolve("crc.png")));
     }
 
@@ -79,6 +84,7 @@ class FormatInspectionTest {
         assertEquals("TEXT_LINE_LIMIT", assets.get("long.obj").metadata().get(Asset.INSPECTION_METHOD));
         assertEquals("TEXT_PREFIX_LIMIT", assets.get("many.mtl").metadata().get(Asset.INSPECTION_METHOD));
         assertEquals(2, result.findings().stream().filter(f -> f.code().equals("INSPECTION_UNVERIFIED")).count());
+        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
     }
 
     @Test

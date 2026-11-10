@@ -15,7 +15,7 @@ public record Asset(UUID id, Path relativePath, Type type, String fingerprint,
     public static final String MODIFIED_AT = "modifiedAt";
     /** Value is an InspectionStatus enum name, not a claim of complete format conformance. */
     public static final String INSPECTION_STATUS = "inspectionStatus";
-    /** Describes the bounded inspection performed, not format validity. */
+    /** Describes the bounded inspection or hash-only handling performed, not format validity. */
     public static final String INSPECTION_METHOD = "inspectionMethod";
     public enum InspectionStatus { NOT_PERFORMED, BASIC_CHECKED, HEADER_ONLY, UNKNOWN, UNVERIFIED }
 

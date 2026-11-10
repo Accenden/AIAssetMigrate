@@ -8,7 +8,7 @@ import picocli.CommandLine.Spec;
 @Command(name = "aiassetmigrate", mixinStandardHelpOptions = true,
         version = "AIAssetMigrate 0.1.0-SNAPSHOT",
         description = "Prepare game assets for migration.",
-        subcommands = {ImportCommand.class, RescanCommand.class, LogsCommand.class,
+        subcommands = {ImportCommand.class, RescanCommand.class, InventoryCommand.class, LogsCommand.class,
                 AnalyzeCommand.class, AnalyzeOrganizationCommand.class, ReviewCommand.class, ReviewsCommand.class, PreviewOrganizationCommand.class,
                 CompatibilityCommand.class, PlanCommands.Plan.class, PlanCommands.Show.class,
                 PlanCommands.Approve.class, PlanCommands.Migrate.class, PlanCommands.ShowRun.class},

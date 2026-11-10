@@ -67,50 +67,66 @@ explicit approval and source fingerprints before execution.
 
 ## Import
 
-Select **Import Project** in the GUI, then choose a source folder and separate
-state and log directories. For the CLI, for example:
+F01 imports use a source folder and a separate state directory. Logs are managed
+under that state directory, so they cannot accidentally be placed in the source
+tree. For the CLI, for example:
 
 ```sh
-bash ./mvnw exec:java '-Dexec.args=import /absolute/path/to/assets --state-directory /absolute/path/to/state --log-directory /absolute/path/to/logs'
+bash ./mvnw exec:java '-Dexec.args=import /absolute/path/to/assets --state-dir /absolute/path/to/state'
 ```
 
-Quote individual paths containing spaces in the `exec.args` value. State and log
-directories must not overlap each other or the source directory. Unsafe symlinks,
-junctions and path aliases are rejected, including aliases in selected paths'
-ancestors. Path checks are best-effort against concurrent filesystem replacement
-and cannot reliably identify bind mounts; do not use bind-mounted aliases of the
-source, state or log locations. An import reports its project ID, inventory
-revision, assets, findings and path coverage. A failure after publication reports the committed
-project ID and revision; it does not imply the saved inventory was rolled back. To update an
-existing project's inventory, use its UUID from the import output:
+Use `--state-directory` as an alias for `--state-dir`. Quote individual paths
+containing spaces in the `exec.args` value. The state directory must not overlap
+the source directory. Unsafe symlinks, junctions and path aliases are rejected,
+including aliases in selected paths' ancestors. Path checks are best-effort
+against concurrent filesystem replacement and cannot reliably identify bind
+mounts; do not use bind-mounted aliases of the source and state locations.
+
+The state layout is:
+
+```text
+<state-dir>/projects/<project-uuid>/inventory-<revision>.json
+<state-dir>/logs/<project-uuid>.log
+```
+
+An import reports its project ID, revision, source root, assets, findings,
+coverage, and the matching `logs` command. A failure after publication reports
+the committed project ID and revision; it does not imply the saved inventory was
+rolled back. To rescan an existing project, either pass `--project` to `import`
+or use the compatibility `rescan` command:
 
 ```sh
-bash ./mvnw exec:java '-Dexec.args=rescan /absolute/path/to/assets --project PROJECT-UUID --state-directory /absolute/path/to/state --log-directory /absolute/path/to/logs'
+bash ./mvnw exec:java '-Dexec.args=import /absolute/path/to/assets --state-dir /absolute/path/to/state --project PROJECT-UUID'
+bash ./mvnw exec:java '-Dexec.args=inventory --state-dir /absolute/path/to/state --project PROJECT-UUID --revision 1'
 ```
 
 | Input | Type | Current inspection | Output/conversion |
 | --- | --- | --- | --- |
-| OBJ | Model | Bounded text sample; not complete validation | Not implemented |
-| FBX | Model | Limited binary-header checks where applicable; otherwise unverified | Not implemented |
-| MTL | Material | Bounded text sample; not complete validation | Not implemented |
-| PNG | Texture | Limited PNG header checks | Not implemented |
-| JPG/JPEG | Texture | Limited JPEG marker checks | Not implemented |
+| OBJ | Model | Bounded UTF-8/BOM text checks, basic vertices/faces, material-library references | Not implemented |
+| FBX | Model | Bounded binary or ASCII header/version recognition | Not implemented |
+| MTL | Material | Bounded UTF-8/BOM text checks and texture references | Not implemented |
+| PNG | Texture | Extension classification and streaming SHA-256 only; no content validation | Not implemented |
+| JPG/JPEG | Texture | Extension classification and streaming SHA-256 only; no content validation | Not implemented |
 
-Supported readable files are retained as **unverified** with a warning when
-inspection cannot establish validity. Confirmed invalid checked headers and
-unsupported extensions are skipped and flagged. These checks do not decode the
-complete files or verify references, engine import, conversion support or actual
-rendering. Warnings make a scan `PARTIAL`, even if every directory was traversed;
-the path outcomes separately describe traversal coverage. Inventory revisions
-preserve same-path asset IDs on rescan and retain coverage evidence when a
-directory could not be visited. The facade and CLI expose rescan and revision
-loading; the GUI can load a saved revision or rescan a project by its UUID.
-On filesystems that do not expose Unix link counts (including typical Windows
-configurations), logging currently fails closed rather than risk writing through
-a hard link to a source asset. Import and rescan therefore cannot complete there;
-saved-inventory loading remains available.
-Inventory snapshots are limited to 64 MiB; per-file warnings and long paths can
-cause a large scan to reach that limit before its 100,000-entry traversal limit.
+The scanner never decodes image content. It records image inspection as
+`NOT_PERFORMED` with `SHA256_STREAM_ONLY`; arbitrary readable PNG/JPEG-named
+bytes remain inventoried. OBJ/MTL references are resolved only against the saved
+scan result and retain `RESOLVED`, `MISSING`, `SKIPPED`, `UNRESOLVED`,
+`CASE_AMBIGUOUS`, or `UNSAFE` evidence. These checks do not establish complete
+file validity, engine import, conversion support, or rendering.
+
+`COMPLETE` means every discovered path was fully traversed or inventoried.
+`PARTIAL` means coverage was skipped, failed, or unvisited, for example because
+of an unsupported extension, a size limit, or an unsafe/inaccessible path.
+Inspection warnings alone do not make a scan partial. CLI exit codes are `0` for
+complete, `3` for a saved partial snapshot, `1` for a fatal error, `2` for
+argument errors, and `130` for interruption.
+
+Default limits are depth 64, 100,000 entries, 1 GiB per supported file, 64 MiB
+of parsed OBJ/MTL text, 1 MiB per text line, 100,000 extracted references per
+file, and 64 MiB per serialized inventory snapshot. Inventory revisions preserve
+same-path asset IDs on rescan and retain coverage evidence when a directory could
+not be visited.
 
 ## Analysis and Review
 
@@ -118,7 +134,7 @@ Run an analysis against the latest saved inventory:
 
 ```bash
 bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigrateCli \
-  -Dexec.args='analyze categories --project PROJECT-UUID --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+  -Dexec.args='analyze categories --project PROJECT-UUID --state-directory /tmp/asset-state --log-directory /tmp/asset-state/logs'
 ```
 
 The analysis kind can be `categories`, `relationships`, `materials`, `names`, or `folders`. Suggestions
@@ -127,7 +143,7 @@ explicit decision; the CLI can also do so, for example:
 
 ```bash
 bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigrateCli \
-  -Dexec.args='review --project PROJECT-UUID --inventory-revision 1 --asset ASSET-UUID --kind CATEGORY --decision ACCEPTED --value category=Characters --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+  -Dexec.args='review --project PROJECT-UUID --inventory-revision 1 --asset ASSET-UUID --kind CATEGORY --decision ACCEPTED --value category=Characters --state-directory /tmp/asset-state --log-directory /tmp/asset-state/logs'
 ```
 
 Relationship reviews use `--value targetAssetId=ASSET-UUID` and can provide
@@ -143,7 +159,7 @@ fingerprint-checked UTF-8 content and reports unsupported, missing or ambiguous
 references; it is not a complete parser. Reviews do not modify source files or
 apply mappings. Manually entered mappings are user assertions, not proof that a
 reference exists in the source. Use `reviews --project PROJECT-UUID` with the
-state and log directory options to list saved decisions, or use **Load Saved
+state directory and its managed `logs` child to list saved decisions, or use **Load Saved
 Reviews** in the GUI.
 
 An isolated SIWC inference client and bounded HTTPS transport are included as
@@ -156,7 +172,7 @@ Name and folder analysis starts with the current names and folders. Edit and
 explicitly accept a `NAME` review (`--value name=FILE`) or `FOLDER` review
 (`--value folder=RELATIVE-FOLDER`, with an empty value for the output root), then
 run `preview-organization --project PROJECT-UUID --inventory-revision 1` with the
-state and log directory options. The GUI also provides an organization preview.
+state directory and its managed `logs` child. The GUI also provides an organization preview.
 The preview is read-only and checks lexical destination conflicts, reference
 coverage and inventory revision; it does not inspect an output directory or grant
 approval. Unresolved references remain blocking even when manually reviewed until
@@ -176,8 +192,8 @@ decisions rather than the unaccepted rule proposals.
 The CLI can list available profiles or assess an imported inventory:
 
 ```sh
-bash ./mvnw exec:java '-Dexec.args=compatibility --list-targets --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
-bash ./mvnw exec:java '-Dexec.args=compatibility --project PROJECT-UUID --target unity --target-version 6000.0 --state-directory /tmp/asset-state --log-directory /tmp/asset-logs'
+bash ./mvnw exec:java '-Dexec.args=compatibility --list-targets --state-directory /tmp/asset-state --log-directory /tmp/asset-state/logs'
+bash ./mvnw exec:java '-Dexec.args=compatibility --project PROJECT-UUID --target unity --target-version 6000.0 --state-directory /tmp/asset-state --log-directory /tmp/asset-state/logs'
 ```
 
 The GUI also provides target selection and compatibility assessment. Results
@@ -201,7 +217,7 @@ Material fidelity and unsupported or undocumented requirements remain unknown.
 ## Copy-Only Migration
 
 Use `plan --project PROJECT-UUID --target unity --target-version 6000.0 --output
-/absolute/output` with the state and log directory options to create a draft.
+/absolute/output` with the state directory and its managed `logs` child to create a draft.
 Inspect its sources, destinations and findings using `show-plan --plan PLAN-UUID`.
 Then explicitly use `approve --plan PLAN-UUID --version 1`, followed by the
 separate `migrate --plan PLAN-UUID` command. Use `show-run --plan PLAN-UUID` to
@@ -230,8 +246,8 @@ no such operations are silently performed.
 ## File Logs
 
 No SQLite is used or required. Each project has a UTF-8 JSON-lines file named
-`<project-uuid>.log` in an explicitly chosen application log directory. Keep this
-directory outside source assets. A `<project-uuid>.lock` sidecar enforces one
+`<project-uuid>.log` in `<state-dir>/logs`. Keep the state directory outside
+source assets. A `<project-uuid>.lock` sidecar enforces one
 publisher per project, while `.gate` coordinates snapshots and commits and
 `.commit` identifies the validated log prefix. Do not delete or edit log files
 or sidecars while a publisher or reader is running. Older versions do not honor
@@ -256,10 +272,11 @@ exclude secrets from messages/details.
 Independent readers coordinate through the gate and read only the validated
 prefix identified by the marker. A marker-stage failure may have an indeterminate
 outcome: an event can be present after a failed publish. Directory syncing uses
-`FileChannel.force` on a read-only directory channel; Java does not guarantee that
-this persists directory entries on every provider. Consequently crash durability
-is not yet established across platforms. Path validation also cannot rule out
-hostile concurrent entry replacement; use a trusted log directory.
+`FileChannel.force` on a read-only directory channel where the provider permits
+it; Windows providers commonly reject that operation after the event bytes have
+been forced. Java does not guarantee directory-entry durability on every provider.
+Path validation also cannot rule out hostile concurrent entry replacement; use a
+trusted state directory.
 
 `subscribe(afterSequence, observer, onFailure)` replays missed events then follows
 new events in order on a per-viewer virtual thread. A broken viewer does not stop
@@ -274,13 +291,12 @@ successfully processed sequence; its default implementation does nothing. Invali
 or future cursors fail synchronously. Closing a subscription leaves the publisher
 and ongoing work alone; the manager retains the publisher until it closes, or an
 active write finishes after manager close. Another manager or process cannot own
-that project's publisher during this time. Watching an existing project also
-inherits the documented non-Unix logging limitation.
+that project's publisher during this time.
 
 Read existing logs from the CLI (replace the example UUID with the project ID):
 
 ```powershell
-./mvnw.cmd exec:java '-Dexec.args=logs --directory "C:/app data/logs" --project 00000000-0000-0000-0000-000000000001 --after 0'
+./mvnw.cmd exec:java '-Dexec.args=logs --directory "C:/app data/state/logs" --project 00000000-0000-0000-0000-000000000001 --after 0'
 # Add --follow to poll for new events every 250 ms; Ctrl+C stops the viewer.
 ```
 
@@ -295,9 +311,11 @@ changing it. Markerless logs require explicit adoption; their historical durabil
 cannot be proved. The adoption and tail-recovery tools are not implemented yet,
 so affected projects cannot currently be reopened for writing. Preserve the
 original files and do not use older versions to bypass these checks.
-Filesystems without verifiable Unix link counts currently fail closed for logging.
-This initial implementation rereads the file for replay/follow and has no rotation
-or retention policy; it is intended for modest local logs, not large archives.
+On filesystems without verifiable Unix link counts, strict state-managed publishers
+use validated sidecar identity anchors so logs created by this application can be
+reopened without trusting manually pre-existing sidecars. This initial
+implementation rereads the file for replay/follow and has no rotation or retention
+policy; it is intended for modest local logs, not large archives.
 Import produces project events. The JavaFX log viewer and integration with later
 workflow operations are still future work.
 

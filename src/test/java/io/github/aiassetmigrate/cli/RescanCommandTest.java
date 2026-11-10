@@ -1,14 +1,23 @@
 package io.github.aiassetmigrate.cli;
 
+import io.github.aiassetmigrate.application.AssetManager;
+import io.github.aiassetmigrate.domain.Asset;
+import io.github.aiassetmigrate.domain.InventorySnapshot;
+import io.github.aiassetmigrate.domain.Project;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import picocli.CommandLine;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -16,35 +25,37 @@ class RescanCommandTest {
     @TempDir Path directory;
 
     @Test
-    void rescansExistingProjectAndPreservesAssetIdentity() throws Exception {
+    void rescansExistingProjectWithManagedStateLogs() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
-        Path asset = Files.writeString(source.resolve("mesh.obj"), "v 0 0 0\n");
         Path state = directory.resolve("state");
-        Path logs = directory.resolve("logs");
-        StringWriter imported = new StringWriter();
-        var cli = new CommandLine(new AssetMigrateCli()).setOut(new PrintWriter(imported));
-
-        assertEquals(0, cli.execute("import", source.toString(), "--state-directory", state.toString(),
-                "--log-directory", logs.toString()));
-        UUID project = imported.toString().lines().filter(line -> line.startsWith("Project ID: "))
-                .map(line -> UUID.fromString(line.substring("Project ID: ".length()))).findFirst().orElseThrow();
-        String initialAsset = imported.toString().lines().filter(line -> line.contains("mesh.obj [MODEL]"))
-                .findFirst().orElseThrow();
-
-        Files.writeString(asset, "v 1 0 0\n");
+        UUID project = UUID.randomUUID();
+        InventorySnapshot snapshot = snapshot(project, source);
+        AtomicBoolean rescanCalled = new AtomicBoolean();
+        AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                new Class<?>[] { AssetManager.class, AutoCloseable.class }, (proxy, method, args) -> {
+                    if (method.getName().equals("rescan")) {
+                        rescanCalled.set(true);
+                        assertEquals(project, args[0]);
+                        assertEquals(source, args[1]);
+                        return new AssetManager.ImportResult(snapshot);
+                    }
+                    if (method.getName().equals("close")) return null;
+                    throw new UnsupportedOperationException(method.getName());
+                });
         StringWriter rescanned = new StringWriter();
         StringWriter errors = new StringWriter();
-        cli.setOut(new PrintWriter(rescanned)).setErr(new PrintWriter(errors));
-        assertEquals(0, cli.execute("rescan", source.toString(), "--project", project.toString(),
-                "--state-directory", state.toString(), "--log-directory", logs.toString()), errors.toString());
-        String updatedAsset = rescanned.toString().lines().filter(line -> line.contains("mesh.obj [MODEL]"))
-                .findFirst().orElseThrow();
+        var cli = new CommandLine(new RescanCommand((configuredState, logs) -> {
+            assertEquals(state, configuredState);
+            assertEquals(state.resolve("logs"), logs);
+            return manager;
+        })).setOut(new PrintWriter(rescanned)).setErr(new PrintWriter(errors));
+        assertEquals(0, cli.execute(source.toString(), "--project", project.toString(),
+                "--state-dir", state.toString()), errors.toString());
 
+        assertTrue(rescanCalled.get());
         assertTrue(rescanned.toString().contains("Revision: 2"));
-        assertTrue(updatedAsset.contains("ID: " + initialAsset.split("ID: ")[1].split(" SHA-256:")[0]));
-        assertNotEquals(initialAsset.substring(initialAsset.indexOf("SHA-256: ")),
-                updatedAsset.substring(updatedAsset.indexOf("SHA-256: ")));
-        assertEquals("v 1 0 0\n", Files.readString(asset));
+        assertTrue(rescanned.toString().contains("Source root: " + source.toAbsolutePath()));
+        assertTrue(rescanned.toString().contains("Logs: aiassetmigrate logs --directory \"" + state.resolve("logs") + "\""));
     }
 
     @Test
@@ -54,10 +65,17 @@ class RescanCommandTest {
         var cli = new CommandLine(new AssetMigrateCli()).setOut(new PrintWriter(new StringWriter()))
                 .setErr(new PrintWriter(new StringWriter()));
         assertNotEquals(0, cli.execute("rescan", source.toString(), "--project", project.toString(),
-                "--state-directory", directory.resolve("state").toString(),
-                "--log-directory", directory.resolve("logs").toString()));
+                "--state-directory", directory.resolve("state").toString()));
         assertFalse(Files.exists(directory.resolve("state/projects").resolve(project.toString())
                 .resolve("inventory-000001.json")));
         assertFalse(Files.exists(directory.resolve("logs")));
+    }
+
+    private static InventorySnapshot snapshot(UUID project, Path source) {
+        Instant time = Instant.parse("2025-01-01T00:00:00Z");
+        Asset asset = new Asset(UUID.randomUUID(), Path.of("mesh.obj"), Asset.Type.MODEL, "a".repeat(64), Map.of());
+        Project saved = new Project(project, source.toAbsolutePath(), 2, List.of(asset), time);
+        return new InventorySnapshot(1, 1, saved, List.of(), InventorySnapshot.ScanStatus.COMPLETE,
+                time, List.of(), List.of());
     }
 }

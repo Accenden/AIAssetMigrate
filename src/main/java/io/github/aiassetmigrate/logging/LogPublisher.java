@@ -35,6 +35,7 @@ import static java.nio.file.StandardOpenOption.*;
 /** One writer per project. Persisted events are authoritative; listeners are disposable. */
 public final class LogPublisher implements AutoCloseable {
     private static final java.util.Set<Path> LOCAL_OWNERS = ConcurrentHashMap.newKeySet();
+    private static final Map<Path, CommittedLog> ACTIVE_STORAGES = new ConcurrentHashMap<>();
     private static final ObjectMapper JSON = new ObjectMapper()
             .registerModule(new Jdk8Module()).registerModule(new JavaTimeModule())
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -70,13 +71,12 @@ public final class LogPublisher implements AutoCloseable {
         this.projectId = Objects.requireNonNull(projectId, "projectId");
         io.github.aiassetmigrate.inventory.SafeStoragePaths.validateExistingPath(directory);
         Files.createDirectories(directory);
-        storage = new CommittedLog(directory, projectId, faults);
+        storage = new CommittedLog(directory, projectId, faults, protectUnverifiableLinks);
         file = storage.log;
-        boolean newFiles = forceNewFiles || (protectUnverifiableLinks
-                && !Files.getFileStore(directory).supportsFileAttributeView("unix"));
+        boolean newFiles = forceNewFiles;
         if (!LOCAL_OWNERS.add(storage.owner)) throw new IOException("Another publisher owns " + file);
         try {
-            lockChannel = CommittedLog.open(storage.owner, newFiles);
+            lockChannel = storage.open(storage.owner, newFiles);
         } catch (IOException | RuntimeException e) {
             LOCAL_OWNERS.remove(storage.owner);
             throw e;
@@ -94,7 +94,7 @@ public final class LogPublisher implements AutoCloseable {
             if (existing && !Files.exists(storage.marker, NOFOLLOW_LINKS)) {
                 throw new IOException("Missing commit marker; legacy adoption or recovery is not yet available: " + file);
             }
-            opened = CommittedLog.open(file, newFiles || !existing);
+            opened = storage.open(file, newFiles || !existing);
             FileChannel logChannel = opened;
             CommittedLog.Snapshot snapshot = storage.gated(!existing, () -> {
                 if (!existing) storage.initialize(logChannel);
@@ -108,7 +108,7 @@ public final class LogPublisher implements AutoCloseable {
             opened.position(opened.size());
             channel = opened;
             logKey = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes.class, NOFOLLOW_LINKS).fileKey();
-            if (logKey == null) throw new IOException("Cannot verify log identity: " + file);
+            ACTIVE_STORAGES.put(file, storage);
         } catch (IOException | RuntimeException e) {
             try {
                 if (opened != null) opened.close();
@@ -116,7 +116,9 @@ public final class LogPublisher implements AutoCloseable {
                 try {
                     lockChannel.close();
                 } finally {
+                    ACTIVE_STORAGES.remove(file, storage);
                     LOCAL_OWNERS.remove(storage.owner);
+                    storage.clearFreshTrust();
                 }
             }
             if (e instanceof OverlappingFileLockException) {
@@ -139,6 +141,10 @@ public final class LogPublisher implements AutoCloseable {
         CommittedLog storage = new CommittedLog(directory, Objects.requireNonNull(projectId), CommittedLog.NO_FAULTS);
         if (Files.exists(storage.log, NOFOLLOW_LINKS) && !Files.exists(storage.marker, NOFOLLOW_LINKS)) {
             throw new IOException("Missing commit marker; legacy adoption or recovery is not yet available: " + storage.log);
+        }
+        CommittedLog active = ACTIVE_STORAGES.get(storage.log);
+        if (active != null) {
+            return active.gated(false, () -> checkedDecode(active.snapshot(), projectId, afterSequence));
         }
         return storage.gated(false, () -> checkedDecode(storage.snapshot(), projectId, afterSequence));
     }
@@ -189,10 +195,12 @@ public final class LogPublisher implements AutoCloseable {
         try {
             byte[] bytes = (JSON.writeValueAsString(event) + "\n").getBytes(StandardCharsets.UTF_8);
             storage.gated(false, () -> {
-                CommittedLog.safeFile(file);
-                Object currentKey = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes.class,
-                        NOFOLLOW_LINKS).fileKey();
-                if (!logKey.equals(currentKey)) throw new IOException("Log identity changed: " + file);
+                storage.safeFile(file);
+                if (logKey != null) {
+                    Object currentKey = Files.readAttributes(file, java.nio.file.attribute.BasicFileAttributes.class,
+                            NOFOLLOW_LINKS).fileKey();
+                    if (!logKey.equals(currentKey)) throw new IOException("Log identity changed: " + file);
+                }
                 CommittedLog.Snapshot snapshot = storage.snapshot();
                 checkedDecode(snapshot, projectId, 0);
                 if (snapshot.boundary().sequence() != sequence || channel.size() != snapshot.boundary().offset()) {
@@ -235,7 +243,7 @@ public final class LogPublisher implements AutoCloseable {
         if (afterSequence < 0 || afterSequence > sequence) {
             throw new IllegalArgumentException("afterSequence must be between 0 and " + sequence);
         }
-        List<LogEvent> replay = readLogs(file.getParent(), projectId, afterSequence);
+        List<LogEvent> replay = storage.gated(false, () -> checkedDecode(storage.snapshot(), projectId, afterSequence));
         Listener listener = new Listener(observer, onFailure, replay);
         listeners.add(listener);
         listener.thread.start();
@@ -265,7 +273,9 @@ public final class LogPublisher implements AutoCloseable {
                     try {
                         lockChannel.close();
                     } finally {
+                        ACTIVE_STORAGES.remove(file, storage);
                         LOCAL_OWNERS.remove(storage.owner);
+                        storage.clearFreshTrust();
                     }
                 }
             }

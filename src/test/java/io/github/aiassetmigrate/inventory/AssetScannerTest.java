@@ -61,7 +61,7 @@ class AssetScannerTest {
             Files.setAttribute(hidden, "dos:hidden", true);
         }
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
+        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
         assertEquals(7, result.assets().size());
         Map<String, Asset> assets = result.assets().stream()
                 .collect(Collectors.toMap(asset -> portable(asset.relativePath()), asset -> asset));
@@ -77,7 +77,12 @@ class AssetScannerTest {
                     asset.fingerprint());
             assertEquals(Long.toString(Files.size(file)), asset.metadata().get(Asset.SIZE_BYTES));
             assertEquals(Files.getLastModifiedTime(file).toInstant().toString(), asset.metadata().get(Asset.MODIFIED_AT));
-            assertEquals(Asset.InspectionStatus.UNVERIFIED.name(), asset.metadata().get(Asset.INSPECTION_STATUS));
+            Asset.InspectionStatus expectedStatus = asset.type() == Asset.Type.TEXTURE
+                    ? Asset.InspectionStatus.NOT_PERFORMED : Asset.InspectionStatus.BASIC_CHECKED;
+            if (asset.relativePath().toString().toLowerCase(Locale.ROOT).endsWith(".fbx")) {
+                expectedStatus = Asset.InspectionStatus.UNKNOWN;
+            }
+            assertEquals(expectedStatus.name(), asset.metadata().get(Asset.INSPECTION_STATUS));
         }
         assertEquals("obj", assets.get("spaces \u96ea/model.OBJ").metadata().get(Asset.FORMAT));
         assertEquals("jpeg", assets.get("image.JPEG").metadata().get(Asset.FORMAT));
@@ -86,26 +91,46 @@ class AssetScannerTest {
     }
 
     @Test
-    void arbitraryImageBytesAreSkippedWithoutModifyingSource() throws Exception {
+    void arbitraryImageBytesAreInventoriedWithHashOnlyMetadataWithoutModifyingSource() throws Exception {
         byte[] bytes = {(byte) 0xff, (byte) 0xfe, 0, 7};
         for (String extension : List.of("png", "jpg", "jpeg")) {
             Files.write(directory.resolve("not-an-image." + extension), bytes);
         }
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
-        assertTrue(result.assets().isEmpty());
-        assertEquals(3, result.findings().stream().filter(f -> f.code().equals("CORRUPT_FORMAT")).count());
-        assertEquals(3, result.pathOutcomes().stream().filter(o -> o.status() == PathOutcome.Status.SKIPPED).count());
+        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
+        assertEquals(3, result.assets().size());
+        assertEquals(0, result.findings().stream().filter(f -> f.code().equals("CORRUPT_FORMAT")).count());
+        assertEquals(3, result.findings().stream().filter(f -> f.code().equals("INSPECTION_UNVERIFIED")).count());
+        assertTrue(result.assets().stream().allMatch(asset ->
+                asset.metadata().get(Asset.INSPECTION_STATUS).equals(Asset.InspectionStatus.NOT_PERFORMED.name())
+                        && asset.metadata().get(Asset.INSPECTION_METHOD).equals("SHA256_STREAM_ONLY")));
+        String expectedHash = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        assertTrue(result.assets().stream().allMatch(asset -> asset.fingerprint().equals(expectedHash)));
+        assertTrue(result.pathOutcomes().stream().filter(o -> o.kind() == PathOutcome.Kind.FILE)
+                .allMatch(o -> o.status() == PathOutcome.Status.INVENTORIED));
         for (String extension : List.of("png", "jpg", "jpeg")) {
             assertArrayEquals(bytes, Files.readAllBytes(directory.resolve("not-an-image." + extension)));
         }
     }
 
     @Test
+    void skipsFilesAboveTheConfiguredReadLimit() throws Exception {
+        Files.write(directory.resolve("too-large.obj"), new byte[] {1, 2, 3, 4, 5});
+
+        var result = new AssetScanner(new ScanLimits(64, 100, 4, 1024, 1024, 1024)).scan(directory);
+
+        assertTrue(result.assets().isEmpty());
+        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
+        assertTrue(result.findings().stream().anyMatch(finding -> finding.code().equals("FILE_SIZE_LIMIT")));
+        assertTrue(result.pathOutcomes().stream().anyMatch(outcome -> outcome.relativePath().equals(Path.of("too-large.obj"))
+                && outcome.status() == PathOutcome.Status.SKIPPED));
+    }
+
+    @Test
     void emptyFileUsesStandardSha256WithoutClaimingFormatValidity() throws IOException {
         Files.createFile(directory.resolve("empty.obj"));
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
+        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
         assertEquals(1, result.assets().size());
         assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                 result.assets().getFirst().fingerprint());
@@ -135,7 +160,7 @@ class AssetScannerTest {
             Files.writeString(Files.createDirectory(directory.resolve(folder)).resolve("asset.obj"), "content");
         }
         var result = new AssetScanner().scan(directory);
-        assertEquals(InventorySnapshot.ScanStatus.PARTIAL, result.scanStatus());
+        assertEquals(InventorySnapshot.ScanStatus.COMPLETE, result.scanStatus());
         assertEquals(List.of(".hidden/asset.obj", "node_modules/asset.obj", "target/asset.obj"),
                 result.assets().stream().map(asset -> portable(asset.relativePath())).toList());
     }
