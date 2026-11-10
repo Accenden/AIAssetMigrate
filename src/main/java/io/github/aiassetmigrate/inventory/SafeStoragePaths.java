@@ -1,7 +1,12 @@
 package io.github.aiassetmigrate.inventory;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
+import java.util.Locale;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -105,4 +110,35 @@ public final class SafeStoragePaths {
     private static BasicFileAttributes attributes(Path path) throws IOException {
         return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
     }
+
+    /** True on Windows, where directory channels and Unix file keys are unavailable. */
+    public static boolean isWindows() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("windows");
+    }
+
+    /**
+     * Forces a directory entry to storage where the provider permits it. Windows rejects
+     * opening directories as channels; NTFS metadata journaling is relied on there instead.
+     */
+    public static void syncDirectory(Path directory) throws IOException {
+        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            channel.force(true);
+        } catch (AccessDeniedException | UnsupportedOperationException e) {
+            if (!isWindows()) throw new IOException("Directory durability unavailable: " + directory, e);
+        }
+    }
+
+    /**
+     * Returns a comparable identity for a no-follow attribute read. Uses the provider file
+     * key where available; Windows providers return no key, so the creation time, type and
+     * (for files) size are used as a best-effort identity instead.
+     */
+    public static Object identity(BasicFileAttributes attributes) {
+        Object key = attributes.fileKey();
+        if (key != null) return key;
+        return new FallbackIdentity(attributes.creationTime(), attributes.isDirectory(),
+                attributes.isDirectory() ? -1 : attributes.size());
+    }
+
+    private record FallbackIdentity(FileTime created, boolean directory, long size) {}
 }

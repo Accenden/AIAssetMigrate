@@ -226,7 +226,7 @@ class AnalysisIntegrationTest {
             assertTrue(manager.loadReviews(project).isEmpty());
             assertEquals(List.of(valid), manager.review(project, revision, List.of(valid)));
             assertTrue(manager.previewOrganization(project, revision).findings().stream()
-                    .anyMatch(f -> f.code().equals("REVIEWED_MAPPING_UNSUPPORTED")));
+                    .anyMatch(f -> f.code().equals("MAPPING_LIBRARY_NOT_REFERENCED")));
         }
     }
 

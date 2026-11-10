@@ -62,7 +62,7 @@ public final class CompatibilityCommand implements Callable<Integer> {
                         out.printf("  ID: %s Severity: %s Code: %s Asset ID: %s Path: %s Message: %s%n",
                                 finding.id(), finding.severity(), ImportCommand.safe(finding.code()),
                                 finding.assetId().map(UUID::toString).orElse("<project>"),
-                                finding.sourceRelativePath().map(Path::toString).map(ImportCommand::safe).orElse("<project>"),
+                                finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).map(ImportCommand::safe).orElse("<project>"),
                                 ImportCommand.safe(finding.message()));
                     }
                     out.println("Compatibility assessment is not validation and does not approve or perform migration.");

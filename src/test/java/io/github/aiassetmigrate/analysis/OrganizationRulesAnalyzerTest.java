@@ -24,7 +24,7 @@ class OrganizationRulesAnalyzerTest {
     }
 
     private static InventorySnapshot snapshot(InventorySnapshot.ScanStatus status, List<Asset> assets, List<AssetReference> references) {
-        return new InventorySnapshot(1, 1, new Project(PROJECT, Path.of("/source"), 3, assets, NOW),
+        return new InventorySnapshot(1, 1, new Project(PROJECT, io.github.aiassetmigrate.TestPaths.absolute("source"), 3, assets, NOW),
                 List.of(), status, NOW, List.of(), references);
     }
 
@@ -61,7 +61,9 @@ class OrganizationRulesAnalyzerTest {
     }
 
     @Test void preservesUnicodeUnsafeAndEmptyStemsWithoutDroppingCharacters() {
-        for (String filename : List.of("Caf\u00e9 Model.PNG", "e\u0301.png", "\u4e16\u754c.obj", "---.obj", ".hidden", "bad?.png")) {
+        List<String> names = new java.util.ArrayList<>(List.of("Caf\u00e9 Model.PNG", "e\u0301.png", "\u4e16\u754c.obj", "---.obj", ".hidden"));
+        try { Path.of("bad?.png"); names.add("bad?.png"); } catch (java.nio.file.InvalidPathException windowsReserved) { }
+        for (String filename : names) {
             Asset a = asset(filename, Asset.Type.OTHER);
             var result = analyze(List.of(a), AssetManager.NameStyle.SNAKE_CASE, AssetManager.FolderStyle.PRESERVE);
             assertEquals(filename, value(result, a, AssetManager.AnalysisKind.NAMES));

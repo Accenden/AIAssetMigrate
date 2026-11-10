@@ -37,7 +37,10 @@ public final class ReviewCommand implements Callable<Integer> {
             "Structured value; repeat for multiple entries.",
             "CATEGORY: category; RELATIONSHIP: targetAssetId and optional reference;",
             "MATERIAL_MAPPING: targetAssetId and reference; EXCLUSION: reason;",
-            "NAME: name=FILE; FOLDER: folder=RELATIVE (empty for root)."})
+            "NAME: name=FILE; FOLDER: folder=RELATIVE (empty for root);",
+            "ACKNOWLEDGMENT: reason (accepts unknown FBX or other uninspectable dependencies).",
+            "An accepted RELATIONSHIP or MATERIAL_MAPPING whose reference matches a file",
+            "reference corrects that reference; migration rewrites it in the output copy."})
     private Map<String, String> values = new LinkedHashMap<>();
     @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;

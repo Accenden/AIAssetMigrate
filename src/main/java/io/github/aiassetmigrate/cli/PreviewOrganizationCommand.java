@@ -47,8 +47,12 @@ public final class PreviewOrganizationCommand implements Callable<Integer> {
             out.println("Entries (" + result.entries().size() + "):");
             for (var entry : result.entries()) {
                 out.printf("  Asset ID: %s Source: %s Destination: %s Excluded: %s%n", entry.assetId(),
-                        ImportCommand.safe(entry.source().toString()),
+                        ImportCommand.safe(io.github.aiassetmigrate.domain.PortablePath.of(entry.source())),
                         entry.destination().map(ImportCommand::safe).orElse("<none>"), entry.excluded());
+                for (var rewrite : entry.rewrites()) {
+                    out.printf("    Rewrite %s reference: %s -> %s%n", rewrite.kind(),
+                            ImportCommand.safe(rewrite.original()), ImportCommand.safe(rewrite.replacement()));
+                }
             }
             out.println("Findings (" + result.findings().size() + "):");
             for (var finding : result.findings()) {

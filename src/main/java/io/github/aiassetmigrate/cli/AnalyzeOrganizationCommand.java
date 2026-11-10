@@ -15,7 +15,7 @@ import java.util.concurrent.Callable;
         description = "Inspect organization suggestions without accepting changes.")
 public final class AnalyzeOrganizationCommand implements Callable<Integer> {
     enum NameOption { preserve, snake_case, kebab_case }
-    enum FolderOption { preserve, by_type }
+    enum FolderOption { preserve, by_type, by_category }
 
     @Option(names = "--project", required = true, paramLabel = "UUID", description = "Project UUID.")
     private UUID projectId;
@@ -23,7 +23,7 @@ public final class AnalyzeOrganizationCommand implements Callable<Integer> {
             converter = NameConverter.class, description = "Name style: preserve, snake-case, kebab-case (default: preserve).")
     private NameOption nameStyle;
     @Option(names = "--folder-style", defaultValue = "preserve", paramLabel = "STYLE",
-            converter = FolderConverter.class, description = "Folder style: preserve, by-type (default: preserve).")
+            converter = FolderConverter.class, description = "Folder style: preserve, by-type, by-category (accepted categories; default: preserve).")
     private FolderOption folderStyle;
     @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;
@@ -52,7 +52,8 @@ public final class AnalyzeOrganizationCommand implements Callable<Integer> {
             return switch (value) {
                 case "preserve" -> FolderOption.preserve;
                 case "by-type" -> FolderOption.by_type;
-                default -> throw new picocli.CommandLine.TypeConversionException("Expected preserve or by-type");
+                case "by-category" -> FolderOption.by_category;
+                default -> throw new picocli.CommandLine.TypeConversionException("Expected preserve, by-type, or by-category");
             };
         }
     }

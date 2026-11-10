@@ -25,7 +25,14 @@ import java.util.UUID;
 public final class OrganizationPreview {
     private OrganizationPreview() {}
 
-    public record Entry(UUID assetId, Path source, Optional<String> destination, boolean excluded) {}
+    /** Rewrites are output-copy reference replacements; empty means the source bytes are copied unchanged. */
+    public record Entry(UUID assetId, Path source, Optional<String> destination, boolean excluded,
+                        List<MaterialAnalysis.Rewrite> rewrites) {
+        public Entry(UUID assetId, Path source, Optional<String> destination, boolean excluded) {
+            this(assetId, source, destination, excluded, List.of());
+        }
+        public Entry { rewrites = List.copyOf(rewrites); }
+    }
     public record Finding(String code, Optional<UUID> assetId, String message) {}
     public record Result(UUID projectId, long inventoryRevision, List<Entry> entries, List<Finding> findings) {
         public Result { entries = List.copyOf(entries); findings = List.copyOf(findings); }
@@ -37,7 +44,14 @@ public final class OrganizationPreview {
      * values["name"] (a filename including extension); accepted FOLDER uses values["folder"]
      * (slash-separated output-relative folder, empty for root). Accepted EXCLUSION omits an asset.
      * Rejected decisions leave the corresponding default unchanged. Missing decisions preserve
-     * the source filename and parent folder. Other review kinds are ignored.
+     * the source filename and parent folder.
+     *
+     * Accepted RELATIONSHIP or MATERIAL_MAPPING decisions whose values["reference"] equals a
+     * file reference of their asset replace that reference's target (a correction). A
+     * MATERIAL_MAPPING from a model whose reference is not a file reference names a material
+     * used by the model; its target must already be one of the model's material libraries.
+     * When an owner or target moves, references are rewritten in the owner's output copy
+     * relative to the new destinations. Other review kinds are ignored.
      */
     public static Result preview(InventorySnapshot snapshot, UUID reviewProjectId, long reviewInventoryRevision,
                                  List<ReviewedChange> decisions) {
@@ -53,9 +67,24 @@ public final class OrganizationPreview {
             throw new IllegalArgumentException("Duplicate asset ID");
         Map<UUID, Map<ReviewedChange.Kind, ReviewedChange>> selected = new HashMap<>();
         Set<UUID> reviewIds = new HashSet<>();
+        Map<UUID, Map<String, UUID>> corrections = new HashMap<>();
+        Set<UUID> conflictingCorrections = new HashSet<>();
         for (ReviewedChange decision : decisions) {
             if (!reviewIds.add(decision.id())) throw new IllegalArgumentException("Duplicate review ID");
             if (!byId.containsKey(decision.assetId())) throw new IllegalArgumentException("Unknown reviewed asset");
+            if (decision.kind() == ReviewedChange.Kind.RELATIONSHIP || decision.kind() == ReviewedChange.Kind.MATERIAL_MAPPING) {
+                String reference = decision.values().get("reference");
+                String target = decision.values().get("targetAssetId");
+                if (accepted(decision) && reference != null && target != null) {
+                    UUID targetId;
+                    try { targetId = UUID.fromString(target); }
+                    catch (IllegalArgumentException e) { throw new IllegalArgumentException("Invalid reviewed target", e); }
+                    var previous = corrections.computeIfAbsent(decision.assetId(), ignored -> new HashMap<>())
+                            .putIfAbsent(reference, targetId);
+                    if (previous != null && !previous.equals(targetId)) conflictingCorrections.add(decision.assetId());
+                }
+                continue;
+            }
             if (decision.kind() != ReviewedChange.Kind.NAME && decision.kind() != ReviewedChange.Kind.FOLDER
                     && decision.kind() != ReviewedChange.Kind.EXCLUSION) continue;
             if (selected.computeIfAbsent(decision.assetId(), ignored -> new HashMap<>())
@@ -67,8 +96,9 @@ public final class OrganizationPreview {
             findings.add(finding("PARTIAL_INVENTORY", null, "Inventory coverage is incomplete"));
         List<Entry> entries = new ArrayList<>();
         Map<UUID, Entry> entryById = new HashMap<>();
-        Map<Path, List<Asset>> sourcePaths = new HashMap<>();
-        for (Asset asset : assets) sourcePaths.computeIfAbsent(asset.relativePath(), ignored -> new ArrayList<>()).add(asset);
+        // Portable text keys: WindowsPath equality ignores case and would hide case mismatches.
+        Map<String, List<Asset>> sourcePaths = new HashMap<>();
+        for (Asset asset : assets) sourcePaths.computeIfAbsent(MaterialAnalysis.key(asset.relativePath()), ignored -> new ArrayList<>()).add(asset);
         for (Asset asset : assets) {
             var choices = selected.getOrDefault(asset.id(), Map.of());
             boolean excluded = accepted(choices.get(ReviewedChange.Kind.EXCLUSION));
@@ -88,13 +118,9 @@ public final class OrganizationPreview {
             Entry entry = new Entry(asset.id(), asset.relativePath(), destination, excluded);
             entries.add(entry); entryById.put(asset.id(), entry);
         }
-        for (ReviewedChange decision : decisions.stream().sorted(Comparator.comparing(ReviewedChange::assetId)
-                .thenComparing(ReviewedChange::id)).toList()) {
-            if (decision.kind() == ReviewedChange.Kind.MATERIAL_MAPPING && accepted(decision)
-                    && !entryById.get(decision.assetId()).excluded()) {
-                findings.add(finding("REVIEWED_MAPPING_UNSUPPORTED", decision.assetId(),
-                        "Reviewed material mappings are not applied or validated by this preview"));
-            }
+        for (UUID owner : conflictingCorrections.stream().sorted().toList()) {
+            if (!entryById.get(owner).excluded())
+                findings.add(finding("CONFLICTING_CORRECTIONS", owner, "Accepted reviews map one reference to different targets"));
         }
         record Destination(Entry entry, String key) {}
         List<Destination> destinations = entries.stream().filter(e -> e.destination().isPresent())
@@ -124,35 +150,96 @@ public final class OrganizationPreview {
                 .thenComparing(AssetReference::originalText)
                 .thenComparing(r -> r.normalizedTargetPath().map(Path::toString).orElse(""))
                 .thenComparing(r -> r.resolutionStatus().name())).toList();
+        Map<UUID, Map<String, MaterialAnalysis.Rewrite>> rewrites = new HashMap<>();
+        Map<UUID, Set<String>> fileReferences = new HashMap<>();
+        Map<UUID, Set<UUID>> libraries = new HashMap<>();
         for (AssetReference ref : refs) {
             Entry owner = entryById.get(ref.ownerAssetId());
             if (owner == null) { findings.add(finding("UNKNOWN_REFERENCE_OWNER", ref.ownerAssetId(), "Reference owner is absent")); continue; }
+            fileReferences.computeIfAbsent(owner.assetId(), ignored -> new HashSet<>()).add(ref.originalText());
             if (owner.excluded()) continue;
-            List<Asset> targets = ref.normalizedTargetPath().map(p -> sourcePaths.getOrDefault(p, List.of())).orElse(List.of());
-            if (ref.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED || targets.size() != 1) {
-                findings.add(finding("UNRESOLVED_REFERENCE", owner.assetId(), "Reference is not uniquely resolved: " + ref.originalText()));
-                continue;
+            UUID corrected = corrections.getOrDefault(owner.assetId(), Map.of()).get(ref.originalText());
+            Asset targetAsset;
+            if (corrected != null) {
+                targetAsset = byId.get(corrected);
+                Asset.Type expected = ref.kind() == AssetReference.Kind.MATERIAL_LIBRARY ? Asset.Type.MATERIAL : Asset.Type.TEXTURE;
+                if (targetAsset == null || targetAsset.type() != expected || corrected.equals(owner.assetId())) {
+                    findings.add(finding("INVALID_CORRECTION", owner.assetId(),
+                            "Reviewed target is not a " + expected + " asset for reference: " + ref.originalText()));
+                    continue;
+                }
+            } else {
+                List<Asset> targets = ref.normalizedTargetPath()
+                        .map(p -> sourcePaths.getOrDefault(MaterialAnalysis.key(p), List.of())).orElse(List.of());
+                if (ref.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED || targets.size() != 1) {
+                    findings.add(finding("UNRESOLVED_REFERENCE", owner.assetId(), "Reference is not uniquely resolved: " + ref.originalText()));
+                    continue;
+                }
+                targetAsset = targets.getFirst();
             }
-            Entry target = entryById.get(targets.getFirst().id());
+            if (ref.kind() == AssetReference.Kind.MATERIAL_LIBRARY)
+                libraries.computeIfAbsent(owner.assetId(), ignored -> new HashSet<>()).add(targetAsset.id());
+            Entry target = entryById.get(targetAsset.id());
             if (owner.destination().isEmpty() || target.destination().isEmpty()) {
                 findings.add(finding("UNAVAILABLE_REFERENCE_TARGET", owner.assetId(), "Reference destination is unavailable: " + ref.originalText()));
                 continue;
             }
-            // Compare the original relative reference against the proposed destinations, without rewriting content.
-            try {
-                String text = ref.originalText();
-                if (text.isEmpty() || text.contains("\\") || text.contains(":") || text.startsWith("/")) throw new IllegalArgumentException();
-                Path ownerPath = Path.of(owner.destination().orElseThrow());
-                Path base = ownerPath.getParent();
-                Path resolved = (base == null ? Path.of(text) : base.resolve(text)).normalize();
-                if (resolved.isAbsolute() || resolved.startsWith("..")
-                        || !resolved.toString().replace('\\', '/').equals(target.destination().orElseThrow()))
-                    throw new IllegalArgumentException();
-            } catch (IllegalArgumentException e) {
-                findings.add(finding("REFERENCE_REWRITE_REQUIRED", owner.assetId(), "Reference would not resolve unchanged: " + ref.originalText()));
+            if (resolvesTo(owner.destination().orElseThrow(), ref.originalText(), target.destination().orElseThrow())) continue;
+            String replacement = relative(owner.destination().orElseThrow(), target.destination().orElseThrow());
+            if (!MaterialAnalysis.rewritableReference(ref.originalText()) || !MaterialAnalysis.rewritableReference(replacement)) {
+                findings.add(finding("REFERENCE_REWRITE_UNSUPPORTED", owner.assetId(),
+                        "Reference cannot be rewritten safely (spaces, options or reserved characters): " + ref.originalText()));
+                continue;
+            }
+            var rewrite = new MaterialAnalysis.Rewrite(ref.kind(), ref.originalText(), replacement);
+            var existing = rewrites.computeIfAbsent(owner.assetId(), ignored -> new java.util.TreeMap<>())
+                    .putIfAbsent(ref.originalText(), rewrite);
+            if (existing != null && !existing.equals(rewrite))
+                findings.add(finding("CONFLICTING_CORRECTIONS", owner.assetId(), "Reference has more than one target: " + ref.originalText()));
+        }
+        for (ReviewedChange decision : decisions.stream().sorted(Comparator.comparing(ReviewedChange::assetId)
+                .thenComparing(ReviewedChange::id)).toList()) {
+            if (decision.kind() != ReviewedChange.Kind.MATERIAL_MAPPING || !accepted(decision)) continue;
+            Entry owner = entryById.get(decision.assetId());
+            String reference = decision.values().get("reference");
+            if (owner.excluded() || reference == null
+                    || fileReferences.getOrDefault(owner.assetId(), Set.of()).contains(reference)) continue;
+            UUID material = corrections.get(owner.assetId()).get(reference);
+            if (byId.get(owner.assetId()).type() != Asset.Type.MODEL) {
+                findings.add(finding("MAPPING_REFERENCE_NOT_FOUND", owner.assetId(),
+                        "Reviewed reference is not a texture reference of this material: " + reference));
+            } else if (!libraries.getOrDefault(owner.assetId(), Set.of()).contains(material)) {
+                findings.add(finding("MAPPING_LIBRARY_NOT_REFERENCED", owner.assetId(), "Material '" + reference
+                        + "' maps to " + material + ", which is not one of this model's material libraries;"
+                        + " correct the model's mtllib reference first"));
             }
         }
+        for (int i = 0; i < entries.size(); i++) {
+            Entry entry = entries.get(i);
+            var changes = rewrites.get(entry.assetId());
+            if (changes != null) entries.set(i, new Entry(entry.assetId(), entry.source(), entry.destination(),
+                    entry.excluded(), List.copyOf(changes.values())));
+        }
         return new Result(project.id(), project.inventoryRevision(), entries, findings);
+    }
+
+    /** Output-relative reference text from the owner's destination folder to the target destination. */
+    static String relative(String ownerDestination, String targetDestination) {
+        Path owner = Path.of(ownerDestination).getParent();
+        Path target = Path.of(targetDestination);
+        return MaterialAnalysis.key(owner == null ? target : owner.relativize(target));
+    }
+
+    private static boolean resolvesTo(String ownerDestination, String text, String targetDestination) {
+        if (text.isEmpty() || text.contains("\\") || text.contains(":") || text.startsWith("/")) return false;
+        try {
+            Path base = Path.of(ownerDestination).getParent();
+            Path resolved = (base == null ? Path.of(text) : base.resolve(text)).normalize();
+            return !resolved.isAbsolute() && !resolved.startsWith("..")
+                    && MaterialAnalysis.key(resolved).equals(targetDestination);
+        } catch (java.nio.file.InvalidPathException e) {
+            return false;
+        }
     }
 
     private static boolean accepted(ReviewedChange change) {

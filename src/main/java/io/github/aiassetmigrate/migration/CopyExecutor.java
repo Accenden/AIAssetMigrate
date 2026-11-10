@@ -1,5 +1,6 @@
 package io.github.aiassetmigrate.migration;
 
+import io.github.aiassetmigrate.analysis.MaterialAnalysis;
 import io.github.aiassetmigrate.analysis.OrganizationPreview;
 import io.github.aiassetmigrate.domain.*;
 import io.github.aiassetmigrate.inventory.SafeStoragePaths;
@@ -7,6 +8,10 @@ import io.github.aiassetmigrate.inventory.SafeStoragePaths;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
@@ -15,15 +20,18 @@ import java.text.Normalizer;
 import java.util.*;
 
 /**
- * Copy-only executor. The caller supplies the approved immutable plan and inventory and is
+ * Copy executor. COPY publishes the source bytes unchanged; REWRITE_REFERENCES publishes an
+ * OBJ/MTL copy whose reviewed reference text is replaced, and nothing else. The caller supplies the approved immutable plan and inventory and is
  * responsible for authenticating the approval and excluding concurrent plan/review changes;
  * a plan's APPROVED status is not itself authorization. All output directories must
  * already exist. Source, destination, state and log namespaces and their ancestors must
  * be trusted against concurrent replacement; path and identity checks are best effort,
  * not a handle-anchored security boundary.
  *
- * Publication requires filesystem hard-link support and source unix:nlink support; other
- * providers fail closed. No durability or rollback is promised.
+ * Publication requires filesystem hard-link support. Unix providers must also report a
+ * source link count of one; Windows exposes no link count or file key, so identities fall
+ * back to creation time and size and content fingerprints are rechecked before publish.
+ * No durability or rollback is promised.
  */
 public final class CopyExecutor {
     public enum Status { COMPLETED, FAILED, SKIPPED }
@@ -74,7 +82,10 @@ public final class CopyExecutor {
     }
 
     private record Prepared(MigrationCommand command, Asset asset, Path source, Path destination,
-                            Map<Path, Object> identities) {}
+                            Map<Path, Object> identities, List<MaterialAnalysis.Rewrite> rewrites, boolean obj,
+                            List<Path> missingDirectories) {}
+
+    private static final int MAX_REWRITE_BYTES = 64 * 1024 * 1024;
 
     private static List<Prepared> preflight(InventorySnapshot snapshot, MigrationPlan plan, Path state, Path log)
             throws IOException {
@@ -105,8 +116,14 @@ public final class CopyExecutor {
         List<Prepared> result = new ArrayList<>();
         for (MigrationCommand command : plan.commands()) {
             if (!ids.add(command.id()) || !usedAssets.add(command.assetId())) throw new IOException("Duplicate command or asset");
-            if (command.operation() != MigrationCommand.Operation.COPY || !command.parameters().isEmpty()
-                    || command.converterRequirement().isPresent()) throw new IOException("Only unmodified COPY is supported");
+            boolean rewriting = command.operation() == MigrationCommand.Operation.REWRITE_REFERENCES;
+            if ((command.operation() != MigrationCommand.Operation.COPY && !rewriting)
+                    || (!rewriting && !command.parameters().isEmpty())
+                    || command.converterRequirement().isPresent())
+                throw new IOException("Only COPY and reviewed REWRITE_REFERENCES are supported");
+            List<MaterialAnalysis.Rewrite> rewrites;
+            try { rewrites = rewriting ? CopyPlanBuilder.decode(command.parameters()) : List.of(); }
+            catch (IllegalArgumentException e) { throw new IOException("Invalid rewrite parameters", e); }
             if (!completed.containsAll(command.dependencies()) || command.dependencies().contains(command.id()))
                 throw new IOException("Dependencies must precede the operation");
             completed.add(command.id());
@@ -116,6 +133,12 @@ public final class CopyExecutor {
             Path relative = command.relativeOutputPath();
             String dest = portable(relative);
             if (!dest.equals(entry.destination().orElseThrow())) throw new IOException("Output differs from reviewed preview");
+            if (!rewrites.equals(entry.rewrites()) || (rewriting && rewrites.isEmpty()))
+                throw new IOException("Reference rewrites differ from reviewed preview");
+            String sourceName = asset.relativePath().getFileName().toString().toLowerCase(Locale.ROOT);
+            boolean obj = asset.type() == Asset.Type.MODEL && sourceName.endsWith(".obj");
+            if (rewriting && !obj && !(asset.type() == Asset.Type.MATERIAL && sourceName.endsWith(".mtl")))
+                throw new IOException("References can only be rewritten in OBJ and MTL files");
             String folded = Normalizer.normalize(dest, Normalizer.Form.NFC).toUpperCase(Locale.ROOT).toLowerCase(Locale.ROOT);
             if (paths.contains(folded)) throw new IOException("Output paths collide");
             for (int slash = folded.indexOf('/'); slash >= 0; slash = folded.indexOf('/', slash + 1)) {
@@ -130,11 +153,19 @@ public final class CopyExecutor {
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) throw new IOException("Output already exists: " + target);
             Map<Path, Object> identities = new LinkedHashMap<>();
             captureChain(src.getParent(), identities);
-            captureChain(target.getParent(), identities);
+            // Missing destination folders inside the output root are created during execution, never here.
+            List<Path> missing = new ArrayList<>();
+            Path existing = target.getParent();
+            while (existing != null && !existing.equals(output) && !Files.exists(existing, LinkOption.NOFOLLOW_LINKS)) {
+                missing.addFirst(existing);
+                existing = existing.getParent();
+            }
+            if (existing == null || !existing.startsWith(output)) throw new IOException("Output root must exist");
+            captureChain(existing, identities);
             identities.put(src, sourceIdentity(src));
             if (!hash(src).equals(asset.fingerprint())) throw new IOException("Source fingerprint changed: " + src);
             verify(identities);
-            result.add(new Prepared(command, asset, src, target, Map.copyOf(identities)));
+            result.add(new Prepared(command, asset, src, target, Map.copyOf(identities), rewrites, obj, List.copyOf(missing)));
         }
         return result;
     }
@@ -143,23 +174,41 @@ public final class CopyExecutor {
         hook.run(index, "before-step");
         verify(p.identities);
         if (!hash(p.source).equals(p.asset.fingerprint())) throw new IOException("Source fingerprint changed");
+        Map<Path, Object> identities = new LinkedHashMap<>(p.identities);
+        for (Path directory : p.missingDirectories) {
+            try { Files.createDirectory(directory); }
+            catch (FileAlreadyExistsException existing) { /* created by an earlier step; rechecked below */ }
+            SafeStoragePaths.validateExistingPath(directory);
+            identities.put(directory, directoryIdentity(directory));
+        }
+        verify(identities);
         Path temp = p.destination.resolveSibling(".migration-" + UUID.randomUUID() + ".tmp");
         boolean created = false;
         boolean published = false;
         String detail = "Published";
         try {
-            MessageDigest digest = digest();
-            try (InputStream in = Files.newInputStream(p.source, LinkOption.NOFOLLOW_LINKS);
-                 OutputStream out = Files.newOutputStream(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
-                created = true;
-                byte[] buffer = new byte[65536];
-                for (int count; (count = in.read(buffer)) != -1;) { digest.update(buffer, 0, count); out.write(buffer, 0, count); }
+            if (p.rewrites.isEmpty()) {
+                MessageDigest digest = digest();
+                try (InputStream in = Files.newInputStream(p.source, LinkOption.NOFOLLOW_LINKS);
+                     OutputStream out = Files.newOutputStream(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                    created = true;
+                    byte[] buffer = new byte[65536];
+                    for (int count; (count = in.read(buffer)) != -1;) { digest.update(buffer, 0, count); out.write(buffer, 0, count); }
+                }
+                if (!HexFormat.of().formatHex(digest.digest()).equals(p.asset.fingerprint())) throw new IOException("Copied bytes differ from inventory");
+            } else {
+                byte[] output = rewritten(p);
+                try (OutputStream out = Files.newOutputStream(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                    created = true;
+                    out.write(output);
+                }
+                detail = "Published with " + p.rewrites.size() + " reference rewrite(s); output SHA-256 "
+                        + HexFormat.of().formatHex(digest().digest(output));
             }
-            if (!HexFormat.of().formatHex(digest.digest()).equals(p.asset.fingerprint())) throw new IOException("Copied bytes differ from inventory");
             hook.run(index, "before-publish");
-            verify(p.identities);
+            verify(identities);
             if (!hash(p.source).equals(p.asset.fingerprint())) throw new IOException("Source fingerprint changed before publish");
-            verify(p.identities);
+            verify(identities);
             // Unlike ATOMIC_MOVE, createLink is specified to fail if the destination exists.
             Files.createLink(p.destination, temp);
             published = true;
@@ -168,7 +217,7 @@ public final class CopyExecutor {
                 try {
                     Path parent = temp.getParent();
                     for (Path current = parent; current != null; current = current.getParent()) {
-                        if (!Objects.equals(p.identities.get(current), directoryIdentity(current)))
+                        if (!Objects.equals(identities.get(current), directoryIdentity(current)))
                             throw new IOException("Destination parent changed; temporary file not removed: " + temp);
                     }
                     Files.deleteIfExists(temp);
@@ -180,6 +229,29 @@ public final class CopyExecutor {
             }
         }
         return detail;
+    }
+
+    /** Reads the fingerprinted source and applies only the reviewed reference rewrites. */
+    private static byte[] rewritten(Prepared p) throws IOException {
+        byte[] source;
+        try (InputStream in = Files.newInputStream(p.source, LinkOption.NOFOLLOW_LINKS)) {
+            source = in.readNBytes(MAX_REWRITE_BYTES + 1);
+        }
+        if (source.length > MAX_REWRITE_BYTES) throw new IOException("File is too large to rewrite references");
+        if (!HexFormat.of().formatHex(digest().digest(source)).equals(p.asset.fingerprint()))
+            throw new IOException("Source fingerprint changed");
+        String text;
+        try {
+            text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(source)).toString();
+        } catch (CharacterCodingException e) {
+            throw new IOException("Source is not valid UTF-8 text", e);
+        }
+        try {
+            return MaterialAnalysis.rewrite(text, p.obj, p.rewrites).getBytes(StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Reference rewrite failed: " + e.getMessage(), e);
+        }
     }
 
     private static Path absolute(Path path) throws IOException {
@@ -205,17 +277,22 @@ public final class CopyExecutor {
     }
     private static Object directoryIdentity(Path path) throws IOException {
         var attrs = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (!attrs.isDirectory() || attrs.fileKey() == null) throw new IOException("Unsafe or unidentified directory: " + path);
-        return attrs.fileKey();
+        if (!attrs.isDirectory()) throw new IOException("Unsafe or unidentified directory: " + path);
+        return SafeStoragePaths.identity(attrs);
     }
     private static Object sourceIdentity(Path path) throws IOException {
         var attrs = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (!attrs.isRegularFile() || attrs.fileKey() == null) throw new IOException("Unsafe or unidentified source: " + path);
-        try {
-            Object links = Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS);
-            if (!(links instanceof Number) || ((Number) links).longValue() != 1) throw new IOException("Source has hard links: " + path);
-        } catch (UnsupportedOperationException | IllegalArgumentException e) { throw new IOException("Cannot verify source link count", e); }
-        return attrs.fileKey();
+        if (!attrs.isRegularFile()) throw new IOException("Unsafe or unidentified source: " + path);
+        if (Files.getFileStore(path).supportsFileAttributeView("unix")) {
+            try {
+                Object links = Files.getAttribute(path, "unix:nlink", LinkOption.NOFOLLOW_LINKS);
+                if (!(links instanceof Number) || ((Number) links).longValue() != 1) throw new IOException("Source has hard links: " + path);
+            } catch (UnsupportedOperationException | IllegalArgumentException e) { throw new IOException("Cannot verify source link count", e); }
+        } else if (!SafeStoragePaths.isWindows() || attrs.fileKey() != null) {
+            throw new IOException("Cannot verify source link count");
+        }
+        // Windows exposes no link count; the content fingerprint is rechecked before every publish.
+        return SafeStoragePaths.identity(attrs);
     }
     private static void verify(Map<Path, Object> identities) throws IOException {
         for (var entry : identities.entrySet()) {

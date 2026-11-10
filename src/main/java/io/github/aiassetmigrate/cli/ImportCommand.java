@@ -132,7 +132,7 @@ public final class ImportCommand implements Callable<Integer> {
         out.println("Scan status: " + snapshot.scanStatus());
         out.println("Assets (" + project.assets().size() + "):");
         for (var asset : project.assets()) {
-            out.printf("  %s [%s] ID: %s SHA-256: %s%n", safe(asset.relativePath().toString()),
+            out.printf("  %s [%s] ID: %s SHA-256: %s%n", safe(io.github.aiassetmigrate.domain.PortablePath.of(asset.relativePath())),
                     asset.type(), asset.id(), asset.fingerprint());
             new TreeMap<>(asset.metadata()).forEach((key, value) ->
                     out.printf("    %s: %s%n", safe(key), safe(value)));
@@ -140,12 +140,12 @@ public final class ImportCommand implements Callable<Integer> {
         out.println("Findings (" + snapshot.findings().size() + "):");
         for (var finding : snapshot.findings()) {
             out.printf("  %s %s %s: %s%n", finding.severity(), safe(finding.code()),
-                    finding.sourceRelativePath().map(Path::toString).map(ImportCommand::safe).orElse("<project>"),
+                    finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).map(ImportCommand::safe).orElse("<project>"),
                     safe(finding.message()));
         }
         out.println("Coverage (" + snapshot.pathOutcomes().size() + "):");
         for (var outcome : snapshot.pathOutcomes()) {
-            String path = outcome.relativePath().toString();
+            String path = io.github.aiassetmigrate.domain.PortablePath.of(outcome.relativePath());
             out.printf("  %s %s %s%n", outcome.status(), outcome.kind(), path.isEmpty() ? "." : safe(path));
         }
         out.printf("Logs: aiassetmigrate logs --directory %s --project %s%n",

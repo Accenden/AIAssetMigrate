@@ -295,7 +295,7 @@ public final class FileMigrationPlanRepository {
     }
 
     private static void syncDirectory(Path directory) throws IOException {
-        try (FileChannel channel = FileChannel.open(directory, READ, NOFOLLOW_LINKS)) { channel.force(true); }
+        SafeStoragePaths.syncDirectory(directory);
     }
 
     private <T> T read(Path file, Class<T> type) throws IOException {

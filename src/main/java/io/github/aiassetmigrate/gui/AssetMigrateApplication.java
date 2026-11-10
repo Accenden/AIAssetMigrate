@@ -244,7 +244,7 @@ public final class AssetMigrateApplication extends Application {
         HBox statusRow = new HBox(10, progress, status);
         HBox.setHgrow(status, Priority.ALWAYS);
 
-        addColumn("Path", asset -> asset.relativePath().toString(), 260);
+        addColumn("Path", asset -> io.github.aiassetmigrate.domain.PortablePath.of(asset.relativePath()), 260);
         addColumn("Asset ID", asset -> asset.id().toString(), 270);
         addColumn("Type", asset -> asset.type().toString(), 90);
         addColumn("Format", asset -> asset.metadata().getOrDefault(Asset.FORMAT, ""), 75);
@@ -424,7 +424,7 @@ public final class AssetMigrateApplication extends Application {
         if (plan.commands().isEmpty()) text.append("None\n");
         for (var command : plan.commands()) {
             text.append("Source asset ID: ").append(command.assetId()).append(" | Source relative path: ")
-                    .append(context.sources().containsKey(command.assetId()) ? context.sources().get(command.assetId()) : "<unknown>").append('\n')
+                    .append(context.sources().containsKey(command.assetId()) ? io.github.aiassetmigrate.domain.PortablePath.of(context.sources().get(command.assetId())) : "<unknown>").append('\n')
                     .append(command).append('\n');
         }
         text.append("Reviewed decisions (complete):\n");
@@ -432,7 +432,7 @@ public final class AssetMigrateApplication extends Application {
         for (ReviewedChange change : plan.reviewedChanges()) {
             text.append("Review ID: ").append(change.id()).append(" | Asset ID: ").append(change.assetId())
                     .append(" | Source relative path: ")
-                    .append(context.sources().containsKey(change.assetId()) ? context.sources().get(change.assetId()) : "<unknown>")
+                    .append(context.sources().containsKey(change.assetId()) ? io.github.aiassetmigrate.domain.PortablePath.of(context.sources().get(change.assetId())) : "<unknown>")
                     .append(" | Kind: ").append(change.kind()).append(" | Decision: ").append(change.decision())
                     .append(" | Values: ").append(change.values()).append(" | Reviewed at: ").append(change.reviewedAt()).append('\n');
         }
@@ -534,7 +534,7 @@ public final class AssetMigrateApplication extends Application {
         if (result.findings().isEmpty()) return text.append("No compatibility findings.\n").toString();
         for (Finding finding : result.findings()) {
             text.append(finding.severity()).append(" [").append(finding.code()).append("] ");
-            finding.sourceRelativePath().ifPresent(path -> text.append(path).append(": "));
+            finding.sourceRelativePath().ifPresent(path -> text.append(io.github.aiassetmigrate.domain.PortablePath.of(path)).append(": "));
             finding.assetId().ifPresent(id -> text.append("asset ").append(id).append(": "));
             text.append(finding.message()).append('\n');
         }
@@ -587,9 +587,9 @@ public final class AssetMigrateApplication extends Application {
         reviewAsset.setPromptText("Asset UUID to review");
         reviewKind.getItems().setAll(ReviewedChange.Kind.CATEGORY, ReviewedChange.Kind.RELATIONSHIP,
                 ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Kind.EXCLUSION,
-                ReviewedChange.Kind.NAME, ReviewedChange.Kind.FOLDER);
+                ReviewedChange.Kind.NAME, ReviewedChange.Kind.FOLDER, ReviewedChange.Kind.ACKNOWLEDGMENT);
         reviewKind.setPromptText("Choose review kind");
-        reviewValue.setPromptText("Category, target UUID, exclusion reason, filename, or folder (blank for root)");
+        reviewValue.setPromptText("Category, target UUID, exclusion/acknowledgment reason, filename, or folder (blank for root)");
         reviewReference.setPromptText("Original reference (required for material mapping; optional for relationship)");
         decision.getItems().setAll(ReviewedChange.Decision.ACCEPTED, ReviewedChange.Decision.REJECTED);
         decision.setPromptText("Choose decision");
@@ -794,7 +794,7 @@ public final class AssetMigrateApplication extends Application {
         Map<String, String> values;
         switch (kind) {
             case CATEGORY -> values = Map.of("category", edited);
-            case EXCLUSION -> values = Map.of("reason", edited);
+            case EXCLUSION, ACKNOWLEDGMENT -> values = Map.of("reason", edited);
             case NAME -> values = Map.of("name", edited);
             case FOLDER -> values = Map.of("folder", edited);
             case RELATIONSHIP, MATERIAL_MAPPING -> {
@@ -817,9 +817,14 @@ public final class AssetMigrateApplication extends Application {
                 .append(preview.inventoryRevision()).append("\nStatus: ")
                 .append(preview.blocked() ? "BLOCKED" : "No blocking findings").append("\nEntries:\n");
         for (OrganizationPreview.Entry entry : preview.entries()) {
-            text.append("Asset: ").append(entry.assetId()).append(" | Source: ").append(entry.source())
+            text.append("Asset: ").append(entry.assetId()).append(" | Source: ")
+                    .append(io.github.aiassetmigrate.domain.PortablePath.of(entry.source()))
                     .append(" | Destination: ").append(entry.destination().orElse("(none)"))
                     .append(" | Excluded: ").append(entry.excluded()).append('\n');
+            for (var rewrite : entry.rewrites()) {
+                text.append("    Rewrite ").append(rewrite.kind()).append(" reference: ").append(rewrite.original())
+                        .append(" -> ").append(rewrite.replacement()).append('\n');
+            }
         }
         text.append("Blocking findings:\n");
         if (preview.findings().isEmpty()) text.append("None\n");
@@ -846,7 +851,7 @@ public final class AssetMigrateApplication extends Application {
         StringBuilder text = new StringBuilder();
         for (Finding finding : items) {
             text.append(finding.severity()).append(" [").append(finding.code()).append("] ");
-            finding.sourceRelativePath().ifPresent(path -> text.append(path).append(": "));
+            finding.sourceRelativePath().ifPresent(path -> text.append(io.github.aiassetmigrate.domain.PortablePath.of(path)).append(": "));
             finding.assetId().ifPresent(id -> text.append("asset ").append(id).append(": "));
             text.append(finding.message()).append('\n');
         }
@@ -964,14 +969,14 @@ public final class AssetMigrateApplication extends Application {
         StringBuilder text = new StringBuilder();
         for (Finding finding : snapshot.findings()) {
             text.append(finding.severity()).append(" [").append(finding.code()).append("] ");
-            finding.sourceRelativePath().ifPresent(path -> text.append(path.toString().isEmpty() ? "(source root)" : path).append(": "));
+            finding.sourceRelativePath().ifPresent(path -> text.append(path.toString().isEmpty() ? "(source root)" : io.github.aiassetmigrate.domain.PortablePath.of(path)).append(": "));
             text.append(finding.message()).append('\n');
         }
         for (PathOutcome outcome : snapshot.pathOutcomes()) {
             if (outcome.status() == PathOutcome.Status.FAILED || outcome.status() == PathOutcome.Status.UNVISITED
                     || outcome.status() == PathOutcome.Status.SKIPPED) {
                 text.append("Coverage ").append(outcome.status()).append(" ").append(outcome.kind()).append(": ")
-                        .append(outcome.relativePath().toString().isEmpty() ? "(source root)" : outcome.relativePath()).append('\n');
+                        .append(io.github.aiassetmigrate.domain.PortablePath.of(outcome.relativePath()).isEmpty() ? "(source root)" : io.github.aiassetmigrate.domain.PortablePath.of(outcome.relativePath())).append('\n');
             }
         }
         return text.isEmpty() ? "No findings or skipped or incomplete coverage." : text.toString();

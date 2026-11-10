@@ -13,7 +13,9 @@ class AssetMigrateCliTest {
     void helpAndDefaultInvocationExplainBootstrapScope() {
         for (String[] args : new String[][] { {}, { "--help" } }) {
             StringWriter output = new StringWriter();
-            CommandLine cli = new CommandLine(new AssetMigrateCli()).setOut(new PrintWriter(output));
+            // Terminals such as Git Bash set TERM, which would otherwise enable ANSI styling.
+            CommandLine cli = new CommandLine(new AssetMigrateCli()).setOut(new PrintWriter(output))
+                    .setColorScheme(CommandLine.Help.defaultColorScheme(CommandLine.Help.Ansi.OFF));
             assertEquals(0, cli.execute(args));
             assertTrue(output.toString().contains("Usage: aiassetmigrate"));
             assertTrue(output.toString().contains("import"));

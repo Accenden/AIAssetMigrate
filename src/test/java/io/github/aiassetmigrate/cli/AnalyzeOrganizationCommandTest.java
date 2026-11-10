@@ -18,9 +18,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class AnalyzeOrganizationCommandTest {
     @Test void passesAllRulesAndDisplaysEscapedResults() {
+        Path hostilePath = io.github.aiassetmigrate.TestPaths.hostile("file\n.obj");
         UUID project = UUID.randomUUID(), asset = UUID.randomUUID(), suggestion = UUID.randomUUID();
         for (String name : List.of("preserve", "snake-case", "kebab-case")) {
-            for (String folder : List.of("preserve", "by-type")) {
+            for (String folder : List.of("preserve", "by-type", "by-category")) {
                 AtomicBoolean closed = new AtomicBoolean();
                 AssetManager manager = manager((method, args) -> {
                     if (method.equals("close")) { closed.set(true); return null; }
@@ -31,7 +32,7 @@ class AnalyzeOrganizationCommandTest {
                             AssetManager.FolderStyle.valueOf(folder.replace('-', '_').toUpperCase(java.util.Locale.ROOT))), args[1]);
                     return new AssetManager.AnalysisResult(42, List.of(new AssetManager.Suggestion(suggestion, asset,
                             AssetManager.AnalysisKind.NAMES, "value\nunsafe", Optional.of("ref\u001b"))),
-                            List.of(new Finding(UUID.randomUUID(), Optional.of(asset), Optional.of(Path.of("file\n.obj")),
+                            List.of(new Finding(UUID.randomUUID(), Optional.of(asset), Optional.of(io.github.aiassetmigrate.TestPaths.hostile("file\n.obj")),
                                     Finding.Severity.WARNING, "CODE\n", "message\u001b")));
                 });
                 StringWriter output = new StringWriter();

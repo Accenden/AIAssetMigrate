@@ -22,11 +22,17 @@ class OrganizationPreviewTest {
     private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");
 
     private static Asset asset(String path) {
+        return asset(path, Asset.Type.OTHER);
+    }
+    private static Asset asset(String path, Asset.Type type) {
         return new Asset(UUID.nameUUIDFromBytes(path.getBytes(StandardCharsets.UTF_8)), Path.of(path),
-                Asset.Type.OTHER, "0".repeat(64), Map.of());
+                type, "0".repeat(64), Map.of());
+    }
+    private static OrganizationPreview.Entry entry(OrganizationPreview.Result result, Asset asset) {
+        return result.entries().stream().filter(e -> e.assetId().equals(asset.id())).findFirst().orElseThrow();
     }
     private static InventorySnapshot snapshot(List<Asset> assets, List<AssetReference> refs) {
-        return new InventorySnapshot(1, 1, new Project(PROJECT, Path.of("/source"), 3, assets, NOW),
+        return new InventorySnapshot(1, 1, new Project(PROJECT, io.github.aiassetmigrate.TestPaths.absolute("source"), 3, assets, NOW),
                 List.of(), InventorySnapshot.ScanStatus.COMPLETE, NOW, List.of(), refs);
     }
     private static ReviewedChange decision(Asset a, ReviewedChange.Kind kind, ReviewedChange.Decision decision, Map<String, String> values) {
@@ -71,14 +77,38 @@ class OrganizationPreviewTest {
         assertFalse(OrganizationPreview.validFolder("é".repeat(128)));
     }
 
-    @Test void acceptedMaterialMappingsAreNotSilentlyTreatedAsApplied() {
-        Asset model = asset("model.obj"), material = asset("a.mtl");
+    @Test void acceptedMaterialNameMappingsMustBeBackedByAModelLibrary() {
+        Asset model = asset("model.obj", Asset.Type.MODEL), material = asset("a.mtl", Asset.Type.MATERIAL);
         var mapping = decision(model, ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Decision.ACCEPTED,
                 Map.of("targetAssetId", material.id().toString(), "reference", "body"));
         var excluded = decision(model, ReviewedChange.Kind.EXCLUSION, ReviewedChange.Decision.ACCEPTED, Map.of());
         var s = snapshot(List.of(model, material), List.of());
-        assertTrue(has(preview(s, mapping), "REVIEWED_MAPPING_UNSUPPORTED"));
-        assertFalse(has(preview(s, mapping, excluded), "REVIEWED_MAPPING_UNSUPPORTED"));
+        assertTrue(has(preview(s, mapping), "MAPPING_LIBRARY_NOT_REFERENCED"));
+        assertFalse(has(preview(s, mapping, excluded), "MAPPING_LIBRARY_NOT_REFERENCED"));
+        var library = new AssetReference(model.id(), AssetReference.Kind.MATERIAL_LIBRARY, "a.mtl",
+                Optional.of(material.relativePath()), AssetReference.ResolutionStatus.RESOLVED);
+        assertFalse(preview(snapshot(List.of(model, material), List.of(library)), mapping).blocked());
+    }
+
+    @Test void acceptedCorrectionsReplaceBrokenReferencesWithRewrites() {
+        Asset mtl = asset("mat/a.mtl", Asset.Type.MATERIAL), texture = asset("tex/wood.png", Asset.Type.TEXTURE);
+        Asset wrong = asset("tex/a.mtl", Asset.Type.MATERIAL);
+        var missing = new AssetReference(mtl.id(), AssetReference.Kind.TEXTURE, "textures/wood.png",
+                Optional.of(Path.of("mat/textures/wood.png")), AssetReference.ResolutionStatus.MISSING);
+        var s = snapshot(List.of(mtl, texture, wrong), List.of(missing));
+        assertTrue(has(preview(s), "UNRESOLVED_REFERENCE"));
+        var correction = decision(mtl, ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Decision.ACCEPTED,
+                Map.of("targetAssetId", texture.id().toString(), "reference", "textures/wood.png"));
+        var corrected = preview(s, correction);
+        assertFalse(corrected.blocked(), corrected.findings().toString());
+        assertEquals(List.of(new MaterialAnalysis.Rewrite(AssetReference.Kind.TEXTURE, "textures/wood.png", "../tex/wood.png")),
+                entry(corrected, mtl).rewrites());
+        var badType = decision(mtl, ReviewedChange.Kind.RELATIONSHIP, ReviewedChange.Decision.ACCEPTED,
+                Map.of("targetAssetId", wrong.id().toString(), "reference", "textures/wood.png"));
+        assertTrue(has(preview(s, badType), "INVALID_CORRECTION"));
+        var rejected = decision(mtl, ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Decision.REJECTED,
+                Map.of("targetAssetId", texture.id().toString(), "reference", "textures/wood.png"));
+        assertTrue(has(preview(s, rejected), "UNRESOLVED_REFERENCE"));
     }
 
     @Test void catchesDuplicateCaseUnicodeAndFileDirectoryConflicts() {
@@ -131,7 +161,15 @@ class OrganizationPreviewTest {
                 Optional.of(b.relativePath()), AssetReference.ResolutionStatus.RESOLVED);
         var s = snapshot(List.of(a, b), List.of(ref));
         assertFalse(preview(s).blocked());
-        assertTrue(has(preview(s, decision(b, ReviewedChange.Kind.NAME, ReviewedChange.Decision.ACCEPTED, Map.of("name", "b.mtl"))), "REFERENCE_REWRITE_REQUIRED"));
+        var renamed = preview(s, decision(b, ReviewedChange.Kind.NAME, ReviewedChange.Decision.ACCEPTED, Map.of("name", "b.mtl")));
+        assertFalse(renamed.blocked(), renamed.findings().toString());
+        assertEquals(List.of(new MaterialAnalysis.Rewrite(AssetReference.Kind.MATERIAL_LIBRARY, "../mat/a.mtl", "../mat/b.mtl")),
+                entry(renamed, a).rewrites());
+        var moved = preview(s, decision(a, ReviewedChange.Kind.FOLDER, ReviewedChange.Decision.ACCEPTED, Map.of("folder", "")));
+        assertEquals("mat/a.mtl", entry(moved, a).rewrites().getFirst().replacement());
+        var spaced = preview(s, decision(b, ReviewedChange.Kind.FOLDER, ReviewedChange.Decision.ACCEPTED, Map.of("folder", "my mats")));
+        assertTrue(has(spaced, "REFERENCE_REWRITE_UNSUPPORTED"));
+        assertTrue(entry(preview(s), a).rewrites().isEmpty());
         assertTrue(has(preview(s, decision(b, ReviewedChange.Kind.EXCLUSION, ReviewedChange.Decision.ACCEPTED, Map.of())), "UNAVAILABLE_REFERENCE_TARGET"));
         var unresolved = new AssetReference(a.id(), AssetReference.Kind.TEXTURE, "missing", Optional.empty(), AssetReference.ResolutionStatus.UNRESOLVED);
         assertTrue(has(preview(snapshot(List.of(a, b), List.of(unresolved))), "UNRESOLVED_REFERENCE"));

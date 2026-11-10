@@ -1,5 +1,6 @@
 package io.github.aiassetmigrate.migration;
 
+import io.github.aiassetmigrate.analysis.MaterialAnalysis;
 import io.github.aiassetmigrate.analysis.OrganizationPreview;
 import io.github.aiassetmigrate.application.AssetManager;
 import io.github.aiassetmigrate.domain.*;
@@ -15,7 +16,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Builds copy-only draft commands from a fresh preview; it does not authorize execution. */
+/**
+ * Builds draft COPY and REWRITE_REFERENCES commands from a fresh preview; it does not
+ * authorize execution. Rewrites change only OBJ/MTL reference text in the output copy.
+ */
 public final class CopyPlanBuilder {
     private CopyPlanBuilder() { }
 
@@ -53,11 +57,38 @@ public final class CopyPlanBuilder {
         for (var entry : preview.entries()) {
             if (entry.excluded() || entry.destination().isEmpty()) continue;
             Path destination = Path.of(entry.destination().orElseThrow());
-            UUID commandId = UUID.nameUUIDFromBytes((planId + ":copy:" + entry.assetId())
+            boolean rewrite = !entry.rewrites().isEmpty();
+            UUID commandId = UUID.nameUUIDFromBytes((planId + (rewrite ? ":rewrite:" : ":copy:") + entry.assetId())
                     .getBytes(StandardCharsets.UTF_8));
-            commands.add(new AssetOperationCommand(commandId, entry.assetId(), MigrationCommand.Operation.COPY,
-                    destination, Map.of(), List.of(), Optional.empty()));
+            commands.add(new AssetOperationCommand(commandId, entry.assetId(),
+                    rewrite ? MigrationCommand.Operation.REWRITE_REFERENCES : MigrationCommand.Operation.COPY,
+                    destination, encode(entry.rewrites()), List.of(), Optional.empty()));
         }
         return List.copyOf(commands);
+    }
+
+    /** Encodes rewrites as ordered {@code rewrite.NNNN.kind|from|to} command parameters. */
+    public static Map<String, String> encode(List<MaterialAnalysis.Rewrite> rewrites) {
+        Map<String, String> parameters = new java.util.TreeMap<>();
+        for (int i = 0; i < rewrites.size(); i++) {
+            String prefix = String.format("rewrite.%04d.", i);
+            parameters.put(prefix + "kind", rewrites.get(i).kind().name());
+            parameters.put(prefix + "from", rewrites.get(i).original());
+            parameters.put(prefix + "to", rewrites.get(i).replacement());
+        }
+        return Map.copyOf(parameters);
+    }
+
+    /** Decodes parameters produced by {@link #encode}; rejects any other shape. */
+    public static List<MaterialAnalysis.Rewrite> decode(Map<String, String> parameters) {
+        List<MaterialAnalysis.Rewrite> rewrites = new ArrayList<>();
+        for (int i = 0; parameters.containsKey(String.format("rewrite.%04d.kind", i)); i++) {
+            String prefix = String.format("rewrite.%04d.", i);
+            String from = parameters.get(prefix + "from"), to = parameters.get(prefix + "to");
+            if (from == null || to == null) throw new IllegalArgumentException("Incomplete rewrite parameter");
+            rewrites.add(new MaterialAnalysis.Rewrite(AssetReference.Kind.valueOf(parameters.get(prefix + "kind")), from, to));
+        }
+        if (!encode(rewrites).equals(parameters)) throw new IllegalArgumentException("Unexpected rewrite parameters");
+        return List.copyOf(rewrites);
     }
 }

@@ -152,7 +152,7 @@ class FileMigrationPlanRepositoryTest {
         Files.writeString(planDir.resolve("approved.json"), "{}");
         assertThrows(IOException.class, () -> plans.load(draft.id()));
         UUID other = UUID.randomUUID();
-        Files.createSymbolicLink(state.resolve("plans").resolve(other.toString()), planDir);
+        io.github.aiassetmigrate.TestLinks.symlinkOrSkip(state.resolve("plans").resolve(other.toString()), planDir);
         assertThrows(IOException.class, () -> plans.load(other));
     }
 

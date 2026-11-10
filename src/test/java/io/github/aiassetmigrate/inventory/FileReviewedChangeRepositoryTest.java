@@ -125,7 +125,7 @@ class FileReviewedChangeRepositoryTest {
         assertThrows(IOException.class, () -> reviews.loadLatest(projectId));
         Files.delete(first);
         Path outside = Files.writeString(temp.resolve("outside.json"), json);
-        Files.createSymbolicLink(first, outside);
+        io.github.aiassetmigrate.TestLinks.symlinkOrSkip(first, outside);
         assertThrows(IOException.class, () -> reviews.loadLatest(projectId));
         assertEquals(json, Files.readString(outside));
     }

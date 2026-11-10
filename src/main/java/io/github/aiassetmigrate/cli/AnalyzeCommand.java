@@ -64,7 +64,7 @@ public final class AnalyzeCommand implements Callable<Integer> {
         for (var finding : result.findings()) {
             out.printf("  %s %s Asset ID: %s Path: %s: %s%n", finding.severity(),
                     ImportCommand.safe(finding.code()), finding.assetId().map(UUID::toString).orElse("<project>"),
-                    finding.sourceRelativePath().map(Path::toString).map(ImportCommand::safe).orElse("<project>"),
+                    finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).map(ImportCommand::safe).orElse("<project>"),
                     ImportCommand.safe(finding.message()));
         }
     }

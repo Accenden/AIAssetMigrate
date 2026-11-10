@@ -96,7 +96,7 @@ class CompatibilityEngineTest {
     }
 
     private static InventorySnapshot snapshot(List<Asset> assets, List<PathOutcome> paths, List<AssetReference> refs, InventorySnapshot.ScanStatus status) {
-        Project project = new Project(UUID.fromString("12345678-1234-1234-1234-123456789abc"), Path.of("/source"), 1, assets, TIME);
+        Project project = new Project(UUID.fromString("12345678-1234-1234-1234-123456789abc"), io.github.aiassetmigrate.TestPaths.absolute("source"), 1, assets, TIME);
         return new InventorySnapshot(1, 1, project, List.of(), status, TIME, paths, refs);
     }
 }

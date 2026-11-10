@@ -92,7 +92,8 @@ public interface AssetManager {
     enum AnalysisKind { CATEGORIES, RELATIONSHIPS, MATERIALS, NAMES, FOLDERS }
 
     enum NameStyle { PRESERVE, SNAKE_CASE, KEBAB_CASE }
-    enum FolderStyle { PRESERVE, BY_TYPE }
+    /** BY_CATEGORY uses accepted CATEGORY reviews, falling back to the type folder. */
+    enum FolderStyle { PRESERVE, BY_TYPE, BY_CATEGORY }
 
     record OrganizationRules(NameStyle nameStyle, FolderStyle folderStyle) {
         public OrganizationRules {

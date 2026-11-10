@@ -30,10 +30,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class PlanReviewTest {
     private final UUID project = UUID.randomUUID();
-    private final Path output = Path.of("/output");
+    private final Path output = io.github.aiassetmigrate.TestPaths.absolute("output");
     private final AssetManager.TargetProfile target = new AssetManager.TargetProfile("engine", "1");
     private final AssetMigrateApplication.PlanRequest request = new AssetMigrateApplication.PlanRequest(
-            project, Path.of("/state"), Path.of("/logs"), output, target);
+            project, io.github.aiassetmigrate.TestPaths.absolute("state"), io.github.aiassetmigrate.TestPaths.absolute("logs"), output, target);
 
     private MigrationPlan plan(PlanStatus status) {
         var command = new AssetOperationCommand(UUID.randomUUID(), UUID.randomUUID(),
@@ -52,7 +52,7 @@ class PlanReviewTest {
     private InventorySnapshot inventory(MigrationPlan plan, UUID id, long revision, boolean includeAsset) {
         var assets = includeAsset ? List.of(new Asset(plan.commands().get(0).assetId(), Path.of("original/source.obj"),
                 Asset.Type.MODEL, "a".repeat(64), Map.of())) : List.<Asset>of();
-        var project = new Project(id, Path.of("/source"), revision, assets, Instant.EPOCH);
+        var project = new Project(id, io.github.aiassetmigrate.TestPaths.absolute("source"), revision, assets, Instant.EPOCH);
         return new InventorySnapshot(1, 1, project, List.of(), InventorySnapshot.ScanStatus.COMPLETE,
                 Instant.EPOCH, List.of(), List.of());
     }
@@ -95,7 +95,7 @@ class PlanReviewTest {
             assertNotSame(Thread.currentThread(), worker.get());
             String text = AssetMigrateApplication.formatPlan(result.get().value());
             for (String expected : List.of(draft.id().toString(), project.toString(), "Plan version: 3", "revision: 7",
-                    "DRAFT", "engine / 1", "/output", "original/source.obj", draft.commands().get(0).toString(), "BLOCKED", "Conflict")) {
+                    "DRAFT", "engine / 1", output.toString(), "original/source.obj", draft.commands().get(0).toString(), "BLOCKED", "Conflict")) {
                 assertTrue(text.contains(expected), expected);
             }
             var context = result.get().value();
@@ -176,7 +176,7 @@ class PlanReviewTest {
         var original = inventory(draft, project, 7, true);
         var assets = new ArrayList<>(original.project().assets());
         assets.add(new Asset(excluded, Path.of("excluded/asset.obj"), Asset.Type.MODEL, "b".repeat(64), Map.of()));
-        var snapshot = new InventorySnapshot(1, 1, new Project(project, Path.of("/source"), 7, assets, Instant.EPOCH),
+        var snapshot = new InventorySnapshot(1, 1, new Project(project, io.github.aiassetmigrate.TestPaths.absolute("source"), 7, assets, Instant.EPOCH),
                 List.of(), InventorySnapshot.ScanStatus.COMPLETE, Instant.EPOCH, List.of(), List.of());
         var context = AssetMigrateApplication.PlanContext.fromInventory(request, draft, snapshot);
         assertTrue(context.sourcesVerified());

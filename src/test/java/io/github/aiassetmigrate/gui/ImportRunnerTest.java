@@ -517,7 +517,7 @@ class ImportRunnerTest {
 
     private static InventorySnapshot snapshot(long revision) {
         Instant now = Instant.parse("2025-01-01T00:00:00Z");
-        Project project = new Project(UUID.randomUUID(), Path.of("/source"), revision, List.of(), now);
+        Project project = new Project(UUID.randomUUID(), io.github.aiassetmigrate.TestPaths.absolute("source"), revision, List.of(), now);
         Finding finding = new Finding(UUID.randomUUID(), Optional.empty(), Optional.of(Path.of("file.xyz")),
                 Finding.Severity.WARNING, "UNSUPPORTED", "Not supported");
         PathOutcome outcome = new PathOutcome(Path.of("missing"), PathOutcome.Kind.DIRECTORY, PathOutcome.Status.UNVISITED);

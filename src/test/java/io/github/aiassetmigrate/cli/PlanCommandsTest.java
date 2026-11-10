@@ -27,18 +27,21 @@ class PlanCommandsTest {
                 List.of(new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.NAME,
                         ReviewedChange.Decision.ACCEPTED, Map.of("key", "value\nline"), time)),
                 List.of(new AssetOperationCommand(command, asset, MigrationCommand.Operation.COPY,
-                        Path.of("dest\nfile"), Map.of("source", "a\\b"), List.of(), Optional.empty())),
+                        io.github.aiassetmigrate.TestPaths.hostile("dest\nfile"), Map.of("source", "a\\b"), List.of(), Optional.empty())),
                 List.of(new Finding(UUID.randomUUID(), Optional.of(asset), Optional.of(Path.of("source")),
                         Finding.Severity.ERROR, "BLOCK", "bad\u001bmessage")), PlanStatus.DRAFT, time);
     }
 
     private InventorySnapshot inventory(UUID projectId, long revision, List<Asset> assets) {
-        return new InventorySnapshot(1, 1, new Project(projectId, Path.of("/source"), revision, assets, time),
+        return new InventorySnapshot(1, 1, new Project(projectId, io.github.aiassetmigrate.TestPaths.absolute("source"), revision, assets, time),
                 List.of(), InventorySnapshot.ScanStatus.COMPLETE, time, List.of(), List.of());
     }
 
+    /** Builds hostile fixtures up front so a platform skip is not swallowed by the CLI. */
+    private void requireHostilePaths() { plan(); sourceAsset(asset); }
+
     private Asset sourceAsset(UUID id) {
-        return new Asset(id, Path.of("source\n\"\u001bfile"), Asset.Type.OTHER, "0".repeat(64), Map.of());
+        return new Asset(id, io.github.aiassetmigrate.TestPaths.hostile("source\n\"\u001bfile"), Asset.Type.OTHER, "0".repeat(64), Map.of());
     }
 
     private InventorySnapshot checkedInventory(Object[] args) {
@@ -47,6 +50,7 @@ class PlanCommandsTest {
     }
 
     @Test void planCreationDisplaysExactFieldsWithoutFurtherActions() {
+        requireHostilePaths();
         AtomicBoolean closed = new AtomicBoolean();
         StringWriter output = new StringWriter();
         var cli = new CommandLine(new PlanCommands.Plan((state, logs) -> {
@@ -74,6 +78,7 @@ class PlanCommandsTest {
     }
 
     @Test void showAndApproveCallOnlyTheirExactOperations() {
+        requireHostilePaths();
         for (boolean approve : List.of(false, true)) {
             var factory = (ImportCommand.ManagerFactory) (state, logs) -> manager((name, args) -> {
                 if (name.equals("close")) return null;
@@ -95,6 +100,7 @@ class PlanCommandsTest {
     }
 
     @Test void mismatchedOrMissingInventoryNeverDisplaysMisleadingPlan() {
+        requireHostilePaths();
         for (InventorySnapshot snapshot : List.of(
                 inventory(UUID.randomUUID(), 7, List.of(sourceAsset(asset))),
                 inventory(project, 8, List.of(sourceAsset(asset))),
@@ -115,6 +121,7 @@ class PlanCommandsTest {
     }
 
     @Test void failureToLoadInventoryAfterMutationReportsReturnedPlan() {
+        requireHostilePaths();
         for (boolean approve : List.of(false, true)) {
             StringWriter error = new StringWriter();
             var factory = (ImportCommand.ManagerFactory) (state, logs) -> manager((name, args) -> {
@@ -136,6 +143,7 @@ class PlanCommandsTest {
     }
 
     @Test void migrationReportsActualStatusAndNonSuccessExit() {
+        requireHostilePaths();
         for (RunStatus status : RunStatus.values()) {
             StringWriter output = new StringWriter();
             var cli = new CommandLine(new PlanCommands.Migrate((state, logs) -> manager((name, args) -> {
@@ -152,6 +160,7 @@ class PlanCommandsTest {
     }
 
     @Test void migrateAndShowRunDisplayDiagnostics() {
+        requireHostilePaths();
         for (boolean show : List.of(false, true)) {
             StringWriter output = new StringWriter();
             var factory = (ImportCommand.ManagerFactory) (state, logs) -> manager((name, args) -> {

@@ -23,12 +23,29 @@ public final class OrganizationRulesAnalyzer {
     private OrganizationRulesAnalyzer() {}
 
     public static AssetManager.AnalysisResult analyze(InventorySnapshot snapshot, AssetManager.OrganizationRules rules) {
+        return analyze(snapshot, rules, List.of());
+    }
+
+    /**
+     * Reviews supply accepted CATEGORY decisions for {@link AssetManager.FolderStyle#BY_CATEGORY};
+     * assets without a usable accepted category use their type folder instead.
+     */
+    public static AssetManager.AnalysisResult analyze(InventorySnapshot snapshot, AssetManager.OrganizationRules rules,
+                                                      List<ReviewedChange> reviews) {
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(rules, "rules");
         Objects.requireNonNull(rules.nameStyle(), "nameStyle");
         Objects.requireNonNull(rules.folderStyle(), "folderStyle");
         List<AssetManager.Suggestion> suggestions = new ArrayList<>();
         List<ReviewedChange> decisions = new ArrayList<>();
+        Map<UUID, String> categories = new java.util.HashMap<>();
+        for (ReviewedChange review : List.copyOf(reviews)) {
+            String category = review.values().get("category");
+            if (review.kind() == ReviewedChange.Kind.CATEGORY && review.decision() == ReviewedChange.Decision.ACCEPTED
+                    && category != null && OrganizationPreview.validName(category.strip())) {
+                categories.put(review.assetId(), category.strip());
+            }
+        }
         List<Asset> assets = snapshot.project().assets().stream()
                 .sorted(Comparator.comparing((Asset a) -> a.relativePath().toString()).thenComparing(Asset::id)).toList();
         for (Asset asset : assets) {
@@ -37,12 +54,9 @@ public final class OrganizationRulesAnalyzer {
             String folder = rules.folderStyle() == AssetManager.FolderStyle.PRESERVE
                     ? parent == null ? "" : java.util.stream.StreamSupport.stream(parent.spliterator(), false)
                             .map(Path::toString).collect(Collectors.joining("/"))
-                    : switch (asset.type()) {
-                        case MODEL -> "Models";
-                        case MATERIAL -> "Materials";
-                        case TEXTURE -> "Textures";
-                        case OTHER -> "Other";
-                    };
+                    : rules.folderStyle() == AssetManager.FolderStyle.BY_CATEGORY && categories.containsKey(asset.id())
+                    ? categories.get(asset.id())
+                    : typeFolder(asset.type());
             for (var kind : List.of(AssetManager.AnalysisKind.NAMES, AssetManager.AnalysisKind.FOLDERS)) {
                 boolean isName = kind == AssetManager.AnalysisKind.NAMES;
                 String value = isName ? name : folder;
@@ -56,13 +70,22 @@ public final class OrganizationRulesAnalyzer {
         var preview = OrganizationPreview.preview(snapshot, snapshot.project().id(), snapshot.project().inventoryRevision(), decisions);
         List<Finding> findings = preview.findings().stream()
                 .filter(f -> f.code().equals("INVALID_DESTINATION") || f.code().equals("DESTINATION_CONFLICT")
-                        || f.code().equals("PARTIAL_INVENTORY"))
+                        || f.code().equals("PARTIAL_INVENTORY") || f.code().equals("REFERENCE_REWRITE_UNSUPPORTED"))
                 .map(f -> new Finding(id("finding:" + snapshot.project().id() + ":" + snapshot.project().inventoryRevision()
                                 + ":" + f.code() + ":" + f.assetId().map(UUID::toString).orElse("") + ":" + f.message()),
                         f.assetId(), f.assetId().flatMap(assetId -> Optional.ofNullable(paths.get(assetId))),
                         Finding.Severity.ERROR, f.code(), f.message()))
                 .toList();
         return new AssetManager.AnalysisResult(snapshot.project().inventoryRevision(), suggestions, findings);
+    }
+
+    private static String typeFolder(Asset.Type type) {
+        return switch (type) {
+            case MODEL -> "Models";
+            case MATERIAL -> "Materials";
+            case TEXTURE -> "Textures";
+            case OTHER -> "Other";
+        };
     }
 
     private static String name(String filename, AssetManager.NameStyle style) {

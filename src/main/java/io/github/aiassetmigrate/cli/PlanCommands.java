@@ -175,8 +175,8 @@ public final class PlanCommands {
         out.println("Commands (" + plan.commands().size() + "):");
         for (var command : plan.commands()) {
             out.printf("  ID: %s Source asset ID: %s Source relative path: %s Operation: %s Relative destination: %s%n",
-                    command.id(), command.assetId(), quote(sources.get(command.assetId()).toString()),
-                    command.operation(), quote(command.relativeOutputPath().toString()));
+                    command.id(), command.assetId(), quote(io.github.aiassetmigrate.domain.PortablePath.of(sources.get(command.assetId()))),
+                    command.operation(), quote(io.github.aiassetmigrate.domain.PortablePath.of(command.relativeOutputPath())));
             out.println("    Converter requirement: " + command.converterRequirement().map(PlanCommands::quote).orElse("<none>"));
             out.println("    Dependencies: " + command.dependencies());
             new TreeMap<>(command.parameters()).forEach((key, value) -> out.printf("    Parameter %s: %s%n", quote(key), quote(value)));
@@ -186,7 +186,7 @@ public final class PlanCommands {
             out.printf("  ID: %s Severity: %s Code: %s Asset ID: %s Source path: %s Message: %s%n",
                     finding.id(), finding.severity(), quote(finding.code()),
                     finding.assetId().map(UUID::toString).orElse("<none>"),
-                    finding.sourceRelativePath().map(Path::toString).map(PlanCommands::quote).orElse("<none>"), quote(finding.message()));
+                    finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).map(PlanCommands::quote).orElse("<none>"), quote(finding.message()));
         }
     }
 

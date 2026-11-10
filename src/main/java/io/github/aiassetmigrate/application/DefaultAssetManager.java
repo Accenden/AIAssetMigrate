@@ -381,6 +381,28 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                 } else {
                     findings.add(analysisFinding(owner, "REFERENCE_" + reference.resolutionStatus(),
                             "Reference '" + reference.originalText() + "': " + reference.resolutionStatus()));
+                    if (kind == AnalysisKind.RELATIONSHIPS || reference.kind() == AssetReference.Kind.TEXTURE) {
+                        for (Asset candidate : correctionCandidates(snapshot.project().assets(), owner, reference)) {
+                            suggestions.add(analysisSuggestion(owner.id(), kind, candidate.id().toString(), reference.originalText()));
+                            findings.add(analysisFinding(owner, "REFERENCE_CANDIDATE", "Possible correction for '"
+                                    + reference.originalText() + "': " + PortablePath.of(candidate.relativePath())
+                                    + " (uncertain; review before accepting)"));
+                        }
+                    }
+                }
+            }
+            if (kind == AnalysisKind.RELATIONSHIPS) {
+                Set<UUID> referenced = new HashSet<>();
+                for (AssetReference reference : analysis.references()) {
+                    reference.normalizedTargetPath().map(paths::get).ifPresent(target -> referenced.add(target.id()));
+                }
+                for (Asset texture : snapshot.project().assets()) {
+                    if (texture.type() != Asset.Type.TEXTURE || referenced.contains(texture.id())) continue;
+                    for (Asset owner : stemOwners(snapshot.project().assets(), texture)) {
+                        suggestions.add(analysisSuggestion(owner.id(), kind, texture.id().toString(), ""));
+                        findings.add(analysisFinding(owner, "NAME_RELATIONSHIP_CANDIDATE", "Unreferenced texture "
+                                + PortablePath.of(texture.relativePath()) + " shares this asset's name (uncertain grouping)"));
+                    }
                 }
             }
             if (kind == AnalysisKind.MATERIALS) {
@@ -413,7 +435,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     }
 
     @Override public AnalysisResult analyzeOrganization(UUID id, OrganizationRules rules) {
-        return OrganizationRulesAnalyzer.analyze(loadInventory(id), Objects.requireNonNull(rules, "rules"));
+        Objects.requireNonNull(rules, "rules");
+        InventorySnapshot inventory = loadInventory(id);
+        List<ReviewedChange> reviews = rules.folderStyle() == FolderStyle.BY_CATEGORY ? loadReviews(id) : List.of();
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed while analyzing; retry");
+        return OrganizationRulesAnalyzer.analyze(inventory, rules, reviews);
     }
 
     private MaterialAnalysis.Result inspectReferences(InventorySnapshot snapshot) {
@@ -449,6 +475,9 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         List<OrganizationPreview.Finding> findings = new ArrayList<>(result.findings());
         Set<UUID> excluded = new HashSet<>();
         result.entries().stream().filter(OrganizationPreview.Entry::excluded).forEach(entry -> excluded.add(entry.assetId()));
+        Set<UUID> acknowledged = new HashSet<>();
+        decisions.stream().filter(change -> change.kind() == ReviewedChange.Kind.ACKNOWLEDGMENT
+                && change.decision() == ReviewedChange.Decision.ACCEPTED).forEach(change -> acknowledged.add(change.assetId()));
         Set<UUID> inspectedIds = new HashSet<>();
         for (var file : references.files()) {
             inspectedIds.add(file.assetId());
@@ -459,9 +488,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
         for (Asset asset : inventory.project().assets()) {
             if ((asset.type() == Asset.Type.MODEL || asset.type() == Asset.Type.MATERIAL)
-                    && !inspectedIds.contains(asset.id()) && !excluded.contains(asset.id())) {
+                    && !inspectedIds.contains(asset.id()) && !excluded.contains(asset.id())
+                    && !acknowledged.contains(asset.id())) {
                 findings.add(new OrganizationPreview.Finding("INSPECTION_UNSUPPORTED", Optional.of(asset.id()),
-                        "Reference inspection is not supported for this format"));
+                        "Reference inspection is not supported for this format; exclude the asset or accept an"
+                        + " ACKNOWLEDGMENT that its dependencies are unknown"));
             }
         }
         if (references.truncated()) findings.add(new OrganizationPreview.Finding("ANALYSIS_LIMIT", Optional.empty(),
@@ -472,7 +503,44 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     private static Suggestion analysisSuggestion(UUID owner, AnalysisKind kind, String target, String reference) {
         UUID suggestionId = UUID.nameUUIDFromBytes((kind + ":" + owner + ":" + target + ":" + reference).getBytes(StandardCharsets.UTF_8));
-        return new Suggestion(suggestionId, owner, kind, target, Optional.of(reference));
+        return new Suggestion(suggestionId, owner, kind, target,
+                reference.isEmpty() ? Optional.empty() : Optional.of(reference));
+    }
+
+    /**
+     * Assets of the type a broken reference expects whose filename matches the reference's
+     * final segment, ignoring case. These are uncertain suggestions, never applied implicitly.
+     */
+    static List<Asset> correctionCandidates(List<Asset> assets, Asset owner, AssetReference reference) {
+        if (reference.resolutionStatus() == AssetReference.ResolutionStatus.RESOLVED
+                || !MaterialAnalysis.rewritableReference(reference.originalText())) return List.of();
+        Asset.Type expected = reference.kind() == AssetReference.Kind.MATERIAL_LIBRARY ? Asset.Type.MATERIAL : Asset.Type.TEXTURE;
+        String text = reference.originalText();
+        String filename = text.substring(text.lastIndexOf('/') + 1).toLowerCase(java.util.Locale.ROOT);
+        if (filename.isEmpty()) return List.of();
+        return assets.stream().filter(asset -> asset.type() == expected && !asset.id().equals(owner.id())
+                        && asset.relativePath().getFileName().toString().toLowerCase(java.util.Locale.ROOT).equals(filename))
+                .sorted(java.util.Comparator.comparing((Asset asset) -> PortablePath.of(asset.relativePath())))
+                .limit(5).toList();
+    }
+
+    /** Models and materials whose filename stem prefixes a texture's stem at a word boundary. */
+    static List<Asset> stemOwners(List<Asset> assets, Asset texture) {
+        String textureStem = stem(texture);
+        return assets.stream().filter(asset -> asset.type() == Asset.Type.MODEL || asset.type() == Asset.Type.MATERIAL)
+                .filter(asset -> {
+                    String stem = stem(asset);
+                    return stem.length() >= 3 && textureStem.startsWith(stem) && (textureStem.length() == stem.length()
+                            || !Character.isLetterOrDigit(textureStem.charAt(stem.length())));
+                })
+                .sorted(java.util.Comparator.comparing((Asset asset) -> PortablePath.of(asset.relativePath())))
+                .limit(5).toList();
+    }
+
+    private static String stem(Asset asset) {
+        String name = asset.relativePath().getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
     }
 
     private static Finding analysisFinding(Asset asset, String code, String message) {
@@ -531,6 +599,15 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     }
                 }
                 case EXCLUSION -> requireValue(values, "reason");
+                case ACKNOWLEDGMENT -> {
+                    requireValue(values, "reason");
+                    if (MaterialAnalysis.inspectable(assets.get(change.assetId()))
+                            || assets.get(change.assetId()).type() == Asset.Type.TEXTURE
+                            || assets.get(change.assetId()).type() == Asset.Type.OTHER) {
+                        throw new IllegalArgumentException(
+                                "Acknowledgments apply only to models or materials whose references cannot be inspected");
+                    }
+                }
                 case NAME -> {
                     String name = requireValue(values, "name");
                     if (change.decision() == ReviewedChange.Decision.ACCEPTED && !OrganizationPreview.validName(name)) {
@@ -559,6 +636,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             for (ReviewedChange change : incoming) {
                 merged.removeIf(old -> old.assetId().equals(change.assetId()) && old.kind() == change.kind()
                         && (change.kind() == ReviewedChange.Kind.CATEGORY || change.kind() == ReviewedChange.Kind.EXCLUSION
+                            || change.kind() == ReviewedChange.Kind.ACKNOWLEDGMENT
                             || change.kind() == ReviewedChange.Kind.NAME || change.kind() == ReviewedChange.Kind.FOLDER
                             || (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING
                                 && Objects.equals(old.values().get("reference"), change.values().get("reference")))

@@ -26,6 +26,9 @@ public record InventorySnapshot(int schemaVersion, int inspectionVersion, Projec
         if (schemaVersion < 1 || inspectionVersion < 1 || project.inventoryRevision() < 1) {
             throw new IllegalArgumentException("Snapshot versions and revision must be positive");
         }
+        if (!project.sourceRoot().isAbsolute()) {
+            throw new IllegalArgumentException("Snapshot source root must be absolute");
+        }
         if (scannedAt.isBefore(project.createdAt())) {
             throw new IllegalArgumentException("Scan cannot precede project creation");
         }

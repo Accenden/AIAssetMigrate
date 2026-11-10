@@ -23,7 +23,7 @@ class MaterialAnalysisTest {
     }
     private InventorySnapshot snapshot(InventorySnapshot.ScanStatus status, List<PathOutcome> outcomes) {
         Instant now = Instant.parse("2026-01-01T00:00:00Z");
-        return new InventorySnapshot(1, 1, new Project(UUID.randomUUID(), Path.of("/source"), 1, assets, now),
+        return new InventorySnapshot(1, 1, new Project(UUID.randomUUID(), io.github.aiassetmigrate.TestPaths.absolute("source"), 1, assets, now),
                 List.of(), status, now, outcomes, List.of());
     }
     private MaterialAnalysis.Result analyze(InventorySnapshot snapshot) {
@@ -75,5 +75,46 @@ class MaterialAnalysisTest {
         assertTrue(limited.truncated());
         assertEquals(MaterialAnalysis.Inspection.BUDGET_EXCEEDED, limited.files().getFirst().status());
         assertTrue(limited.references().isEmpty());
+    }
+
+    private static MaterialAnalysis.Rewrite library(String from, String to) {
+        return new MaterialAnalysis.Rewrite(AssetReference.Kind.MATERIAL_LIBRARY, from, to);
+    }
+    private static MaterialAnalysis.Rewrite texture(String from, String to) {
+        return new MaterialAnalysis.Rewrite(AssetReference.Kind.TEXTURE, from, to);
+    }
+
+    @Test void rewritesOnlyMatchingObjLibraryTokensAndPreservesEverythingElse() {
+        String obj = "# mtllib a.mtl in a comment\r\nmtllib  a.mtl\tb.mtl # keep\r\nusemtl a.mtl\r\nv 0 0 0";
+        assertEquals("# mtllib a.mtl in a comment\r\nmtllib  ../mat/a.mtl\tb.mtl # keep\r\nusemtl a.mtl\r\nv 0 0 0",
+                MaterialAnalysis.rewrite(obj, true, List.of(library("a.mtl", "../mat/a.mtl"))));
+        assertEquals("mtllib x.mtl x.mtl\n", MaterialAnalysis.rewrite("mtllib a.mtl a.mtl\n", true, List.of(library("a.mtl", "x.mtl"))));
+    }
+
+    @Test void rewritesWholeMtlTextureValuesOnly() {
+        String mtl = "newmtl wood\n  map_Kd   tex/wood.png  \nbump tex/wood.png # same file\nmap_Ks -s 1 1 1 tex/wood.png\n";
+        assertEquals("newmtl wood\n  map_Kd   ../t/wood.png  \nbump ../t/wood.png # same file\nmap_Ks -s 1 1 1 tex/wood.png\n",
+                MaterialAnalysis.rewrite(mtl, false, List.of(texture("tex/wood.png", "../t/wood.png"))));
+    }
+
+    @Test void rewriteRejectsUnmatchedUnsafeDuplicateAndMismatchedRewrites() {
+        assertThrows(IllegalArgumentException.class, () -> MaterialAnalysis.rewrite("mtllib a.mtl\n", true, List.of(library("b.mtl", "c.mtl"))));
+        assertThrows(IllegalArgumentException.class, () -> MaterialAnalysis.rewrite("mtllib a.mtl\n", true, List.of(library("a.mtl", "my file.mtl"))));
+        assertThrows(IllegalArgumentException.class, () -> MaterialAnalysis.rewrite("mtllib a.mtl\n", true, List.of(library("a.mtl", "/abs.mtl"))));
+        assertThrows(IllegalArgumentException.class, () -> MaterialAnalysis.rewrite("mtllib a.mtl\n", true, List.of(library("a.mtl", "x#.mtl"))));
+        assertThrows(IllegalArgumentException.class, () -> MaterialAnalysis.rewrite("mtllib a.mtl\n", true,
+                List.of(library("a.mtl", "b.mtl"), library("a.mtl", "c.mtl"))));
+        assertThrows(IllegalArgumentException.class, () -> MaterialAnalysis.rewrite("map_Kd a.png\n", true, List.of(texture("a.png", "b.png"))));
+        assertEquals("unchanged\n", MaterialAnalysis.rewrite("unchanged\n", false, List.of()));
+    }
+
+    @Test void rewrittenContentResolvesAgainstTheNewLayout() throws Exception {
+        Asset obj = asset("hero.obj", Asset.Type.MODEL, MaterialAnalysis.rewrite("mtllib old/a.mtl\nusemtl Paint\n", true,
+                List.of(library("old/a.mtl", "mat/a.mtl"))));
+        asset("mat/a.mtl", Asset.Type.MATERIAL, "newmtl Paint\n");
+        var result = analyze(snapshot(InventorySnapshot.ScanStatus.COMPLETE, List.of()));
+        assertEquals(AssetReference.ResolutionStatus.RESOLVED, result.references().getFirst().resolutionStatus());
+        assertEquals(MaterialAnalysis.MappingStatus.RESOLVED, result.mappings().getFirst().status());
+        assertEquals(obj.id(), result.mappings().getFirst().modelId());
     }
 }

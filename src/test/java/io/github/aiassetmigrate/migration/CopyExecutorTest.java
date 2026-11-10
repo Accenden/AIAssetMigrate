@@ -51,6 +51,39 @@ class CopyExecutorTest {
         return new CopyExecutor().execute(f.snapshot, plan, f.state, f.log);
     }
 
+    @Test void createsMissingReviewedDestinationFoldersOnlyDuringExecution() throws Exception {
+        Fixture f = fixture();
+        MigrationCommand a = f.plan.commands().getFirst(), b = f.plan.commands().get(1);
+        var folder = new ReviewedChange(UUID.randomUUID(), a.assetId(), ReviewedChange.Kind.FOLDER,
+                ReviewedChange.Decision.ACCEPTED, Map.of("folder", "deep/er"), now);
+        var p = f.plan;
+        var plan = new MigrationPlan(p.id(), p.projectId(), p.version(), p.inventoryRevision(), p.targetProfile(),
+                p.targetProfileVersion(), p.outputRoot(), List.of(folder), List.of(new AssetOperationCommand(a.id(), a.assetId(),
+                        MigrationCommand.Operation.COPY, Path.of("deep", "er", "a.txt"), Map.of(), List.of(), Optional.empty()), b),
+                p.findings(), p.status(), p.createdAt());
+        new CopyExecutor().validatePreflight(f.snapshot, plan, f.state, f.log);
+        assertFalse(Files.exists(f.output.resolve("deep")));
+        var result = run(f, plan);
+        assertTrue(result.preflightPassed(), result.error());
+        assertEquals("a.txt", Files.readString(f.output.resolve("deep/er/a.txt")));
+        assertEquals("b.txt", Files.readString(f.output.resolve("b.txt")));
+    }
+
+    @Test void rewriteCommandsMustMatchTheReviewedPreview() throws Exception {
+        Fixture f = fixture();
+        MigrationCommand original = f.plan.commands().getFirst();
+        var rewrite = new AssetOperationCommand(original.id(), original.assetId(), MigrationCommand.Operation.REWRITE_REFERENCES,
+                original.relativeOutputPath(), CopyPlanBuilder.encode(List.of(new io.github.aiassetmigrate.analysis.MaterialAnalysis.Rewrite(
+                        AssetReference.Kind.TEXTURE, "a.png", "b.png"))), List.of(), Optional.empty());
+        var result = run(f, withCommands(f, List.of(rewrite, f.plan.commands().get(1))));
+        assertFalse(result.preflightPassed());
+        assertTrue(result.error().contains("rewrites differ"), result.error());
+        var forged = new AssetOperationCommand(original.id(), original.assetId(), MigrationCommand.Operation.REWRITE_REFERENCES,
+                original.relativeOutputPath(), Map.of("rewrite.0000.kind", "TEXTURE"), List.of(), Optional.empty());
+        assertFalse(run(f, withCommands(f, List.of(forged))).preflightPassed());
+        assertFalse(Files.exists(f.output.resolve("a.txt")));
+    }
+
     @Test void copiesAndPreservesSources() throws Exception {
         Fixture f = fixture();
         var result = run(f, f.plan);
@@ -121,12 +154,14 @@ class CopyExecutorTest {
 
     @Test void rejectsHardLinksAndSymlinks() throws Exception {
         Fixture f = fixture();
-        try { Files.createLink(temp.resolve("alias"), f.source.resolve("a.txt")); }
-        catch (UnsupportedOperationException | IOException e) { assumeTrue(false, "hard links unavailable"); }
-        assertFalse(run(f, f.plan).preflightPassed());
-        Files.delete(temp.resolve("alias"));
+        if (Files.getFileStore(f.source).supportsFileAttributeView("unix")) {
+            try { Files.createLink(temp.resolve("alias"), f.source.resolve("a.txt")); }
+            catch (UnsupportedOperationException | IOException e) { assumeTrue(false, "hard links unavailable"); }
+            assertFalse(run(f, f.plan).preflightPassed());
+            Files.delete(temp.resolve("alias"));
+        }
         Files.delete(f.source.resolve("a.txt"));
-        Files.createSymbolicLink(f.source.resolve("a.txt"), f.source.resolve("b.txt"));
+        io.github.aiassetmigrate.TestLinks.symlinkOrSkip(f.source.resolve("a.txt"), f.source.resolve("b.txt"));
         assertFalse(run(f, f.plan).preflightPassed());
     }
 
@@ -151,7 +186,7 @@ class CopyExecutorTest {
                 p.commands(), p.findings(), p.status(), p.createdAt());
         assertFalse(run(f, stale).preflightPassed());
         Path alias = temp.resolve("output-alias");
-        Files.createSymbolicLink(alias, f.output);
+        io.github.aiassetmigrate.TestLinks.symlinkOrSkip(alias, f.output);
         var aliased = new MigrationPlan(p.id(), p.projectId(), p.version(), p.inventoryRevision(),
                 p.targetProfile(), p.targetProfileVersion(), alias.toAbsolutePath(), p.reviewedChanges(),
                 p.commands(), p.findings(), p.status(), p.createdAt());

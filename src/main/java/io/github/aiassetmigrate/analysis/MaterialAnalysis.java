@@ -52,6 +52,13 @@ public final class MaterialAnalysis {
         }
     }
 
+    /** True for the OBJ models and MTL materials whose references this analysis can inspect. */
+    public static boolean inspectable(Asset asset) {
+        String name = asset.relativePath().getFileName().toString().toLowerCase(Locale.ROOT);
+        return (asset.type() == Asset.Type.MODEL && name.endsWith(".obj"))
+                || (asset.type() == Asset.Type.MATERIAL && name.endsWith(".mtl"));
+    }
+
     /** Results describe this snapshot only and are not reviewed changes or migration approval. */
     public static Result analyze(InventorySnapshot snapshot, Content content, Limits limits) {
         Objects.requireNonNull(snapshot); Objects.requireNonNull(content); Objects.requireNonNull(limits);
@@ -61,7 +68,9 @@ public final class MaterialAnalysis {
     private static final class Run {
         final InventorySnapshot snapshot; final Content content; final Limits limits;
         final boolean completeCoverage;
-        final List<Asset> assets; final Map<Path, List<Asset>> paths = new HashMap<>();
+        final List<Asset> assets;
+        // Keyed by portable text: WindowsPath equality ignores case and would hide case mismatches.
+        final Map<String, List<Asset>> paths = new HashMap<>();
         final Map<String, Integer> foldedPaths = new HashMap<>();
         final List<AssetReference> references = new ArrayList<>();
         final List<TextureBinding> textures = new ArrayList<>();
@@ -75,8 +84,8 @@ public final class MaterialAnalysis {
             assets = snapshot.project().assets().stream().sorted(Comparator.comparing((Asset a) -> a.relativePath().toString())
                     .thenComparing(Asset::id)).toList();
             assets.forEach(a -> {
-                paths.computeIfAbsent(a.relativePath(), ignored -> new ArrayList<>()).add(a);
-                foldedPaths.merge(a.relativePath().toString().toLowerCase(Locale.ROOT), 1, Integer::sum);
+                paths.computeIfAbsent(key(a.relativePath()), ignored -> new ArrayList<>()).add(a);
+                foldedPaths.merge(key(a.relativePath()).toLowerCase(Locale.ROOT), 1, Integer::sum);
             });
         }
 
@@ -93,7 +102,7 @@ public final class MaterialAnalysis {
                 for (AssetReference ref : obj.refs) {
                     if (ref.kind() != AssetReference.Kind.MATERIAL_LIBRARY) continue;
                     if (ref.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED) { incomplete = true; continue; }
-                    List<Asset> targets = paths.get(ref.normalizedTargetPath().orElseThrow());
+                    List<Asset> targets = paths.get(key(ref.normalizedTargetPath().orElseThrow()));
                     Parsed library = targets == null || targets.size() != 1 ? null : parsed.get(targets.getFirst().id());
                     if (library == null || library.obj || !library.complete) incomplete = true;
                     else libraries.add(library);
@@ -180,8 +189,8 @@ public final class MaterialAnalysis {
                 if (target.isAbsolute() || target.toString().isEmpty() || target.startsWith(".."))
                     return ref(owner, kind, value, null, AssetReference.ResolutionStatus.UNSAFE);
             } catch (InvalidPathException e) { return ref(owner, kind, value, null, AssetReference.ResolutionStatus.UNSAFE); }
-            List<Asset> exact = paths.getOrDefault(target, List.of());
-            int folded = foldedPaths.getOrDefault(target.toString().toLowerCase(Locale.ROOT), 0);
+            List<Asset> exact = paths.getOrDefault(key(target), List.of());
+            int folded = foldedPaths.getOrDefault(key(target).toLowerCase(Locale.ROOT), 0);
             AssetReference.ResolutionStatus status;
             if (folded > 1 || (exact.isEmpty() && folded > 0)) status = AssetReference.ResolutionStatus.CASE_AMBIGUOUS;
             else if (exact.size() == 1) status = exact.getFirst().type() == (kind == AssetReference.Kind.MATERIAL_LIBRARY
@@ -198,6 +207,108 @@ public final class MaterialAnalysis {
 
     private static AssetReference ref(Asset owner, AssetReference.Kind kind, String text, Path target, AssetReference.ResolutionStatus status) {
         return new AssetReference(owner.id(), kind, text, Optional.ofNullable(target), status);
+    }
+    /**
+     * One reference replacement in an output copy: {@code original} is the exact reference text
+     * as parsed by {@link #analyze}, {@code replacement} the output-relative text to write.
+     */
+    public record Rewrite(AssetReference.Kind kind, String original, String replacement) {
+        public Rewrite {
+            Objects.requireNonNull(kind, "kind");
+            Objects.requireNonNull(original, "original");
+            Objects.requireNonNull(replacement, "replacement");
+        }
+    }
+
+    /** True when text can be written as a single OBJ/MTL reference token without quoting. */
+    public static boolean rewritableReference(String text) {
+        return text != null && !text.isEmpty() && text.length() <= 4096 && !text.startsWith("-")
+                && text.codePoints().noneMatch(c -> Character.isWhitespace(c) || Character.isISOControl(c)
+                    || c == '#' || c == '"' || c == '\'' || c == '\\' || c == ':')
+                && !text.startsWith("/");
+    }
+
+    /**
+     * Applies reference rewrites to OBJ ({@code mtllib} tokens) or MTL (texture directive values)
+     * text using the same line, comment and directive rules as {@link #analyze}. Everything else,
+     * including line endings, is preserved byte for byte. Every rewrite must match at least once.
+     *
+     * @throws IllegalArgumentException if a rewrite does not match the content or is unsafe
+     */
+    public static String rewrite(String text, boolean obj, List<Rewrite> rewrites) {
+        Objects.requireNonNull(text, "text");
+        Map<String, String> libraries = new HashMap<>(), textures = new HashMap<>();
+        for (Rewrite rewrite : rewrites) {
+            if (!rewritableReference(rewrite.original()) || !rewritableReference(rewrite.replacement()))
+                throw new IllegalArgumentException("Reference cannot be rewritten safely: " + rewrite.original());
+            var target = rewrite.kind() == AssetReference.Kind.MATERIAL_LIBRARY ? libraries : textures;
+            if ((rewrite.kind() == AssetReference.Kind.MATERIAL_LIBRARY) != obj)
+                throw new IllegalArgumentException("Rewrite kind does not match the file format");
+            if (target.putIfAbsent(rewrite.original(), rewrite.replacement()) != null)
+                throw new IllegalArgumentException("Duplicate rewrite: " + rewrite.original());
+        }
+        java.util.Set<String> applied = new java.util.HashSet<>();
+        StringBuilder out = new StringBuilder(text.length() + 64);
+        var lines = java.util.regex.Pattern.compile("\\R").matcher(text);
+        int start = 0;
+        while (true) {
+            boolean more = lines.find();
+            int end = more ? lines.start() : text.length();
+            out.append(rewriteLine(text.substring(start, end), obj, libraries, textures, applied));
+            if (!more) break;
+            out.append(lines.group());
+            start = lines.end();
+        }
+        for (Rewrite rewrite : rewrites) {
+            if (!applied.contains(rewrite.original()))
+                throw new IllegalArgumentException("Reference not found in content: " + rewrite.original());
+        }
+        return out.toString();
+    }
+
+    private static String rewriteLine(String line, boolean obj, Map<String, String> libraries,
+                                      Map<String, String> textures, java.util.Set<String> applied) {
+        int comment = line.indexOf('#');
+        int contentEnd = comment < 0 ? line.length() : comment;
+        int first = 0;
+        while (first < contentEnd && Character.isWhitespace(line.charAt(first))) first++;
+        int split = first;
+        while (split < contentEnd && !Character.isWhitespace(line.charAt(split))) split++;
+        String directive = line.substring(first, split);
+        if (obj && directive.equals("mtllib")) {
+            StringBuilder result = new StringBuilder(line.substring(0, split));
+            var tokens = java.util.regex.Pattern.compile("\\S+").matcher(line.substring(split, contentEnd));
+            int last = 0;
+            String rest = line.substring(split, contentEnd);
+            while (tokens.find()) {
+                result.append(rest, last, tokens.start());
+                String replacement = libraries.get(tokens.group());
+                if (replacement != null) applied.add(tokens.group());
+                result.append(replacement == null ? tokens.group() : replacement);
+                last = tokens.end();
+            }
+            return result.append(rest.substring(last)).append(line.substring(contentEnd)).toString();
+        }
+        if (!obj && isTexture(directive)) {
+            int valueStart = split;
+            while (valueStart < contentEnd && Character.isWhitespace(line.charAt(valueStart))) valueStart++;
+            int valueEnd = contentEnd;
+            while (valueEnd > valueStart && Character.isWhitespace(line.charAt(valueEnd - 1))) valueEnd--;
+            String value = line.substring(valueStart, valueEnd);
+            String replacement = textures.get(value);
+            if (replacement != null) {
+                applied.add(value);
+                return line.substring(0, valueStart) + replacement + line.substring(valueEnd);
+            }
+        }
+        return line;
+    }
+
+    /** Case-sensitive, separator-independent text for an inventory-relative path. */
+    static String key(Path path) {
+        StringBuilder text = new StringBuilder();
+        for (Path part : path) { if (!text.isEmpty()) text.append('/'); text.append(part); }
+        return text.toString();
     }
     private static boolean isTexture(String directive) {
         return directive.startsWith("map_") || directive.equals("bump") || directive.equals("disp") || directive.equals("decal") || directive.equals("norm");

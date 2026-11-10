@@ -12,33 +12,50 @@ replay, and live subscriptions are implemented separately, with the limitations
 described below. The OAuth foundation provides browser authorization and validated
 in-memory credentials, not yet a saved AI account connection.
 
-Deterministic category, relationship and material analysis and explicit review
-storage and limited target compatibility assessment are available as described
-below. Copy-only draft plans, explicit approval and migration are available with
-the restrictions below. AI assistance, conversion, reference rewriting and report
-workflows are not implemented. Import and format-level checks do not establish
+F02-F04 provide deterministic category, relationship/material and organization
+analysis with explicit reviews: uncertain categories stay Uncategorized, broken
+OBJ/MTL references get uncertain correction candidates, accepted corrections and
+renames/moves become reviewed reference rewrites in output copies, and opaque FBX
+files need an explicit acknowledgment or exclusion. Limited target compatibility
+assessment is available. Draft plans, explicit approval and migration (copies plus
+OBJ/MTL reference rewrites) are available with the restrictions below. AI
+assistance, format conversion and report workflows are not implemented. Import and format-level checks do not establish
 successful import or rendering in a target engine.
 
 ## Build and Run
 
-Install a **JDK 21 or newer** and set `JAVA_HOME` to its installation directory.
-The Maven wrapper downloads pinned Maven 3.9.9 on first use; a global Maven
-installation is unnecessary. Initial dependency downloads require internet access.
+Install a **JDK 21 or newer**. The Maven wrapper downloads pinned Maven 3.9.9 on
+first use; a global Maven installation is unnecessary. Initial dependency downloads
+require internet access.
+
+The wrappers use `JAVA_HOME`, falling back to the `java` on `PATH`; the build fails
+with "Build with JDK 21 or newer" if that is older (for example a Java 8 JRE). Either
+set `JAVA_HOME` to a JDK 21+, or create a git-ignored local launcher that pins your
+JDK path and forwards its arguments to the wrapper. `/mvnw-local.cmd` and
+`/mvnw-local.sh` are already listed in `.gitignore`, for example:
+
+```bat
+@REM mvnw-local.cmd
+@SETLOCAL
+@SET "JAVA_HOME=%USERPROFILE%\.jdks\ms-21.0.9"
+@SET "PATH=%JAVA_HOME%\bin;%PATH%"
+@CALL "%~dp0mvnw.cmd" %*
+```
+
+Then run `.\mvnw-local.cmd clean verify` in place of `./mvnw.cmd clean verify`.
 
 From PowerShell in the repository root:
 
 ```powershell
-# Example for the JDK already installed on this machine:
-$env:JAVA_HOME = "$env:USERPROFILE\.jdks\ms-21.0.9"
 ./mvnw.cmd clean verify
 ./mvnw.cmd exec:java "-Dexec.args=--help"
 ./mvnw.cmd exec:java "-Dexec.args=--version"
 ./mvnw.cmd javafx:run
 ```
 
-Use `bash ./mvnw` instead of `./mvnw.cmd` on macOS/Linux; the tracked wrapper
-does not currently have executable permission. JavaFX requires a graphical
-desktop. To launch and automatically close the application for a smoke test:
+Use `./mvnw` (or `bash ./mvnw` from Git Bash) instead of `./mvnw.cmd` on
+macOS/Linux. `.gitattributes` keeps `mvnw` and `*.sh` checked out with LF endings so
+`/bin/sh` accepts them. JavaFX requires a graphical desktop. To launch and automatically close the application for a smoke test:
 
 ```powershell
 ./mvnw.cmd javafx:run "-Djavafx.args=--smoke-test"
@@ -156,9 +173,39 @@ Use the inventory revision printed by `analyze`; a review of an older revision
 is rejected if the project has been rescanned, so run analysis again first.
 Analysis is rule-based, not AI-assisted. OBJ/MTL inspection uses bounded,
 fingerprint-checked UTF-8 content and reports unsupported, missing or ambiguous
-references; it is not a complete parser. Reviews do not modify source files or
-apply mappings. Manually entered mappings are user assertions, not proof that a
-reference exists in the source. Use `reviews --project PROJECT-UUID` with the
+references; it is not a complete parser. Reviews never modify source files.
+Manually entered mappings are user assertions, not proof that a reference exists
+in the source.
+
+**Categories (F02).** Whole words of the relative path (folders and file stem) are
+matched against a fixed vocabulary: Characters, Weapons, Props, Environment,
+Vehicles, UI, Effects, Animations, Textures and Materials. Exactly one match is
+suggested; conflicting words leave the asset Uncategorized with a
+`CATEGORY_CONFLICT` finding. Without any word signal, textures and materials fall
+back to Textures/Materials and other assets stay Uncategorized. File types are never
+changed.
+
+**Relationships and materials (F03).** Resolved OBJ `mtllib` and MTL texture
+references become suggestions. A missing, case-mismatched or unresolved reference
+also yields up to five uncertain `REFERENCE_CANDIDATE` suggestions: assets of the
+expected type whose filename matches the reference's last segment, ignoring case.
+`relationships` additionally suggests reference-less groupings
+(`NAME_RELATIONSHIP_CANDIDATE`) for unreferenced textures whose name starts with a
+model or material name, for example `crate.obj` and `crate_albedo.png`.
+
+An accepted `RELATIONSHIP` or `MATERIAL_MAPPING` review whose `reference` equals one
+of the asset's file references is a **correction**: the preview uses its target
+instead of the broken one, and migration rewrites the reference in the output copy.
+The target type must match (an `mtllib` needs a material, a texture directive a
+texture), or the preview reports `INVALID_CORRECTION`. A `MATERIAL_MAPPING` from a
+model whose reference is a `usemtl` material name is validated only: the target
+must already be one of the model's (possibly corrected) material libraries, otherwise
+`MAPPING_LIBRARY_NOT_REFERENCED` blocks the plan.
+
+**Opaque formats.** FBX references cannot be inspected, so an FBX asset blocks the
+preview with `INSPECTION_UNSUPPORTED` until it is excluded or explicitly
+acknowledged: `review --kind ACKNOWLEDGMENT --value reason=...`. Acknowledgments are
+rejected for OBJ/MTL (which are inspected) and for textures. Use `reviews --project PROJECT-UUID` with the
 state directory and its managed `logs` child to list saved decisions, or use **Load Saved
 Reviews** in the GUI.
 
@@ -175,13 +222,20 @@ run `preview-organization --project PROJECT-UUID --inventory-revision 1` with th
 state directory and its managed `logs` child. The GUI also provides an organization preview.
 The preview is read-only and checks lexical destination conflicts, reference
 coverage and inventory revision; it does not inspect an output directory or grant
-approval. Unresolved references remain blocking even when manually reviewed until
-planning supports validating and applying those corrections. The copy-only plan
-workflow is described below.
+approval. When an OBJ/MTL file or anything it references moves or is renamed, the
+preview lists the reference rewrites its output copy needs (for example
+`Rewrite TEXTURE reference: textures/hero.png -> ../tex/hero.png`). References are
+rewritten only as single tokens: if the old or new text would need spaces, quotes,
+`#`, backslashes, colons or a leading `-`, the preview reports
+`REFERENCE_REWRITE_UNSUPPORTED` and blocks instead. Unresolved references without an
+accepted correction remain blocking. The plan workflow is described below.
 
 To generate rule-based proposals instead, use `analyze-organization` with
-`--name-style preserve|snake-case|kebab-case` and `--folder-style preserve|by-type`,
-along with the project, state-directory and log-directory options. The GUI offers
+`--name-style preserve|snake-case|kebab-case` and
+`--folder-style preserve|by-type|by-category`, along with the project,
+state-directory and log-directory options. `by-category` places each asset in a
+folder named after its accepted `CATEGORY` review, falling back to its type folder
+(Models, Materials, Textures, Other) when it has none. The GUI offers
 the same rules. These are combined proposals for the current inventory, not saved
 reviews. Review each desired change explicitly and run the organization preview
 again before proceeding; its reference and destination checks use the saved
@@ -214,7 +268,7 @@ The Unity 6000.0 profile is based on the official Unity 6.0 documentation for
 and [texture import](https://docs.unity3d.com/6000.0/Documentation/Manual/ImportingTextures.html).
 Material fidelity and unsupported or undocumented requirements remain unknown.
 
-## Copy-Only Migration
+## Migration
 
 Use `plan --project PROJECT-UUID --target unity --target-version 6000.0 --output
 /absolute/output` with the state directory and its managed `logs` child to create a draft.
@@ -224,10 +278,16 @@ separate `migrate --plan PLAN-UUID` command. Use `show-run --plan PLAN-UUID` to
 inspect the recorded outcome, including an interrupted run. The GUI provides the
 same separate draft, approval and migration steps.
 
-Only reviewed, copy-only layouts without blocking findings can be approved.
-Approval and execution recheck the inventory, review revision and commands; each
-approved plan can be run once. The output root and all destination parent folders
-must already exist and be separate from source, state and log directories. Existing
+Plans contain `COPY` commands, plus `REWRITE_REFERENCES` commands for OBJ/MTL
+files whose reviewed preview lists rewrites; their parameters record each exact
+`from -> to` replacement. Only layouts without blocking findings can be approved.
+Approval and execution recheck the inventory, review revision and commands, and the
+executor rejects rewrite commands that differ from the current reviewed preview;
+each approved plan can be run once. A rewrite changes only the matching `mtllib`
+tokens or texture directive values; comments, other lines and line endings are kept
+byte for byte, and the step detail records the output SHA-256. The output root must
+already exist and be separate from source, state and log directories; missing
+destination folders inside it are created during execution, never during preflight. Existing
 output files are never intentionally overwritten. Source contents are fingerprinted
 and the copied bytes checked before no-replace publication. A failed run can leave
 earlier copies in place; there is no rollback or crash-durable output guarantee.
@@ -235,13 +295,16 @@ Retryable preflight errors are checked before the single-use run is reserved. If
 execution begins and is interrupted, the saved run remains incomplete and the
 same plan cannot be run again.
 
-This implementation requires filesystem file identities, Unix source link counts,
-hard-link publication and directory forcing; unsupported providers fail closed.
+Publication requires hard-link support. On Unix filesystems sources must report
+a link count of one and file keys identify directories and files. Windows (NTFS)
+exposes neither, so identities fall back to creation time and size, source hard
+links are not detected, and directory forcing is skipped; source fingerprints are
+still rechecked before every publish.
 Path and identity rechecks are best effort against hostile concurrent filesystem
 replacement, not a handle-anchored sandbox. Source, output, state and log paths and
 their ancestors must remain trusted against concurrent manipulation. Unsupported
-reference rewrites, material mappings and conversions remain blocking or unavailable;
-no such operations are silently performed.
+reference rewrites and conversions remain blocking or unavailable; no such
+operations are silently performed.
 
 ## File Logs
 

@@ -22,7 +22,7 @@ class PreviewOrganizationCommandTest {
         UUID project = UUID.randomUUID(), asset = UUID.randomUUID(), excluded = UUID.randomUUID();
         AtomicBoolean closed = new AtomicBoolean();
         var result = new OrganizationPreview.Result(project, 17, List.of(
-                new OrganizationPreview.Entry(asset, Path.of("src\nasset.obj"), Optional.of("dest\u001b[31m.obj"), false),
+                new OrganizationPreview.Entry(asset, io.github.aiassetmigrate.TestPaths.hostile("src\nasset.obj"), Optional.of("dest\u001b[31m.obj"), false),
                 new OrganizationPreview.Entry(excluded, Path.of("excluded.obj"), Optional.empty(), true)), List.of(
                 new OrganizationPreview.Finding("BAD\nCODE", Optional.of(asset), "bad\u001b[31m"),
                 new OrganizationPreview.Finding("PROJECT", Optional.empty(), "incomplete")));

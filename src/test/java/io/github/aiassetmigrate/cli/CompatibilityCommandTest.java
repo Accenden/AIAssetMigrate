@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class CompatibilityCommandTest {
     @Test void assessmentDisplaysAllFieldsAndEscapesUntrustedText() {
+        Path hostilePath = io.github.aiassetmigrate.TestPaths.hostile("bad\nname.obj");
         UUID project = UUID.randomUUID(), asset = UUID.randomUUID(), findingId = UUID.randomUUID();
         AtomicBoolean closed = new AtomicBoolean();
         AssetManager manager = manager((method, args) -> {
@@ -28,7 +29,7 @@ class CompatibilityCommandTest {
             assertEquals(project, args[0]);
             assertEquals(new AssetManager.TargetProfile("engine", "1"), args[1]);
             return new AssetManager.CompatibilityResult(42, new AssetManager.TargetProfile("engine\nname", "1\u001b"),
-                    List.of(new Finding(findingId, Optional.of(asset), Optional.of(Path.of("bad\nname.obj")),
+                    List.of(new Finding(findingId, Optional.of(asset), Optional.of(io.github.aiassetmigrate.TestPaths.hostile("bad\nname.obj")),
                                     Finding.Severity.WARNING, "CODE\nX", "message\u001b[31m"),
                             new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(),
                                     Finding.Severity.UNKNOWN, "OTHER", "second")));
