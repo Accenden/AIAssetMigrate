@@ -18,8 +18,11 @@ OBJ/MTL references get uncertain correction candidates, accepted corrections and
 renames/moves become reviewed reference rewrites in output copies, and opaque FBX
 files need an explicit acknowledgment or exclusion. Limited target compatibility
 assessment is available. Draft plans, explicit approval and migration (copies plus
-OBJ/MTL reference rewrites) are available with the restrictions below. AI
-assistance, format conversion and report workflows are not implemented. Import and format-level checks do not establish
+OBJ/MTL reference rewrites) are available with the restrictions below. Optional
+AI suggestions for F02-F04 (`analyze KIND --ai`, or the GUI checkbox) use a
+connected ChatGPT account and are validated before display; AI planning,
+natural-language commands, format conversion and report workflows are not
+implemented. Import and format-level checks do not establish
 successful import or rendering in a target engine.
 
 ## Build and Run
@@ -171,7 +174,7 @@ also require `--value reference=ORIGINAL-REFERENCE`. Decisions are saved for the
 current inventory revision and are not carried forward automatically on rescan.
 Use the inventory revision printed by `analyze`; a review of an older revision
 is rejected if the project has been rescanned, so run analysis again first.
-Analysis is rule-based, not AI-assisted. OBJ/MTL inspection uses bounded,
+Analysis is rule-based unless `--ai` is given (see below). OBJ/MTL inspection uses bounded,
 fingerprint-checked UTF-8 content and reports unsupported, missing or ambiguous
 references; it is not a complete parser. Reviews never modify source files.
 Manually entered mappings are user assertions, not proof that a reference exists
@@ -209,11 +212,52 @@ rejected for OBJ/MTL (which are inspected) and for textures. Use `reviews --proj
 state directory and its managed `logs` child to list saved decisions, or use **Load Saved
 Reviews** in the GUI.
 
-An isolated SIWC inference client and bounded HTTPS transport are included as
-integration groundwork. They are not connected to the CLI, GUI or analysis
-facade, and no live provider request is made by the application. Account
-storage, refresh, model discovery, user consent to send metadata, and live
-provider verification are still required before enabling AI assistance.
+### AI suggestions (hybrid F02-F04)
+
+Rule-based analysis always runs. Adding `--ai` to `analyze` (or ticking **Include
+AI suggestions** in the GUI) also asks the connected model, and the results are
+merged: rule suggestions are kept, and AI suggestions appear alongside them marked
+`Source: AI` with an `AI_SUGGESTION` finding that gives the model's reason.
+Accepting one is an ordinary explicit `review`; nothing is applied automatically.
+
+```bash
+./mvnw-local.sh exec:java '-Dexec.args=auth connect'
+./mvnw-local.sh exec:java '-Dexec.args=analyze categories --ai --project PROJECT-UUID --state-directory /tmp/s --log-directory /tmp/s/logs'
+```
+
+| Kind | What the model is asked | Accepted only if |
+| --- | --- | --- |
+| `categories` | A category for assets the rules left Uncategorized | It is in the fixed vocabulary |
+| `relationships` | Targets for broken references; texture groupings | The reference is actually broken for that asset and the target has the expected type |
+| `materials` | Targets for broken texture references | As above, textures only |
+| `names` | Clearer filenames | Portable, and the extension is unchanged |
+| `folders` | An output folder layout (uses accepted categories) | Portable relative path, at most 4 levels |
+
+Only relative paths, asset types, formats, accepted categories and reference text
+are sent, for at most 300 assets per request; file contents, fingerprints and
+absolute paths never are. Names and paths are framed as untrusted data, and any
+proposal that fails validation is dropped and counted in `AI_OUTPUT_REJECTED`. When
+nothing is uncertain no request is made (`AI_NOT_NEEDED`). If the account is not
+connected, the session expired, the plan's usage limit is reached or the model
+returns unusable output, the rule-based result is returned with an `AI_UNAVAILABLE`
+finding. There is no API-key or paid fallback.
+
+### AI account
+
+`auth connect` signs in with ChatGPT in the browser (OAuth with PKCE), lists the
+models the account may use (`GET /v1/models`, `visibility: "list"`) and selects
+`--model SLUG` or the first one. `auth status`, `auth models`,
+`auth use-model SLUG` and `auth disconnect` manage the saved account; the GUI has
+**Connect AI Account** and **Disconnect AI Account**. Credentials are stored per
+user, outside project state, in `%APPDATA%\AIAssetMigrate` (Windows, encrypted with
+DPAPI for the current user) or `~/.config/aiassetmigrate` (owner-only file
+permissions). Access tokens are refreshed shortly before expiry under a
+cross-process lock and the rotated refresh token is saved before use; a rejected
+token triggers one forced refresh. `disconnect` revokes the refresh token at the
+issuer's discovered revocation endpoint, removes local credentials, and says when
+remote revocation was not confirmed. Connecting never changes migration approval.
+Requests follow OpenAI's documented Sign in with ChatGPT flow, but the live service
+has only been exercised through local fakes in tests.
 
 Name and folder analysis starts with the current names and folders. Edit and
 explicitly accept a `NAME` review (`--value name=FILE`) or `FOLDER` review
@@ -382,7 +426,7 @@ policy; it is intended for modest local logs, not large archives.
 Import produces project events. The JavaFX log viewer and integration with later
 workflow operations are still future work.
 
-## OAuth Foundation (Part 1)
+## OAuth Implementation Notes
 
 `OAuthSession` implements OpenAI's documented [Sign in with ChatGPT flow for
 locally hosted open-source apps](https://developers.openai.com/siwc/token-sharing-open-source/sign-in).
@@ -416,8 +460,9 @@ Do not log their fields, the authorization URL, callbacks or token responses.
 session accepts `Optional.of(new OAuthSession.Registration(savedClientId,
 savedSubject))`, using only a previously validated registration.
 
-OS-secure credential persistence, refresh/disconnect of saved accounts, CLI
-`auth` commands, GUI account controls and AI requests are subsequent increments.
-This part neither establishes a durable connection nor changes migration approval,
-and it never falls back to API-key billing. Tests use a local fake provider and
+`refresh(credentials)` uses `grant_type=refresh_token` with the issued client ID and
+keeps the existing grant; `revoke(credentials)` uses the discovered revocation
+endpoint. Persistence and the account commands are described under
+[AI account](#ai-account). Authorization never changes migration approval and never
+falls back to API-key billing. Tests use a local fake provider and
 local signing keys; live account/provider availability has not been verified.

@@ -129,6 +129,46 @@ class OrganizationWorkflowIntegrationTest {
         }
     }
 
+    @Test void acceptedAiCorrectionDrivesTheSameReviewedRewriteAsARuleSuggestion() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("hero.mtl"), "newmtl Skin\nmap_Kd skin.png\n");
+        Files.write(source.resolve("hero_albedo.png"), new byte[] {4, 5});
+        Path output = Files.createDirectory(directory.resolve("output"));
+        try (var manager = new DefaultAssetManager(directory.resolve("state"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id();
+            Map<String, UUID> ids = snapshot.project().assets().stream()
+                    .collect(Collectors.toMap(a -> PortablePath.of(a.relativePath()), Asset::id));
+            UUID mtl = ids.get("hero.mtl"), png = ids.get("hero_albedo.png");
+            // Rules find no filename match for skin.png; the model proposes hero_albedo.png.
+            var rules = manager.analyze(project, AssetManager.AnalysisKind.MATERIALS);
+            assertTrue(rules.suggestions().isEmpty(), rules.suggestions().toString());
+            List<String> prompts = new ArrayList<>();
+            io.github.aiassetmigrate.ai.LLMClient model = new io.github.aiassetmigrate.ai.LLMClient() {
+                @Override public com.fasterxml.jackson.databind.JsonNode generate(String prompt) throws AiException {
+                    prompts.add(prompt);
+                    try {
+                        return new com.fasterxml.jackson.databind.ObjectMapper().readTree("{\"corrections\":[{\"ownerId\":\""
+                                + mtl + "\",\"reference\":\"skin.png\",\"targetAssetId\":\"" + png + "\"}]}");
+                    } catch (Exception e) { throw new AiException(AiException.Reason.INVALID_OUTPUT, "bad"); }
+                }
+                @Override public String description() { return "fake model"; }
+            };
+            var assisted = manager.analyze(project, AssetManager.AnalysisKind.MATERIALS, model);
+            var suggestion = assisted.suggestions().stream().filter(s -> s.source() == AssetManager.Source.AI).findFirst().orElseThrow();
+            assertEquals(png.toString(), suggestion.proposedValue());
+            assertFalse(prompts.getFirst().contains("newmtl"), "file contents are never sent");
+            assertTrue(manager.previewOrganization(project, 1).blocked(), "an AI suggestion is not applied until reviewed");
+
+            manager.review(project, 1, List.of(accept(mtl, ReviewedChange.Kind.MATERIAL_MAPPING,
+                    Map.of("targetAssetId", suggestion.proposedValue(), "reference", suggestion.reference().orElseThrow()))));
+            var plan = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            manager.approve(plan.id(), plan.version());
+            assertEquals(RunStatus.SUCCESS, manager.migrate(plan.id()).status());
+            assertEquals("newmtl Skin\nmap_Kd hero_albedo.png\n", Files.readString(output.resolve("hero.mtl")));
+        }
+    }
+
     @Test void stemGroupingSuggestsUnreferencedTexturesWithoutReferences() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Files.writeString(source.resolve("crate.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");

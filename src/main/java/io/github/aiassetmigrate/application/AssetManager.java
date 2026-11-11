@@ -36,6 +36,16 @@ public interface AssetManager {
 
     AnalysisResult analyze(UUID projectId, AnalysisKind kind);
 
+    /**
+     * Hybrid analysis: the rule-based result plus validated suggestions from the explicitly
+     * supplied model. Only relative paths, asset types, formats and reference text are sent,
+     * never file contents or absolute paths. If the model fails, the rule-based result is
+     * returned with an AI_UNAVAILABLE finding. Suggestions are never accepted automatically.
+     */
+    default AnalysisResult analyze(UUID projectId, AnalysisKind kind, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        throw new UnsupportedOperationException("AI-assisted analysis is not supported by this manager");
+    }
+
     /** Suggests an organization from explicit rules; no decision or output is written. */
     AnalysisResult analyzeOrganization(UUID projectId, OrganizationRules rules);
 
@@ -126,10 +136,17 @@ public interface AssetManager {
         }
     }
 
+    /** RULES suggestions are deterministic; AI suggestions came from a model and were validated. */
+    enum Source { RULES, AI }
+
     /** Suggestions are not accepted reviews and must never be applied implicitly. */
-    record Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference) {
+    record Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference,
+                      Source source) {
         public Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue) {
             this(id, assetId, kind, proposedValue, Optional.empty());
+        }
+        public Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference) {
+            this(id, assetId, kind, proposedValue, reference, Source.RULES);
         }
         public Suggestion {
             Objects.requireNonNull(id, "id");
@@ -137,6 +154,7 @@ public interface AssetManager {
             Objects.requireNonNull(kind, "kind");
             Objects.requireNonNull(proposedValue, "proposedValue");
             Objects.requireNonNull(reference, "reference");
+            Objects.requireNonNull(source, "source");
         }
     }
 

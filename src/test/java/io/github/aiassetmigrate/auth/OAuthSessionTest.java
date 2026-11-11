@@ -61,6 +61,37 @@ class OAuthSessionTest {
         key = new RSAKeyGenerator(2048).keyID("test-key").generate();
     }
 
+    private static OAuthCredentials saved() {
+        return new OAuthCredentials(CLIENT, SUBJECT, Optional.of("person@example.test"), "old-access", "old-refresh",
+                "old-id", Set.of("openid", "offline_access", "resource.invoke", "chatgpt.tokens.use.direct"), NOW);
+    }
+
+    @Test
+    void refreshUsesTheIssuedClientAndKeepsTheRotatedRefreshToken() throws Exception {
+        try (var provider = new Provider()) {
+            provider.rawBody = "{\"access_token\":\"new-access\",\"refresh_token\":\"new-refresh\","
+                    + "\"token_type\":\"Bearer\",\"expires_in\":1800}";
+            var refreshed = provider.session(Optional.of(new OAuthSession.Registration(CLIENT, SUBJECT))).refresh(saved());
+            assertEquals(Map.of("grant_type", "refresh_token", "client_id", CLIENT, "refresh_token", "old-refresh",
+                    "resource", OAuthSession.RESOURCE), provider.exchange);
+            assertEquals("new-access", refreshed.accessToken());
+            assertEquals("new-refresh", refreshed.refreshToken());
+            assertEquals("old-id", refreshed.idToken());
+            assertEquals(SUBJECT, refreshed.subject());
+            assertEquals(NOW.plusSeconds(1800), refreshed.expiresAt());
+            provider.rawBody = "{\"access_token\":\"a2\",\"token_type\":\"Bearer\",\"expires_in\":60}";
+            assertEquals("old-refresh", provider.session(Optional.empty()).refresh(saved()).refreshToken(),
+                    "a refresh response without a replacement keeps the saved refresh token");
+            provider.rawBody = "{\"access_token\":\"a3\",\"token_type\":\"Bearer\",\"expires_in\":60,\"scope\":\"openid\"}";
+            assertEquals(OAuthException.Reason.INSUFFICIENT_SCOPE, assertThrows(OAuthException.class,
+                    () -> provider.session(Optional.empty()).refresh(saved())).reason());
+            provider.status = 400;
+            var expired = assertThrows(OAuthException.class, () -> provider.session(Optional.empty()).refresh(saved()));
+            assertEquals(OAuthException.Reason.TOKEN_EXCHANGE_FAILED, expired.reason());
+            assertFalse(expired.getMessage().contains("old-refresh"));
+        }
+    }
+
     @Test
     void dynamicRegistrationValidatesTokensAndUsesTheIssuedClientForExchange() throws Exception {
         try (var provider = new Provider()) {

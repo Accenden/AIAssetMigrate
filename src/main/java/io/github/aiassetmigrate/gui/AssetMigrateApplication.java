@@ -17,6 +17,7 @@ import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ProgressIndicator;
@@ -53,6 +54,9 @@ public final class AssetMigrateApplication extends Application {
     static final AssetManager.OrganizationRules DEFAULT_ORGANIZATION_RULES = new AssetManager.OrganizationRules(
             AssetManager.NameStyle.PRESERVE, AssetManager.FolderStyle.PRESERVE);
     private final ImportRunner runner = new ImportRunner(Platform::runLater);
+    private final CheckBox useAi = new CheckBox(
+            "Include AI suggestions (sends relative paths, types and reference text, never file contents, to OpenAI)");
+    private final Label aiStatus = new Label("AI account: checking...");
     private final TextField source = new TextField();
     private final TextField state = new TextField();
     private final TextField logs = new TextField();
@@ -555,6 +559,13 @@ public final class AssetMigrateApplication extends Application {
         names.setOnAction(event -> analyze(AssetManager.AnalysisKind.NAMES));
         folders.setOnAction(event -> analyze(AssetManager.AnalysisKind.FOLDERS));
         FlowPane analyzeActions = new FlowPane(8, 8, categories, relationships, materials, names, folders);
+        Button connectAi = new Button("Connect AI Account");
+        connectAi.setOnAction(event -> connectAi());
+        Button disconnectAi = new Button("Disconnect AI Account");
+        disconnectAi.setOnAction(event -> disconnectAi());
+        aiStatus.setWrapText(true);
+        FlowPane aiControls = new FlowPane(8, 8, useAi, connectAi, disconnectAi);
+        refreshAiStatus();
         nameStyle.getItems().setAll(AssetManager.NameStyle.values());
         nameStyle.setValue(DEFAULT_ORGANIZATION_RULES.nameStyle());
         folderStyle.getItems().setAll(AssetManager.FolderStyle.values());
@@ -571,6 +582,7 @@ public final class AssetMigrateApplication extends Application {
         suggestionColumn("Asset ID", suggestion -> suggestion.assetId().toString(), 260);
         suggestionColumn("Kind", suggestion -> suggestion.kind().toString(), 120);
         suggestionColumn("Proposed value", AssetManager.Suggestion::proposedValue, 360);
+        suggestionColumn("Source", suggestion -> suggestion.source().toString(), 80);
         suggestions.setPlaceholder(new Label("Run analysis to display suggestions."));
         suggestions.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
             if (selected == null) return;
@@ -613,7 +625,7 @@ public final class AssetMigrateApplication extends Application {
         organizationPreview.setPrefRowCount(8);
         organizationPreview.setPromptText("Read-only preview; not approval and no assets are written.");
         HBox reviewActions = new HBox(8, decision, submitReview, manualReview);
-        analysisPane.getChildren().addAll(explanation, analyzeActions, rulesNote, organizationRules, analysisRevision, new Label("Suggestions"), suggestions,
+        analysisPane.getChildren().addAll(explanation, aiControls, aiStatus, analyzeActions, rulesNote, organizationRules, analysisRevision, new Label("Suggestions"), suggestions,
                 new Label("Analysis findings"), analysisFindings, new Label("Explicit review (select a suggestion or enter manually)"),
                 reviewAsset, reviewKind, reviewValue, reviewReference, reviewActions,
                 new Label("Saved reviews for analyzed revision"), loadReviews, savedReviews,
@@ -638,7 +650,90 @@ public final class AssetMigrateApplication extends Application {
     }
 
     private void analyze(AssetManager.AnalysisKind kind) {
-        analyze((manager, id) -> manager.analyze(id, kind));
+        analyze(useAi.isSelected() ? assistedAnalysis(kind) : (manager, id) -> manager.analyze(id, kind));
+    }
+
+    /** Runs on the worker thread: loads the saved account there, never on the JavaFX thread. */
+    static BiFunction<AssetManager, UUID, AssetManager.AnalysisResult> assistedAnalysis(AssetManager.AnalysisKind kind) {
+        return (manager, id) -> manager.analyze(id, kind, io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable());
+    }
+
+    private void refreshAiStatus() {
+        Thread worker = new Thread(() -> {
+            String text;
+            try {
+                var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
+                text = store.load().map(account -> "AI account: connected as "
+                        + account.credentials().email().orElse(account.credentials().subject())
+                        + ", model " + account.model().orElse("<none selected>"))
+                        .orElse("AI account: not connected. AI suggestions are optional.");
+            } catch (Exception e) {
+                text = "AI account: unavailable (" + e.getMessage() + ")";
+            }
+            String result = text;
+            Platform.runLater(() -> aiStatus.setText(result));
+        }, "ai-status");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void connectAi() {
+        aiStatus.setText("AI account: complete sign-in in your browser (up to 5 minutes)...");
+        Thread worker = new Thread(() -> {
+            String text;
+            try {
+                var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
+                var previous = store.load();
+                var credentials = new io.github.aiassetmigrate.auth.OAuthSession(store.hostId(),
+                        previous.map(io.github.aiassetmigrate.auth.AccountStore.Account::registration)).authorize();
+                var models = io.github.aiassetmigrate.ai.SiwcInference.listModels(
+                        new io.github.aiassetmigrate.ai.SiwcHttpTransport(), credentials.accessToken(), java.time.Duration.ofSeconds(30));
+                var model = previous.flatMap(io.github.aiassetmigrate.auth.AccountStore.Account::model)
+                        .filter(slug -> models.stream().anyMatch(m -> m.slug().equals(slug)))
+                        .or(() -> models.stream().findFirst().map(io.github.aiassetmigrate.ai.SiwcInference.Model::slug));
+                store.save(new io.github.aiassetmigrate.auth.AccountStore.Account(credentials, model));
+                text = "AI account: connected as " + credentials.email().orElse(credentials.subject())
+                        + ", model " + model.orElse("<none available>") + ". Migration approval is unchanged.";
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                text = "AI account: sign-in interrupted.";
+            } catch (Exception e) {
+                text = "AI account: sign-in failed (" + e.getMessage() + ")";
+            }
+            String result = text;
+            Platform.runLater(() -> aiStatus.setText(result));
+        }, "ai-connect");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void disconnectAi() {
+        Thread worker = new Thread(() -> {
+            String text;
+            try {
+                var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
+                var account = store.load();
+                if (account.isEmpty()) {
+                    text = "AI account: not connected.";
+                } else {
+                    var credentials = account.get().credentials();
+                    boolean revoked = new io.github.aiassetmigrate.auth.OAuthSession(store.hostId(),
+                            java.util.Optional.of(account.get().registration())).revoke(credentials);
+                    store.clear();
+                    text = "AI account: disconnected. " + (revoked ? "Remote session revoked."
+                            : "Remote revocation not confirmed; you can also disconnect in ChatGPT Settings.");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                text = "AI account: disconnect interrupted.";
+            } catch (Exception e) {
+                text = "AI account: disconnect failed (" + e.getMessage() + ")";
+            }
+            String result = text;
+            Platform.runLater(() -> aiStatus.setText(result));
+        }, "ai-disconnect");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     static BiFunction<AssetManager, UUID, AssetManager.AnalysisResult> organizationAnalysis(AssetManager.OrganizationRules rules) {

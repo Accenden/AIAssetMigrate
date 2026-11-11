@@ -254,6 +254,94 @@ public final class OAuthSession {
         }
     }
 
+    /**
+     * Exchanges the saved refresh token for new tokens (grant_type=refresh_token, existing grant
+     * kept by omitting scope). The rotating refresh token is replaced when one is returned; the
+     * caller must persist the result before using it and serialize refreshes per account.
+     */
+    public OAuthCredentials refresh(OAuthCredentials current) throws OAuthException, InterruptedException {
+        Objects.requireNonNull(current, "current");
+        if (!validClientId(current.clientId())) {
+            throw new OAuthException(OAuthException.Reason.INVALID_TOKEN_RESPONSE, "Saved credentials cannot be refreshed; sign in again.");
+        }
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("grant_type", "refresh_token");
+        parameters.put("client_id", current.clientId());
+        parameters.put("refresh_token", current.refreshToken());
+        parameters.put("resource", RESOURCE);
+        HttpResponse<byte[]> response = postForm(tokenEndpoint, parameters, Duration.ofSeconds(30));
+        if (response.statusCode() == 400 || response.statusCode() == 401) {
+            throw new OAuthException(OAuthException.Reason.TOKEN_EXCHANGE_FAILED,
+                    "The saved AI account session expired or was revoked; sign in again.");
+        }
+        if (response.statusCode() != 200) {
+            throw new OAuthException(OAuthException.Reason.NETWORK,
+                    "Token refresh failed (HTTP " + response.statusCode() + "); try again later.");
+        }
+        try {
+            JsonNode body = JSON.readTree(response.body());
+            if (body == null || !body.isObject() || body.has("error")
+                    || !"Bearer".equalsIgnoreCase(text(body, "token_type"))) throw new IOException();
+            String accessToken = text(body, "access_token");
+            String refreshToken = body.has("refresh_token") ? text(body, "refresh_token") : current.refreshToken();
+            String idToken = body.has("id_token") ? text(body, "id_token") : current.idToken();
+            Set<String> scopes = body.has("scope") ? Set.of(text(body, "scope").split(" +")) : current.scopes();
+            if (!scopes.containsAll(REQUIRED_SCOPES)) {
+                throw new OAuthException(OAuthException.Reason.INSUFFICIENT_SCOPE,
+                        "ChatGPT plan usage is no longer granted; sign in again.");
+            }
+            JsonNode expiresIn = body.get("expires_in");
+            if (expiresIn == null || !expiresIn.isIntegralNumber() || !expiresIn.canConvertToLong()
+                    || expiresIn.longValue() <= 0 || expiresIn.longValue() > 86400) throw new IOException();
+            return new OAuthCredentials(current.clientId(), current.subject(), current.email(), accessToken,
+                    refreshToken, idToken, scopes, clock.instant().plusSeconds(expiresIn.longValue()));
+        } catch (IOException | IllegalArgumentException e) {
+            throw new OAuthException(OAuthException.Reason.INVALID_TOKEN_RESPONSE,
+                    "The authorization service returned an invalid refresh response.");
+        }
+    }
+
+    /**
+     * Revokes the refresh token at the issuer's discovered revocation endpoint. Returns true
+     * only when revocation was confirmed; callers clear local credentials either way and must
+     * tell the user when remote revocation was not confirmed.
+     */
+    public boolean revoke(OAuthCredentials credentials) throws InterruptedException {
+        Objects.requireNonNull(credentials, "credentials");
+        try {
+            HttpRequest discovery = HttpRequest.newBuilder(URI.create(ISSUER + "/.well-known/openid-configuration"))
+                    .timeout(Duration.ofSeconds(15)).header("Accept", "application/json").GET().build();
+            HttpResponse<byte[]> metadata = http.sendAsync(discovery, ignored -> limitedBody(256 * 1024))
+                    .get(20, TimeUnit.SECONDS);
+            if (metadata.statusCode() != 200) return false;
+            JsonNode endpoint = JSON.readTree(metadata.body()).get("revocation_endpoint");
+            if (endpoint == null || !endpoint.isTextual()) return false;
+            URI revocation = URI.create(endpoint.textValue());
+            if (!"https".equals(revocation.getScheme()) || !"auth.openai.com".equals(revocation.getHost())) return false;
+            Map<String, String> parameters = new LinkedHashMap<>();
+            parameters.put("token", credentials.refreshToken());
+            parameters.put("token_type_hint", "refresh_token");
+            parameters.put("client_id", credentials.clientId());
+            return postForm(revocation, parameters, Duration.ofSeconds(15)).statusCode() == 200;
+        } catch (OAuthException | IOException | ExecutionException | TimeoutException | RuntimeException e) {
+            return false;
+        }
+    }
+
+    private HttpResponse<byte[]> postForm(URI endpoint, Map<String, String> parameters, Duration timeout)
+            throws OAuthException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder(endpoint).timeout(timeout)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(form(parameters))).build();
+        try {
+            return http.sendAsync(request, ignored -> limitedBody(256 * 1024))
+                    .get(timeout.toNanos() + TimeUnit.SECONDS.toNanos(5), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException | ExecutionException | CancellationException e) {
+            throw new OAuthException(OAuthException.Reason.NETWORK, "The authorization service could not be reached.");
+        }
+    }
+
     private static String text(JsonNode body, String name) throws IOException {
         JsonNode value = body.get(name);
         if (value == null || !value.isTextual() || value.textValue().isBlank()

@@ -434,6 +434,33 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         throw new UnsupportedOperationException("Analysis not implemented: " + kind);
     }
 
+    @Override public AnalysisResult analyze(UUID id, AnalysisKind kind, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        Objects.requireNonNull(kind, "kind");
+        Objects.requireNonNull(assistant, "assistant");
+        InventorySnapshot inventory = loadInventory(id);
+        AnalysisResult base = analyze(id, kind);
+        if (base.inventoryRevision() != inventory.project().inventoryRevision()) {
+            throw new IllegalStateException("Inventory changed while analyzing; retry");
+        }
+        InventorySnapshot inspected = inventory;
+        if (kind == AnalysisKind.RELATIONSHIPS || kind == AnalysisKind.MATERIALS) {
+            var references = inspectReferences(inventory);
+            inspected = new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(), inventory.project(),
+                    inventory.findings(), inventory.scanStatus(), inventory.scannedAt(), inventory.pathOutcomes(),
+                    references.references());
+        }
+        Map<UUID, String> categories = new HashMap<>();
+        if (kind == AnalysisKind.NAMES || kind == AnalysisKind.FOLDERS) {
+            for (ReviewedChange review : loadReviews(id)) {
+                if (review.kind() == ReviewedChange.Kind.CATEGORY && review.decision() == ReviewedChange.Decision.ACCEPTED
+                        && review.values().containsKey("category")) categories.put(review.assetId(), review.values().get("category"));
+            }
+        }
+        AnalysisResult result = new io.github.aiassetmigrate.ai.AIEngine(assistant).assist(kind, inspected, base, categories);
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed during AI analysis; retry");
+        return result;
+    }
+
     @Override public AnalysisResult analyzeOrganization(UUID id, OrganizationRules rules) {
         Objects.requireNonNull(rules, "rules");
         InventorySnapshot inventory = loadInventory(id);

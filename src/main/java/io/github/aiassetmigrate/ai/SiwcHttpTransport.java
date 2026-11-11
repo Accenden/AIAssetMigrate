@@ -44,9 +44,27 @@ public final class SiwcHttpTransport implements SiwcInference.Transport {
     public SiwcInference.Response post(URI endpoint, String bearerToken, byte[] jsonBody,
                                        Duration timeout, int maxResponseBytes)
             throws IOException, InterruptedException {
+        if (!SiwcInference.ENDPOINT.equals(endpoint) || jsonBody == null) throw new IOException("Invalid SIWC transport request");
+        return send(HttpRequest.newBuilder(SiwcInference.ENDPOINT)
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(jsonBody)), bearerToken, timeout, maxResponseBytes);
+    }
+
+    /** Only the model catalog endpoint may be fetched. */
+    @Override
+    public SiwcInference.Response get(URI endpoint, String bearerToken, Duration timeout, int maxResponseBytes)
+            throws IOException, InterruptedException {
+        if (!SiwcInference.MODELS_ENDPOINT.equals(endpoint)) throw new IOException("Invalid SIWC transport request");
+        return send(HttpRequest.newBuilder(SiwcInference.MODELS_ENDPOINT).header("Accept", "application/json").GET(),
+                bearerToken, timeout, maxResponseBytes);
+    }
+
+    private SiwcInference.Response send(HttpRequest.Builder builder, String bearerToken, Duration timeout,
+                                        int maxResponseBytes) throws IOException, InterruptedException {
         long started = System.nanoTime();
-        if (!SiwcInference.ENDPOINT.equals(endpoint) || bearerToken == null || bearerToken.isBlank()
-                || jsonBody == null || timeout == null || timeout.isNegative() || timeout.isZero()
+        if (bearerToken == null || bearerToken.isBlank() || bearerToken.indexOf('\r') >= 0 || bearerToken.indexOf('\n') >= 0
+                || timeout == null || timeout.isNegative() || timeout.isZero()
                 || timeout.compareTo(MAX_TIMEOUT) > 0 || maxResponseBytes <= 0
                 || maxResponseBytes > SiwcInference.MAX_RESPONSE_BYTES) {
             throw new IOException("Invalid SIWC transport request");
@@ -55,11 +73,7 @@ public final class SiwcHttpTransport implements SiwcInference.Transport {
         AtomicBoolean stopped = new AtomicBoolean();
         CompletableFuture<HttpResponse<byte[]>> future = null;
         try {
-            HttpRequest request = HttpRequest.newBuilder(SiwcInference.ENDPOINT).timeout(timeout)
-                    .header("Authorization", "Bearer " + bearerToken)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "text/event-stream")
-                    .POST(HttpRequest.BodyPublishers.ofByteArray(jsonBody)).build();
+            HttpRequest request = builder.timeout(timeout).header("Authorization", "Bearer " + bearerToken).build();
             future = client.sendAsync(request, info -> {
                 BoundedSubscriber body = new BoundedSubscriber(maxResponseBytes);
                 subscriber.set(body);
