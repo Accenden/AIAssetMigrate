@@ -20,7 +20,9 @@ class AssetMigrateCliTest {
             assertTrue(output.toString().contains("Usage: aiassetmigrate"));
             assertTrue(output.toString().contains("import"));
             assertTrue(output.toString().contains("inventory"));
-            assertTrue(output.toString().replaceAll("\\s+", " ").contains("not implemented yet"));
+            String text = output.toString().replaceAll("\\s+", " ");
+            assertTrue(text.contains("AI never approves or migrates"), text);
+            for (String command : new String[] {" validate ", " history ", " command "}) assertTrue(text.contains(command), command);
         }
     }
 

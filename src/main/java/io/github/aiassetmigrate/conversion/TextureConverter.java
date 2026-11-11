@@ -47,6 +47,18 @@ public final class TextureConverter implements ConversionStrategy {
         return asset.type() == Asset.Type.TEXTURE && source != null && target != null && !source.equals(target);
     }
 
+    @Override public String normalizeFormat(String format) { return normalize(format); }
+
+    @Override public void validateOptions(String targetFormat, Map<String, String> options) { options(targetFormat, options); }
+
+    @Override public void check(ConversionInput input) throws IOException {
+        check(input.source(), input.targetFormat(), input.options());
+    }
+
+    @Override public byte[] convert(ConversionInput input) throws IOException {
+        return convert(input.source(), input.targetFormat(), input.options());
+    }
+
     @Override public void check(byte[] source, String targetFormat, Map<String, String> options) throws IOException {
         options(targetFormat, options);
         BufferedImage image = decode(source);

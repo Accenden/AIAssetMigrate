@@ -84,9 +84,13 @@ public final class CopyExecutor {
         return new Result(true, error, steps);
     }
 
+    /** Rebuilds a conversion's input from fingerprint-verified sources each time it is needed. */
+    @FunctionalInterface
+    private interface InputSupplier { io.github.aiassetmigrate.conversion.ConversionInput get() throws IOException; }
+
     private record Prepared(MigrationCommand command, Asset asset, Path source, Path destination,
                             Map<Path, Object> identities, List<MaterialAnalysis.Rewrite> rewrites, boolean obj,
-                            List<Path> missingDirectories, ConversionStrategy strategy) {}
+                            List<Path> missingDirectories, ConversionStrategy strategy, InputSupplier input) {}
 
     /** Receiver for one prepared step; each action produces the bytes that {@link #publish} writes. */
     private final class StepReceiver implements MigrationCommand.Receiver {
@@ -126,8 +130,16 @@ public final class CopyExecutor {
 
         @Override public String convertTexture(MigrationCommand command) throws IOException {
             require(command, MigrationCommand.Operation.CONVERT_TEXTURE);
-            byte[] output = prepared.strategy.convert(verifiedSource(prepared), command.parameters().get("format"),
-                    options(command.parameters()));
+            return converted(command);
+        }
+
+        @Override public String convertModel(MigrationCommand command) throws IOException {
+            require(command, MigrationCommand.Operation.CONVERT_MODEL);
+            return converted(command);
+        }
+
+        private String converted(MigrationCommand command) throws IOException {
+            byte[] output = prepared.strategy.convert(prepared.input.get());
             return publish(prepared, index, out -> {
                 out.write(output);
                 return "Converted to " + command.parameters().get("format") + " with " + prepared.strategy.id()
@@ -138,12 +150,6 @@ public final class CopyExecutor {
 
     @FunctionalInterface
     private interface Producer { String write(OutputStream out) throws IOException; }
-
-    private static Map<String, String> options(Map<String, String> parameters) {
-        Map<String, String> options = new HashMap<>(parameters);
-        options.remove("format");
-        return options;
-    }
 
     private static final int MAX_REWRITE_BYTES = 64 * 1024 * 1024;
 
@@ -177,7 +183,8 @@ public final class CopyExecutor {
         for (MigrationCommand command : plan.commands()) {
             if (!ids.add(command.id()) || !usedAssets.add(command.assetId())) throw new IOException("Duplicate command or asset");
             boolean rewriting = command.operation() == MigrationCommand.Operation.REWRITE_REFERENCES;
-            boolean converting = command.operation() == MigrationCommand.Operation.CONVERT_TEXTURE;
+            boolean converting = command.operation() == MigrationCommand.Operation.CONVERT_TEXTURE
+                    || command.operation() == MigrationCommand.Operation.CONVERT_MODEL;
             if ((command.operation() == MigrationCommand.Operation.COPY && !command.parameters().isEmpty())
                     || (converting != command.converterRequirement().isPresent()))
                 throw new IOException("Command parameters or converter requirement are not valid for " + command.operation());
@@ -193,7 +200,9 @@ public final class CopyExecutor {
             Path relative = command.relativeOutputPath();
             String dest = portable(relative);
             if (!dest.equals(entry.destination().orElseThrow())) throw new IOException("Output differs from reviewed preview");
-            if (!rewrites.equals(entry.rewrites()) || (rewriting && rewrites.isEmpty()))
+            // A converted OBJ's reviewed rewrites apply to its conversion input, never to the command itself.
+            List<MaterialAnalysis.Rewrite> commandRewrites = converting ? List.of() : entry.rewrites();
+            if (!rewrites.equals(commandRewrites) || (rewriting && rewrites.isEmpty()))
                 throw new IOException("Reference rewrites differ from reviewed preview");
             ConversionStrategy strategy = null;
             if (converting || !entry.conversion().isEmpty()) {
@@ -201,6 +210,8 @@ public final class CopyExecutor {
                     throw new IOException("Conversion differs from reviewed preview");
                 String format = entry.conversion().get("format");
                 strategy = Converters.find(asset, format).orElseThrow(() -> new IOException("No installed converter supports this conversion"));
+                if ((command.operation() == MigrationCommand.Operation.CONVERT_MODEL) != (asset.type() == Asset.Type.MODEL))
+                    throw new IOException("Conversion operation does not match the asset type");
                 if (!strategy.id().equals(command.converterRequirement().orElseThrow()))
                     throw new IOException("Approved converter " + command.converterRequirement().orElseThrow() + " is not the installed choice");
             }
@@ -234,9 +245,14 @@ public final class CopyExecutor {
             identities.put(src, sourceIdentity(src));
             if (!hash(src).equals(asset.fingerprint())) throw new IOException("Source fingerprint changed: " + src);
             verify(identities);
+            InputSupplier input = null;
+            if (strategy != null) {
+                ConversionInputs.SourceBytes sources = dependency -> verifiedBytes(source.resolve(dependency.relativePath()), dependency);
+                input = () -> ConversionInputs.build(snapshot, preview, asset.id(), sources);
+            }
             Prepared prepared = new Prepared(command, asset, src, target, Map.copyOf(identities), rewrites, obj,
-                    List.copyOf(missing), strategy);
-            if (strategy != null) strategy.check(verifiedSource(prepared), entry.conversion().get("format"), options(command.parameters()));
+                    List.copyOf(missing), strategy, input);
+            if (strategy != null) strategy.check(input.get());
             result.add(prepared);
         }
         return result;
@@ -292,13 +308,20 @@ public final class CopyExecutor {
 
     /** Reads bounded source bytes and verifies them against the inventory fingerprint. */
     private static byte[] verifiedSource(Prepared p) throws IOException {
+        return verifiedBytes(p.source, p.asset);
+    }
+
+    /** Reads a bounded, link-free inventoried file and verifies it against its fingerprint. */
+    private static byte[] verifiedBytes(Path file, Asset asset) throws IOException {
+        SafeStoragePaths.validateExistingPath(file);
+        SafeStoragePaths.requireRegularFile(file);
         byte[] source;
-        try (InputStream in = Files.newInputStream(p.source, LinkOption.NOFOLLOW_LINKS)) {
+        try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
             source = in.readNBytes(MAX_REWRITE_BYTES + 1);
         }
         if (source.length > MAX_REWRITE_BYTES) throw new IOException("File is too large to transform");
-        if (!HexFormat.of().formatHex(digest().digest(source)).equals(p.asset.fingerprint()))
-            throw new IOException("Source fingerprint changed");
+        if (!HexFormat.of().formatHex(digest().digest(source)).equals(asset.fingerprint()))
+            throw new IOException("Source fingerprint changed: " + PortablePath.of(asset.relativePath()));
         return source;
     }
 

@@ -218,6 +218,9 @@ class DefaultAssetManagerTest {
         assertThrows(java.io.UncheckedIOException.class, () -> manager.watch(UUID.randomUUID(), 0, event -> {}));
         assertThrows(ImportException.class, () -> manager.analyze(UUID.randomUUID(), AssetManager.AnalysisKind.CATEGORIES));
         assertThrows(ImportException.class, () -> manager.checkCompatibility(UUID.randomUUID(), new AssetManager.TargetProfile("target", "1")));
+        assertThrows(java.io.UncheckedIOException.class, () -> manager.validate(UUID.randomUUID()));
+        assertThrows(ImportException.class, () -> manager.history(UUID.randomUUID()));
+        assertFalse(Files.exists(state), "validation lookups create no state");
         manager.close();
         assertThrows(IllegalStateException.class, () -> manager.importAssets(source));
     }

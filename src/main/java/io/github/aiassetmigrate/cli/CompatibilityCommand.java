@@ -27,15 +27,25 @@ public final class CompatibilityCommand implements Callable<Integer> {
     private Path stateDirectory;
     @Option(names = "--log-directory", required = true, paramLabel = "DIR", description = "Event log directory.")
     private Path logDirectory;
+    @Option(names = "--ai", description = {
+            "Add advisory AI explanations from the connected ChatGPT account (see 'auth').",
+            "Sends issue codes, counts and relative example paths; never file contents.",
+            "Every rule-based finding is kept; if AI is unavailable an AI_UNAVAILABLE finding is added."})
+    private boolean ai;
     @Spec private CommandSpec spec;
 
     private final ImportCommand.ManagerFactory managerFactory;
+    private final AnalyzeCommand.AssistantFactory assistantFactory;
 
     public CompatibilityCommand() { this(DefaultAssetManager::new); }
-    CompatibilityCommand(ImportCommand.ManagerFactory managerFactory) { this.managerFactory = managerFactory; }
+    CompatibilityCommand(ImportCommand.ManagerFactory managerFactory) { this(managerFactory, AnalyzeCommand::connectedAssistant); }
+    CompatibilityCommand(ImportCommand.ManagerFactory managerFactory, AnalyzeCommand.AssistantFactory assistantFactory) {
+        this.managerFactory = managerFactory;
+        this.assistantFactory = assistantFactory;
+    }
 
     @Override public Integer call() {
-        if (listTargets ? projectId != null || targetId != null || targetVersion != null
+        if (listTargets ? projectId != null || targetId != null || targetVersion != null || ai
                 : projectId == null || targetId == null || targetId.isBlank()
                         || targetVersion == null || targetVersion.isBlank()) {
             spec.commandLine().getErr().println("Specify --list-targets without project or target options, or --project, --target and --target-version together.");
@@ -54,7 +64,8 @@ public final class CompatibilityCommand implements Callable<Integer> {
                         out.printf("  ID: %s Version: %s%n", ImportCommand.safe(target.id()), ImportCommand.safe(target.version()));
                     }
                 } else {
-                    var result = manager.assessCompatibility(projectId, new AssetManager.TargetProfile(targetId, targetVersion));
+                    var target = new AssetManager.TargetProfile(targetId, targetVersion);
+                    var result = ai ? manager.assessCompatibility(projectId, target, assistant()) : manager.assessCompatibility(projectId, target);
                     out.printf("Target: %s Version: %s%n", ImportCommand.safe(result.target().id()), ImportCommand.safe(result.target().version()));
                     out.println("Inventory revision: " + result.inventoryRevision());
                     out.println("Findings (" + result.findings().size() + "):");
@@ -75,5 +86,10 @@ public final class CompatibilityCommand implements Callable<Integer> {
             spec.commandLine().getErr().println("Compatibility failed: " + ImportCommand.safe(e.getMessage()));
             return 1;
         }
+    }
+
+    private io.github.aiassetmigrate.ai.LLMClient assistant() {
+        try { return assistantFactory.create(); }
+        catch (io.github.aiassetmigrate.ai.LLMClient.AiException e) { return io.github.aiassetmigrate.ai.OpenAIAdapter.unavailable(e); }
     }
 }

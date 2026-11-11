@@ -66,8 +66,27 @@ public interface AssetManager {
     /** Performs a read-only compatibility assessment bound to an inventory revision. */
     CompatibilityResult assessCompatibility(UUID projectId, TargetProfile target);
 
+    /**
+     * Hybrid F05: the rule-based assessment plus AI_EXPLANATION findings from the explicitly supplied
+     * model. Every rule-based finding is kept; if the model fails an AI_UNAVAILABLE finding is added.
+     */
+    default CompatibilityResult assessCompatibility(UUID projectId, TargetProfile target,
+                                                    io.github.aiassetmigrate.ai.LLMClient assistant) {
+        throw new UnsupportedOperationException("AI-assisted compatibility is not supported by this manager");
+    }
+
     /** Creates a draft only; generating a plan never approves it. */
     MigrationPlan createPlan(UUID projectId, TargetProfile target, Path outputRoot);
+
+    /**
+     * Hybrid F06: as {@link #createPlan(UUID, TargetProfile, Path)}, with steps proposed by the
+     * explicitly supplied model and checked by the controller. Proposals are recorded as non-blocking
+     * findings and never change the plan's commands; a new step needs a review and a new plan.
+     */
+    default MigrationPlan createPlan(UUID projectId, TargetProfile target, Path outputRoot,
+                                     io.github.aiassetmigrate.ai.LLMClient assistant) {
+        throw new UnsupportedOperationException("AI-assisted planning is not supported by this manager");
+    }
 
     /** Loads a saved plan for inspection; status alone is not execution authority. */
     MigrationPlan loadPlan(UUID planId);
@@ -81,12 +100,42 @@ public interface AssetManager {
     /** Loads the single-use run record for a plan, including interrupted runs. */
     MigrationRun loadRun(UUID planId);
 
+    /**
+     * Read-only check of the outputs a run recorded (existence, readability, published hash,
+     * PNG/JPEG decoding, OBJ/MTL text and references); unsupported checks are UNKNOWN, never
+     * passed. Saves and returns a new Report with a deterministic summary. Fails if the run is
+     * unknown or the project is busy (for example, a migration is running).
+     */
     Report validate(UUID runId);
 
+    /**
+     * As {@link #validate(UUID)}, adding an advisory AI summary from the explicitly supplied
+     * model. The status and findings are computed first and never depend on the model; the
+     * model sees statuses, counts, finding codes and relative paths only. If the model fails or
+     * its text is rejected, the report keeps only the deterministic summary.
+     */
+    default Report validate(UUID runId, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        throw new UnsupportedOperationException("AI-assisted validation is not supported by this manager");
+    }
+
+    /** Saved validation reports for the project, oldest first; empty when there is no history. */
     List<Report> history(UUID projectId);
 
-    /** Interprets allowlisted actions, but cannot grant approval. */
+    /**
+     * Natural-language commands need a model; without one this returns an AI_UNAVAILABLE result
+     * and performs no action.
+     */
     CommandResult command(UUID projectId, String request);
+
+    /**
+     * F09: interprets the request with the explicitly supplied model as one allowlisted action and
+     * dispatches it through this facade. It can show, analyze, check, preview, draft plans and
+     * validate, but never approve, migrate or save reviews; file changes still need an approved plan.
+     * Ambiguous requests return a clarification; failures are returned as findings, not thrown.
+     */
+    default CommandResult command(UUID projectId, String request, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        throw new UnsupportedOperationException("Natural-language commands are not supported by this manager");
+    }
 
     /**
      * Replays events strictly after the cursor, then follows live events. Setup failures

@@ -30,6 +30,7 @@ public record AssetOperationCommand(UUID id, UUID assetId, Operation operation,
             case COPY -> receiver.copy(this);
             case REWRITE_REFERENCES -> receiver.rewriteReferences(this);
             case CONVERT_TEXTURE -> receiver.convertTexture(this);
+            case CONVERT_MODEL -> receiver.convertModel(this);
         };
     }
 }

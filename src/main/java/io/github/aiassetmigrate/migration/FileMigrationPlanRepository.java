@@ -202,6 +202,43 @@ public final class FileMigrationPlanRepository {
                 started.outputRoot(), RunStatus.INCOMPLETE, started.stepStatuses(), started.createdAt(), started.startedAt(), Optional.empty());
     }
 
+    /** A run together with the approved plan it executed. */
+    public record FoundRun(StoredPlan plan, MigrationRun run) {
+        public FoundRun {
+            Objects.requireNonNull(plan, "plan");
+            Objects.requireNonNull(run, "run");
+        }
+    }
+
+    /**
+     * Finds a run by its ID across all plans. Plan directories that cannot be read are counted
+     * and reported if the run is not found, never silently treated as "no such run".
+     */
+    public Optional<FoundRun> findRun(UUID runId) throws IOException {
+        Objects.requireNonNull(runId, "runId");
+        Path root = state.resolve("plans");
+        SafeStoragePaths.validateExistingPath(root);
+        if (!exists(root)) return Optional.empty();
+        int unreadable = 0;
+        try (var entries = Files.newDirectoryStream(root)) {
+            for (Path entry : entries) {
+                UUID planId;
+                try { planId = UUID.fromString(entry.getFileName().toString()); }
+                catch (IllegalArgumentException notAPlan) { continue; }
+                if (!planId.toString().equals(entry.getFileName().toString())) continue;
+                if (!exists(entry.resolve("started.json"))) continue;
+                try {
+                    MigrationRun run = loadRun(planId);
+                    if (run.id().equals(runId)) return Optional.of(new FoundRun(load(planId), run));
+                } catch (IOException | RuntimeException e) {
+                    unreadable++;
+                }
+            }
+        }
+        if (unreadable > 0) throw new IOException("Run " + runId + " was not found; " + unreadable + " run record(s) could not be read");
+        return Optional.empty();
+    }
+
     private MigrationRun finishLocked(UUID planId, UUID runId, ExecutionResult execution) throws IOException {
         RunStatus status = execution.status();
         Map<UUID, StepStatus> steps = execution.steps();

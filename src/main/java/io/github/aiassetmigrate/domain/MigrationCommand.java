@@ -14,7 +14,8 @@ import java.util.UUID;
  * Holding a command grants no authority: the invoker must verify the approved plan first.
  */
 public sealed interface MigrationCommand permits AssetOperationCommand {
-    enum Operation { COPY, CONVERT_TEXTURE, REWRITE_REFERENCES }
+    /** Values are only ever added, so saved plans stay readable. */
+    enum Operation { COPY, CONVERT_TEXTURE, REWRITE_REFERENCES, CONVERT_MODEL }
 
     UUID id();
     UUID assetId();
@@ -32,5 +33,6 @@ public sealed interface MigrationCommand permits AssetOperationCommand {
         String copy(MigrationCommand command) throws IOException;
         String rewriteReferences(MigrationCommand command) throws IOException;
         String convertTexture(MigrationCommand command) throws IOException;
+        String convertModel(MigrationCommand command) throws IOException;
     }
 }

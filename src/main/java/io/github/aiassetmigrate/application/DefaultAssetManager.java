@@ -11,7 +11,9 @@ import io.github.aiassetmigrate.migration.CopyExecutor;
 import io.github.aiassetmigrate.migration.FileMigrationPlanRepository;
 import io.github.aiassetmigrate.inventory.AssetScanner;
 import io.github.aiassetmigrate.inventory.FileAssetRepository;
+import io.github.aiassetmigrate.inventory.FileReportRepository;
 import io.github.aiassetmigrate.inventory.FileReviewedChangeRepository;
+import io.github.aiassetmigrate.validation.OutputValidator;
 import io.github.aiassetmigrate.inventory.SafeStoragePaths;
 import io.github.aiassetmigrate.logging.LogPublisher;
 
@@ -629,12 +631,16 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                 case CONVERSION -> {
                     String format = requireValue(values, "format");
                     Asset asset = assets.get(change.assetId());
-                    String target = io.github.aiassetmigrate.conversion.TextureConverter.normalize(format);
+                    String target = io.github.aiassetmigrate.conversion.Converters.normalizeFormat(format);
                     if (change.decision() == ReviewedChange.Decision.ACCEPTED) {
-                        if (target == null || io.github.aiassetmigrate.conversion.Converters.find(asset, target).isEmpty()) {
-                            throw new IllegalArgumentException("No installed converter supports converting this asset to " + format);
+                        var strategy = target == null ? Optional.<io.github.aiassetmigrate.conversion.ConversionStrategy>empty()
+                                : io.github.aiassetmigrate.conversion.Converters.find(asset, target);
+                        if (strategy.isEmpty()) {
+                            String reason = asset.type() == Asset.Type.MODEL && !io.github.aiassetmigrate.conversion.AssimpModelConverter.available()
+                                    ? " (model conversion is unavailable: " + io.github.aiassetmigrate.conversion.AssimpModelConverter.unavailableReason() + ")" : "";
+                            throw new IllegalArgumentException("No installed converter supports converting this asset to " + format + reason);
                         }
-                        io.github.aiassetmigrate.conversion.TextureConverter.options(target, values);
+                        strategy.get().validateOptions(target, values);
                     }
                 }
                 case ACKNOWLEDGMENT -> {
@@ -757,7 +763,27 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed during compatibility assessment; retry");
         return new CompatibilityResult(inventory.project().inventoryRevision(), target, findings);
     }
+
+    @Override public CompatibilityResult assessCompatibility(UUID id, TargetProfile target,
+                                                             io.github.aiassetmigrate.ai.LLMClient assistant) {
+        Objects.requireNonNull(assistant, "assistant");
+        CompatibilityResult base = assessCompatibility(id, target);
+        List<Finding> findings = new ArrayList<>(base.findings());
+        findings.addAll(new io.github.aiassetmigrate.ai.AIEngine(assistant).explainCompatibility(target, base.findings()));
+        return new CompatibilityResult(base.inventoryRevision(), target, findings);
+    }
     @Override public MigrationPlan createPlan(UUID id, TargetProfile target, Path output) {
+        return createPlan(id, target, output, Optional.empty());
+    }
+
+    @Override public MigrationPlan createPlan(UUID id, TargetProfile target, Path output,
+                                              io.github.aiassetmigrate.ai.LLMClient assistant) {
+        Objects.requireNonNull(assistant, "assistant");
+        return createPlan(id, target, output, Optional.of(assistant));
+    }
+
+    private MigrationPlan createPlan(UUID id, TargetProfile target, Path output,
+                                     Optional<io.github.aiassetmigrate.ai.LLMClient> assistant) {
         Objects.requireNonNull(target, "target");
         Objects.requireNonNull(output, "output");
         if (!output.isAbsolute()) throw new IllegalArgumentException("Output root must be absolute");
@@ -781,10 +807,16 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     .map(FileReviewedChangeRepository.ReviewSet::changes).orElse(List.of());
             var preview = previewOrganization(id, inventory.project().inventoryRevision());
             var compatibility = assessCompatibility(id, target);
-            if (!loadInventory(id).equals(inventory)) throw new IOException("Inventory changed during planning");
             List<Finding> planFindings = new ArrayList<>(compatibility.findings());
-            planFindings.addAll(conversionChecks(inventory, preview));
-            var draft = CopyPlanBuilder.draft(inventory, decisions, preview, target, root, UUID.randomUUID(),
+            planFindings.addAll(conversionChecks(inventory, preview, target));
+            UUID planId = UUID.randomUUID();
+            if (assistant.isPresent()) {
+                // AI proposals are checked by the controller and recorded as findings; commands stay deterministic.
+                planFindings.addAll(new io.github.aiassetmigrate.ai.AIEngine(assistant.get()).plan(inventory, preview,
+                        CopyPlanBuilder.commands(inventory, preview, planId), target));
+            }
+            if (!loadInventory(id).equals(inventory)) throw new IOException("Inventory changed during planning");
+            var draft = CopyPlanBuilder.draft(inventory, decisions, preview, target, root, planId,
                     Instant.now(), planFindings);
             return new FileMigrationPlanRepository(stateDirectory).createDraft(draft, reviewRevision);
         } catch (IOException e) {
@@ -792,36 +824,60 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
     }
 
-    /** Runs each reviewed conversion's strategy check on the fingerprinted source; failures block approval. */
-    private static List<Finding> conversionChecks(InventorySnapshot inventory, OrganizationPreview.Result preview) {
+    /**
+     * Runs each reviewed conversion's strategy check on exactly the input execution will use
+     * (fingerprint-verified sources, reviewed rewrites and texture conversions applied); failures block
+     * approval. Converted models also get a standing fidelity warning, and a GLB warning for Unity.
+     */
+    private static List<Finding> conversionChecks(InventorySnapshot inventory, OrganizationPreview.Result preview,
+                                                  TargetProfile target) {
         Map<UUID, Asset> assets = new HashMap<>();
         inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
         List<Finding> findings = new ArrayList<>();
+        Path root = inventory.project().sourceRoot();
+        io.github.aiassetmigrate.migration.ConversionInputs.SourceBytes sources = asset -> verifiedSource(root, asset);
         for (var entry : preview.entries()) {
             if (entry.conversion().isEmpty() || entry.excluded()) continue;
             Asset asset = assets.get(entry.assetId());
-            String format = entry.conversion().get("format");
-            Map<String, String> options = new HashMap<>(entry.conversion());
-            options.remove("format");
             try {
-                var strategy = io.github.aiassetmigrate.conversion.Converters.find(asset, format)
-                        .orElseThrow(() -> new IOException("No installed converter supports this conversion"));
-                Path file = inventory.project().sourceRoot().resolve(asset.relativePath());
-                SafeStoragePaths.requireRegularFile(file);
-                byte[] bytes;
-                try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
-                    bytes = input.readNBytes(64 * 1024 * 1024 + 1);
-                }
-                if (bytes.length > 64 * 1024 * 1024) throw new IOException("Texture is too large to convert");
-                String hash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
-                if (!hash.equals(asset.fingerprint())) throw new IOException("Source changed since the inventory scan");
-                strategy.check(bytes, format, options);
-            } catch (IOException | java.security.NoSuchAlgorithmException e) {
+                var strategy = io.github.aiassetmigrate.migration.ConversionInputs.strategy(asset, entry);
+                strategy.check(io.github.aiassetmigrate.migration.ConversionInputs.build(inventory, preview, asset.id(), sources));
+            } catch (IOException | RuntimeException e) {
                 findings.add(new Finding(UUID.randomUUID(), Optional.of(asset.id()), Optional.of(asset.relativePath()),
-                        Finding.Severity.ERROR, "CONVERSION_CHECK_FAILED", e.getMessage()));
+                        Finding.Severity.ERROR, "CONVERSION_CHECK_FAILED", e.getMessage() == null ? e.toString() : e.getMessage()));
+                continue;
+            }
+            if (asset.type() == Asset.Type.MODEL) {
+                findings.add(new Finding(UUID.randomUUID(), Optional.of(asset.id()), Optional.of(asset.relativePath()),
+                        Finding.Severity.WARNING, "MODEL_CONVERSION_FIDELITY", "Converting to GLB with Assimp "
+                        + io.github.aiassetmigrate.conversion.AssimpModelConverter.assimpVersion() + " approximates materials (for"
+                        + " example MTL colours become PBR values); validation checks the file, not how it looks in the engine"));
+                if (target.id().equals("unity")) {
+                    findings.add(new Finding(UUID.randomUUID(), Optional.of(asset.id()), Optional.of(asset.relativePath()),
+                            Finding.Severity.WARNING, "GLB_REQUIRES_GLTFAST", "Unity imports GLB only with the glTFast package"
+                            + " (com.unity.cloud.gltfast); the original model format imports natively"));
+                }
             }
         }
         return findings;
+    }
+
+    /** Reads an inventoried source file within the conversion limit and checks it against its fingerprint. */
+    private static byte[] verifiedSource(Path root, Asset asset) throws IOException {
+        Path file = root.resolve(asset.relativePath());
+        SafeStoragePaths.requireRegularFile(file);
+        byte[] bytes;
+        try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+            bytes = input.readNBytes(64 * 1024 * 1024 + 1);
+        }
+        if (bytes.length > 64 * 1024 * 1024) throw new IOException(asset.relativePath() + " is too large to convert");
+        try {
+            String hash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+            if (!hash.equals(asset.fingerprint())) throw new IOException("Source changed since the inventory scan: " + asset.relativePath());
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new AssertionError(e);
+        }
+        return bytes;
     }
 
     @Override public MigrationPlan loadPlan(UUID planId) {
@@ -917,9 +973,111 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         return new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(), inventory.project(),
                 inventory.findings(), inventory.scanStatus(), inventory.scannedAt(), inventory.pathOutcomes(), analysis.references());
     }
-    @Override public Report validate(UUID id) { throw new UnsupportedOperationException(); }
-    @Override public List<Report> history(UUID id) { throw new UnsupportedOperationException(); }
-    @Override public CommandResult command(UUID id, String request) { throw new UnsupportedOperationException(); }
+    @Override public Report validate(UUID runId) {
+        return validateRun(runId, Optional.empty());
+    }
+
+    @Override public Report validate(UUID runId, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        Objects.requireNonNull(assistant, "assistant");
+        return validateRun(runId, Optional.of(assistant));
+    }
+
+    /**
+     * Checks outputs under the project lock, so no migration can run meanwhile; the optional AI
+     * summary is requested after the lock is released and cannot alter the computed result.
+     */
+    private Report validateRun(UUID runId, Optional<io.github.aiassetmigrate.ai.LLMClient> assistant) {
+        ensureOpen();
+        Objects.requireNonNull(runId, "runId");
+        try {
+            var plans = new FileMigrationPlanRepository(stateDirectory);
+            var found = plans.findRun(runId).orElseThrow(() -> new IOException("Run not found: " + runId));
+            MigrationPlan plan = found.plan().plan();
+            UUID project = plan.projectId();
+            Path sourceRoot = repository.loadLatest(project)
+                    .orElseThrow(() -> new IOException("Project not found: " + project)).project().sourceRoot();
+            InventorySnapshot inventory = repository.loadRevision(project, plan.inventoryRevision());
+            validatePaths(sourceRoot, project);
+            MigrationRun run;
+            OutputValidator.Result result;
+            try (var ignored = repository.beginWrite(project, sourceRoot)) {
+                run = plans.loadRun(plan.id());
+                if (!run.id().equals(runId)) throw new IOException("Run record changed during validation");
+                result = OutputValidator.validate(plan, run, inventory);
+            }
+            List<Finding> findings = new ArrayList<>(result.findings());
+            Optional<String> aiSummary = Optional.empty();
+            if (assistant.isPresent()) {
+                var summary = new io.github.aiassetmigrate.ai.AIEngine(assistant.get())
+                        .summarizeValidation(result.status(), run.status(), result.counts(), result.findings());
+                findings.addAll(summary.findings());
+                aiSummary = summary.summary();
+            }
+            Report report = new Report(UUID.randomUUID(), project, plan.id(), run.id(), run.status(), result.status(),
+                    findings, result.summary(), aiSummary, Instant.now());
+            validatePaths(sourceRoot, project);
+            try (Publisher publisher = acquireWriter(project)) {
+                publisher.publish(LogEvent.Level.INFO, "Saving validation report " + report.id() + " for run " + runId);
+                try (var ignored = repository.beginWrite(project, sourceRoot)) {
+                    new FileReportRepository(stateDirectory).save(report);
+                }
+                try {
+                    publisher.publish(report.validationStatus() == Report.ValidationStatus.FAILED ? LogEvent.Level.ERROR
+                            : report.validationStatus() == Report.ValidationStatus.PASSED ? LogEvent.Level.INFO : LogEvent.Level.WARNING,
+                            "Validation report " + report.id() + " saved: " + report.validationStatus());
+                } catch (IOException e) {
+                    throw new IOException("Validation report " + report.id() + " was saved, but completion logging failed", e);
+                }
+            }
+            return report;
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot validate run " + runId + ": " + e.getMessage(), e);
+        }
+    }
+
+    @Override public List<Report> history(UUID id) {
+        ensureOpen();
+        Objects.requireNonNull(id, "projectId");
+        InventorySnapshot snapshot = loadInventory(id);
+        try {
+            validatePaths(snapshot.project().sourceRoot(), id);
+            return new FileReportRepository(stateDirectory).list(id);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot load validation history for project " + id + ": " + e.getMessage(), e);
+        }
+    }
+    @Override public CommandResult command(UUID id, String request) {
+        ensureOpen();
+        requireRequest(request);
+        loadInventory(id);
+        return new CommandResult("Natural-language commands need a connected AI account ('auth connect'); no action was taken.",
+                Optional.empty(), List.of(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(),
+                        Finding.Severity.WARNING, "AI_UNAVAILABLE", "No model was supplied for this request")));
+    }
+
+    @Override public CommandResult command(UUID id, String request, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        ensureOpen();
+        Objects.requireNonNull(assistant, "assistant");
+        requireRequest(request);
+        InventorySnapshot inventory = loadInventory(id);
+        Map<String, Integer> types = new HashMap<>();
+        inventory.project().assets().forEach(asset -> types.merge(asset.type().name(), 1, Integer::sum));
+        var context = new io.github.aiassetmigrate.ai.AIEngine.CommandContext(id, inventory.project().inventoryRevision(),
+                types, supportedTargets());
+        var interpretation = new io.github.aiassetmigrate.ai.AIEngine(assistant).interpret(request, context);
+        if (interpretation.intent().isEmpty()) {
+            return new CommandResult("The request could not be interpreted; no action was taken. Rephrase it or use the explicit commands.",
+                    Optional.empty(), interpretation.findings());
+        }
+        return new CommandDispatcher(this).dispatch(id, interpretation.intent().get(), interpretation.findings());
+    }
+
+    private static void requireRequest(String request) {
+        Objects.requireNonNull(request, "request");
+        if (request.isBlank() || request.length() > io.github.aiassetmigrate.ai.AIEngine.MAX_REQUEST_LENGTH) {
+            throw new IllegalArgumentException("Request must be 1 to " + io.github.aiassetmigrate.ai.AIEngine.MAX_REQUEST_LENGTH + " characters");
+        }
+    }
     @Override public synchronized LogSubscription watch(UUID id, long sequence, LogObserver observer) {
         ensureOpen();
         Objects.requireNonNull(id, "projectId");

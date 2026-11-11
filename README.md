@@ -21,8 +21,14 @@ assessment is available. Draft plans, explicit approval and migration (copies pl
 OBJ/MTL reference rewrites) are available with the restrictions below. Optional
 AI suggestions for F02-F04 (`analyze KIND --ai`, or the GUI checkbox) use a
 connected ChatGPT account and are validated before display. PNG/JPEG texture
-conversion is available through a reviewed `CONVERSION`; model conversion, AI
-planning, natural-language commands and report workflows are not implemented. Import and format-level checks do not establish
+conversion is available through a reviewed `CONVERSION`. Migrated outputs can be
+validated and the saved reports listed (`validate`, `history`), with an optional
+advisory AI summary. Optional AI also explains compatibility findings
+(`compatibility --ai`), proposes plan steps that the controller checks (`plan --ai`)
+and interprets plain-language requests (`command`). The GUI has an Agent Commands
+panel and a Live Logs viewer. OBJ and FBX models can be converted to
+self-contained GLB with the Assimp library that Maven bundles (no separate install).
+Import and format-level checks do not establish
 successful import or rendering in a target engine.
 
 ## Build and Run
@@ -70,32 +76,32 @@ Maven launch commands above until application packaging is implemented.
 ## Structure
 
 - `domain`: immutable asset, plan, command, run, report, and event contracts.
-- `application`: the shared `AssetManager` boundary and file-backed import service.
-- `inventory`: scanning, limited format inspection and revisioned inventory storage.
-- `logging`: file-backed `LogPublisher`, replay, and asynchronous subscriptions.
+- `application`: the shared `AssetManager` facade, `DefaultAssetManager` and the F09 `CommandDispatcher`.
+- `inventory`: scanning, limited format inspection, revisioned inventory storage and saved reports.
+- `logging`: file-backed `LogPublisher`, replay, asynchronous subscriptions and the read-only `LogFollower`.
 - `auth`: OpenAI public-client OAuth with PKCE, loopback callbacks, and signed identity validation.
 - `analysis`: conservative categorization and bounded OBJ/MTL reference analysis.
 - `compatibility`: versioned, documented format rules and coverage findings.
-- `cli`: picocli import, analysis, review and logs commands, independent of JavaFX startup.
+- `cli`: picocli commands for every feature (import through `validate`, `history` and `command`), independent of JavaFX.
 - `conversion`: `ConversionStrategy` implementations (`TextureConverter`, `ModelConverter`).
-- `ai`: `LLMClient`, `OpenAIAdapter`, `AIEngine` and the Sign in with ChatGPT client.
-- `gui`: JavaFX import, inventory, analysis and review displays.
+- `ai`: `LLMClient`, `OpenAIAdapter`, `AIEngine` (suggestions, explanations, plan proposals, summaries, interpretation) and the Sign in with ChatGPT client.
+- `validation`: `OutputValidator`, the read-only F08 output checks.
+- `gui`: JavaFX tabs for every feature, including Agent Commands and Live Logs.
 - `src/test`: JUnit 5 contract and CLI tests, including temporary-directory tests.
 
-The shared facade implements import, rescan, inventory loading, analysis, review and compatibility checks.
-Later workflow methods explicitly reject unsupported operations. A plan data object is not
-authorization to write files; a later execution implementation must validate
-explicit approval and source fingerprints before execution.
+The shared facade implements every feature (F01-F10). A plan data object is not
+authorization to write files: execution validates explicit approval and source
+fingerprints first, and no AI path can approve or migrate.
 
 ## Design Patterns
 
 | Pattern | Roles in the code |
 | --- | --- |
-| **Facade** | `AssetManager` (interface) / `DefaultAssetManager`: the single entry point the CLI and GUI use for import, analysis, review, planning, approval, migration and logs. |
+| **Facade** | `AssetManager` (interface) / `DefaultAssetManager`: the single entry point the CLI and GUI use for import, analysis, review, planning, approval, migration, validation, natural-language commands and logs. |
 | **Command** | `MigrationCommand` is the command, with `execute(Receiver)`; `AssetOperationCommand` is the concrete command; `MigrationPlan` stores commands in order; `CopyExecutor` is the invoker and supplies a `MigrationCommand.Receiver` that performs `copy`, `rewriteReferences` or `convertTexture`. |
-| **Strategy** | `ConversionStrategy` is the strategy; `TextureConverter` (PNG/JPEG via ImageIO) and `ModelConverter` (truthfully unsupported) are concrete strategies; `Converters` selects one by `supports()`, and the approved command records its ID. |
+| **Strategy** | `ConversionStrategy` is the strategy; `TextureConverter` (PNG/JPEG via ImageIO) and `AssimpModelConverter` (OBJ/FBX to GLB via LWJGL's bundled Assimp) are concrete strategies; `Converters` selects one by `supports()`, and the approved command records its versioned ID. |
 | **Adapter** | `LLMClient` is the target interface; `OpenAIAdapter` adapts it to OpenAI's Responses API (`SiwcInference`); `AIEngine` is the client. |
-| **Observer** | `LogPublisher` is the subject; `LogObserver` is the observer (`update(event)`), registered through `subscribe(...)` / `AssetManager.watch(...)`; the CLI `logs --follow` viewer observes it. |
+| **Observer** | `LogPublisher` is the subject; `LogObserver` is the observer (`update(event)`), registered through `subscribe(...)` / `AssetManager.watch(...)`; `LogFollower` delivers committed events to read-only viewers such as the GUI Live Logs tab, which marshals each `update` onto the JavaFX thread. |
 
 ## Import
 
@@ -325,6 +331,12 @@ The Unity 6000.0 profile is based on the official Unity 6.0 documentation for
 and [texture import](https://docs.unity3d.com/6000.0/Documentation/Manual/ImportingTextures.html).
 Material fidelity and unsupported or undocumented requirements remain unknown.
 
+**AI explanations (hybrid F05).** `compatibility ... --ai`, or the GUI checkbox, adds
+one advisory `AI_EXPLANATION` finding per non-INFO issue code. The model sees the
+target, issue codes, severities, counts and up to three relative example paths;
+never finding messages, contents or absolute paths. Every rule-based finding is
+kept, and if the model fails an `AI_UNAVAILABLE` finding is added instead.
+
 ## Migration
 
 Use `plan --project PROJECT-UUID --target unity --target-version 6000.0 --output
@@ -334,6 +346,17 @@ Then explicitly use `approve --plan PLAN-UUID --version 1`, followed by the
 separate `migrate --plan PLAN-UUID` command. Use `show-run --plan PLAN-UUID` to
 inspect the recorded outcome, including an interrupted run. The GUI provides the
 same separate draft, approval and migration steps.
+
+**AI-proposed steps (hybrid F06).** `plan ... --ai`, or the GUI checkbox, asks the
+model to propose one step per asset. The controller checks every proposal against
+the inventory, the reviewed organization, the installed converters and destination
+conflicts. A step that matches the reviewed command is recorded as `AI_PLAN_STEP`.
+A supported new texture or model conversion becomes an `AI_PLAN_PROPOSAL`: accept a
+`CONVERSION` review and generate a new plan to include it. Anything else is
+`AI_PLAN_STEP_REJECTED`, for example an unsupported format, a conversion that does
+not match the asset type, excluded assets or colliding outputs. Proposals are non-blocking findings and never change the plan's commands
+or order, so approval works exactly as it does without AI. If the model fails, the
+deterministic draft is still created with an `AI_UNAVAILABLE` finding.
 
 Plans contain `COPY` commands, plus `REWRITE_REFERENCES` commands for OBJ/MTL
 files whose reviewed preview lists rewrites (their parameters record each exact
@@ -349,8 +372,38 @@ The command records the selected strategy (`texture-imageio`) as its converter
 requirement, and execution refuses a different or missing converter. Plan creation
 runs the converter's check on the fingerprinted source, so for example transparency
 without a background produces a blocking `CONVERSION_CHECK_FAILED` before
-approval. Images over 64 megapixels or 64 MiB are rejected. Model conversion is not
-available: no model converter is installed. Only layouts without blocking findings can be approved.
+approval. Images over 64 megapixels or 64 MiB are rejected. Only layouts without blocking findings can be approved.
+
+**Model conversion.** Accept a `CONVERSION` review with `format=glb` on an OBJ or FBX
+model. The strategy (`AssimpModelConverter`) uses the Assimp library bundled by LWJGL
+(`org.lwjgl:lwjgl-assimp`, natives selected by OS profile in `pom.xml`); its ID
+includes the Assimp version (for example `assimp-lwjgl-6.0.2`), so a library upgrade
+makes existing approvals stale. The plan gets a `CONVERT_MODEL` command and the output
+is one self-contained `.glb` with textures embedded; the MTL and textures are still
+copied next to it.
+
+- Assimp reads only through in-memory callbacks that serve the model and its reviewed
+  dependencies. A request for any other file fails the conversion, so a model cannot
+  pull arbitrary files from disk into its output.
+- An OBJ's input is what the run publishes: its MTL and reference rewrites, and any
+  reviewed texture conversion (a PNG reviewed as JPEG is embedded as JPEG). The OBJ's
+  material libraries must be in the same output folder as the model
+  (`MODEL_CONVERSION_LAYOUT` otherwise).
+- An FBX still needs the usual `ACKNOWLEDGMENT`, and every texture must already be inside
+  the file; an FBX that references external textures fails with
+  `CONVERSION_CHECK_FAILED` before approval.
+- The full import and export run at plan creation and again in preflight, so a model
+  Assimp cannot read is blocked before any run is reserved. Inputs are limited to 64 MiB.
+- Every converted model gets a `MODEL_CONVERSION_FIDELITY` warning (MTL colours become
+  approximate PBR values). For Unity it also gets `GLB_REQUIRES_GLTFAST`, because Unity
+  imports GLB only with the glTFast package; the original formats import natively.
+- If the native library cannot be loaded on a platform, the converter reports itself
+  unavailable (`MODEL_CONVERTER_UNAVAILABLE`) and models are only ever copied.
+
+Validation checks GLB outputs for a correct header and declared length, chunk layout,
+JSON, buffer, bufferView and accessor bounds, at least one mesh, no external `uri`, and
+decodes every embedded image. It proves the file is well-formed, not that it looks right
+in the engine. Linux natives require glibc 2.28 or newer.
 Approval and execution recheck the inventory, review revision and commands, and the
 executor rejects rewrite commands that differ from the current reviewed preview;
 each approved plan can be run once. A rewrite changes only the matching `mtllib`
@@ -373,10 +426,70 @@ still rechecked before every publish.
 Path and identity rechecks are best effort against hostile concurrent filesystem
 replacement, not a handle-anchored sandbox. Source, output, state and log paths and
 their ancestors must remain trusted against concurrent manipulation. Unsupported
-reference rewrites and model conversions remain blocking or unavailable; no such
+reference rewrites and conversions remain blocking or unavailable; no such
 operations are silently performed.
 
+## Validation and History
+
+`validate --run RUN-UUID` (or `--plan PLAN-UUID` for that plan's run) checks every
+output the run recorded and saves a report; it never modifies outputs or sources.
+Each output is checked for:
+
+- existence as a regular file with no links in its path, and readability;
+- its SHA-256 against what the run published: the source fingerprint for `COPY`,
+  or the hash recorded in the step detail for rewrites and conversions;
+- format: PNG/JPEG must decode with the JDK image reader and match the extension;
+  OBJ/MTL must be UTF-8 text whose `mtllib` and texture references resolve, with
+  exact case, to files this run produced inside the output root.
+
+Checks that cannot be performed are `UNKNOWN`, never passed: FBX contents, a
+missing recorded hash, oversized images, and references that resolve to files this
+run did not produce. The status is `PASSED` only if every recorded output passed
+every check and the run succeeded; `FAILED` if any check failed; `INCOMPLETE` if
+nothing failed but some check was not performed or some planned output was not
+produced (including runs that never recorded completion); `NOT_VALIDATED` if the
+run recorded no outputs. The command exits 0 only for `PASSED`.
+
+Validation holds the project lock, so it fails rather than overlapping a running
+migration. `--ai` adds an advisory summary from the connected ChatGPT account,
+requested after the status is computed. The model sees statuses, counts, finding
+codes and relative source paths only, never contents, finding messages or absolute
+paths. A summary that names a different status is rejected, and on any failure the
+report keeps only its deterministic summary with an `AI_UNAVAILABLE` or
+`AI_OUTPUT_REJECTED` finding.
+
+Reports are append-only JSON files in `<state-dir>/projects/<project>/reports`.
+`history --project PROJECT-UUID [--details]` lists them oldest first and says so
+when there is no history; an unexpected or malformed file there is an error rather
+than being skipped. The GUI's Validation and History tab provides both operations
+and fills in the run ID after a migration.
+
+## Natural-Language Commands
+
+`command --project PROJECT-UUID --state-directory DIR --log-directory DIR REQUEST...`
+(or the GUI's Agent Commands panel) sends one plain-language request to the
+connected model, which must map it to exactly one allowlisted action:
+`SHOW_INVENTORY`, `LIST_TARGETS`, `ANALYZE` (rule-based), `CHECK_COMPATIBILITY`,
+`PREVIEW_ORGANIZATION`, `CREATE_PLAN` (a draft only), `SHOW_PLAN`, `SHOW_RUN`,
+`VALIDATE`, `HISTORY`, `CLARIFY` or `UNSUPPORTED`. The action runs through the same
+`AssetManager` operations as the explicit commands. Approving, migrating, saving
+reviews and editing files are not actions: the model is told to answer
+`UNSUPPORTED`, and a reply naming any other action, an unexpected parameter or a
+non-text value is rejected with no action taken. Parameters are untrusted. A target
+must be a supported profile, an output folder must be absolute, and IDs must be
+well-formed UUIDs belonging to the selected project; otherwise the reply is a
+clarifying question. Failures are reported as `COMMAND_FAILED` findings. The model
+sees the request, the project ID, asset counts by type and the supported targets.
+Without a connected account, nothing is done and an `AI_UNAVAILABLE` finding is
+returned. The command exits non-zero when the request failed or could not be
+interpreted.
+
 ## File Logs
+
+The GUI's Live Logs tab replays a project's saved events after a sequence number and
+then follows new ones (every 500 ms), like `logs --follow`. It only reads the
+committed log, so it never blocks writers, and stopping or losing the viewer never
+stops work. After a disconnection, Follow Logs resumes from the last event shown.
 
 No SQLite is used or required. Each project has a UTF-8 JSON-lines file named
 `<project-uuid>.log` in `<state-dir>/logs`. Keep the state directory outside

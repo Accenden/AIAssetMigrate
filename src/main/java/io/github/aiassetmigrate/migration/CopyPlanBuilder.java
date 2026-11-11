@@ -64,7 +64,8 @@ public final class CopyPlanBuilder {
                         .orElseThrow(() -> new IllegalArgumentException("No converter supports the reviewed conversion"))
                         .id();
                 commands.add(new AssetOperationCommand(UUID.nameUUIDFromBytes((planId + ":convert:" + entry.assetId())
-                        .getBytes(StandardCharsets.UTF_8)), entry.assetId(), MigrationCommand.Operation.CONVERT_TEXTURE,
+                        .getBytes(StandardCharsets.UTF_8)), entry.assetId(), asset.type() == Asset.Type.MODEL
+                        ? MigrationCommand.Operation.CONVERT_MODEL : MigrationCommand.Operation.CONVERT_TEXTURE,
                         destination, entry.conversion(), List.of(), Optional.of(strategy)));
                 continue;
             }

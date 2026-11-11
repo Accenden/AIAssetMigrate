@@ -91,11 +91,40 @@ public final class AssetMigrateApplication extends Application {
     private final TextField outputRoot = new TextField();
     private final TextArea planDetails = new TextArea();
     private final CompatibilityGeneration planGeneration = new CompatibilityGeneration();
+    private final VBox validationPane = new VBox(8);
+    private final TextField validationRun = new TextField();
+    private final CheckBox validationAi = new CheckBox(
+            "Add an advisory AI summary (sends statuses, finding codes and relative paths; the status is computed without AI)");
+    private final TextArea validationResults = new TextArea();
+    private final CheckBox compatibilityAi = new CheckBox(
+            "Add AI explanations (sends issue codes and relative paths; findings are kept if AI fails)");
+    private final CheckBox planAi = new CheckBox(
+            "Ask AI to propose steps (checked by the controller; recorded as findings, never applied or approved)");
+    private final VBox agentPane = new VBox(8);
+    private final TextField agentRequest = new TextField();
+    private final TextArea agentTranscript = new TextArea();
+    private final VBox logPane = new VBox(8);
+    private final TextField logAfter = new TextField("0");
+    private final TextArea logView = new TextArea();
+    private final Label logStatus = new Label("Not following.");
+    private io.github.aiassetmigrate.logging.LogFollower logFollower;
     private PlanContext planContext;
 
     record PlanRequest(UUID project, Path state, Path logs, Path output, AssetManager.TargetProfile target) {
         PlanContext create(AssetManager manager) {
             MigrationPlan plan = manager.createPlan(project, target, output);
+            if (!project.equals(plan.projectId()) || !target.id().equals(plan.targetProfile())
+                    || !target.version().equals(plan.targetProfileVersion()) || !output.equals(plan.outputRoot())
+                    || plan.status() != PlanStatus.DRAFT) {
+                throw new IllegalStateException("Created plan does not match the requested draft context.");
+            }
+            InventorySnapshot inventory = manager.loadInventory(plan.projectId(), plan.inventoryRevision());
+            return PlanContext.fromInventory(this, plan, inventory);
+        }
+
+        /** AI-assisted draft (F06): proposals become findings; the commands and approval rules are unchanged. */
+        PlanContext create(AssetManager manager, io.github.aiassetmigrate.ai.LLMClient assistant) {
+            MigrationPlan plan = manager.createPlan(project, target, output, assistant);
             if (!project.equals(plan.projectId()) || !target.id().equals(plan.targetProfile())
                     || !target.version().equals(plan.targetProfileVersion()) || !output.equals(plan.outputRoot())
                     || plan.status() != PlanStatus.DRAFT) {
@@ -178,7 +207,14 @@ public final class AssetMigrateApplication extends Application {
 
     record CompatibilityRequest(UUID project, AssetManager.TargetProfile target) {
         AssetManager.CompatibilityResult assess(AssetManager manager) {
-            var result = manager.assessCompatibility(project, target);
+            return checked(manager.assessCompatibility(project, target));
+        }
+
+        AssetManager.CompatibilityResult assess(AssetManager manager, io.github.aiassetmigrate.ai.LLMClient assistant) {
+            return checked(manager.assessCompatibility(project, target, assistant));
+        }
+
+        private AssetManager.CompatibilityResult checked(AssetManager.CompatibilityResult result) {
             if (!target.equals(result.target())) throw new IllegalStateException("Compatibility result target does not match the requested target.");
             return result;
         }
@@ -270,6 +306,9 @@ public final class AssetMigrateApplication extends Application {
         setupAnalysis();
         setupCompatibility();
         setupPlan();
+        setupValidation();
+        setupAgent();
+        setupLogs();
         Tab inventoryTab = new Tab("Inventory", results);
         ScrollPane analysisScroll = new ScrollPane(analysisPane);
         analysisScroll.setFitToWidth(true);
@@ -280,7 +319,13 @@ public final class AssetMigrateApplication extends Application {
         analysisTab.setClosable(false);
         compatibilityTab.setClosable(false);
         planTab.setClosable(false);
-        TabPane tabs = new TabPane(inventoryTab, analysisTab, compatibilityTab, planTab);
+        Tab validationTab = new Tab("Validation and History", validationPane);
+        validationTab.setClosable(false);
+        Tab agentTab = new Tab("Agent Commands", agentPane);
+        agentTab.setClosable(false);
+        Tab logTab = new Tab("Live Logs", logPane);
+        logTab.setClosable(false);
+        TabPane tabs = new TabPane(inventoryTab, analysisTab, compatibilityTab, planTab, validationTab, agentTab, logTab);
         BorderPane root = new BorderPane(tabs);
         root.setTop(top);
         BorderPane.setMargin(tabs, new Insets(12, 0, 0, 0));
@@ -293,6 +338,8 @@ public final class AssetMigrateApplication extends Application {
             if (runner.isBusy()) {
                 event.consume();
                 status.setText("Wait for the current operation to finish before closing.");
+            } else {
+                stopLogs();
             }
         });
         stage.show();
@@ -318,7 +365,8 @@ public final class AssetMigrateApplication extends Application {
         planDetails.setEditable(false);
         planDetails.setWrapText(false);
         planDetails.setPromptText("No plan displayed.");
-        planPane.getChildren().addAll(note, new Label("Output root"), outputRoot,
+        planAi.setWrapText(true);
+        planPane.getChildren().addAll(note, new Label("Output root"), outputRoot, planAi,
                 new FlowPane(8, 8, create, approve, migrate), new Label("Full plan and blockers"), planDetails);
         VBox.setVgrow(planDetails, Priority.ALWAYS);
         projectId.textProperty().addListener((o, a, b) -> clearPlan());
@@ -355,7 +403,11 @@ public final class AssetMigrateApplication extends Application {
         try {
             PlanRequest request = planRequest();
             long generation = planGeneration.current();
-            if (runner.submitValue(request.state(), request.logs(), request::create, result -> {
+            boolean ai = planAi.isSelected();
+            // The saved account is loaded on the worker thread, never the JavaFX thread.
+            if (runner.submitValue(request.state(), request.logs(), manager -> ai
+                    ? request.create(manager, io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable())
+                    : request.create(manager), result -> {
                 busy(false);
                 if (!planGeneration.isCurrent(generation)) return;
                 if (result.failure() == null && result.value() != null) {
@@ -401,10 +453,225 @@ public final class AssetMigrateApplication extends Application {
                 busy(false);
                 if (!planGeneration.isCurrent(generation)) return;
                 clearPlan();
-                status.setText(result.failure() == null ? formatRun(result.value())
+                if (result.failure() == null && result.value() != null) validationRun.setText(result.value().id().toString());
+                status.setText(result.failure() == null ? formatRun(result.value()) + "\nUse Validation and History to check the outputs."
                         : failureText(result.failure(), null) + "\nMigration may have started; inspect output and run history before retrying.");
             })) { busy(true); status.setText("Running approved copy migration..."); }
         } catch (IllegalArgumentException failure) { status.setText("Invalid input: " + failure.getMessage()); }
+    }
+
+    private void setupValidation() {
+        Label note = new Label("Validate Migration checks the outputs a run recorded: existence, readability, published SHA-256, "
+                + "PNG/JPEG decoding and OBJ/MTL references. Checks that cannot be performed, such as FBX contents, are "
+                + "reported as not checked, never as passed. Outputs are not modified. Each validation saves a report.");
+        note.setWrapText(true);
+        validationRun.setPromptText("Run ID (filled in after a migration)");
+        Button validate = new Button("Validate Migration");
+        Button history = new Button("Load Validation History");
+        validate.setOnAction(event -> validateRun());
+        history.setOnAction(event -> loadHistory());
+        validationAi.setWrapText(true);
+        validationResults.setEditable(false);
+        validationResults.setWrapText(true);
+        validationResults.setPromptText("No validation report displayed. History uses the Project ID above.");
+        validationPane.getChildren().addAll(note, new Label("Run ID"), validationRun, validationAi,
+                new FlowPane(8, 8, validate, history), new Label("Report"), validationResults);
+        VBox.setVgrow(validationResults, Priority.ALWAYS);
+    }
+
+    private void validateRun() {
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID run = UUID.fromString(validationRun.getText().trim());
+            boolean ai = validationAi.isSelected();
+            if (runner.submitValue(statePath, logPath, manager -> ai
+                    // The saved account is loaded on the worker thread, never the JavaFX thread.
+                    ? manager.validate(run, io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable())
+                    : manager.validate(run), result -> {
+                busy(false);
+                if (result.failure() == null && result.value() != null) {
+                    validationResults.setText(formatReport(result.value(), true));
+                    status.setText("Validation " + result.value().validationStatus() + ". Report saved.");
+                } else {
+                    status.setText(failureText(result.failure(), null) + "\nNo report was displayed; load history to check whether one was saved.");
+                }
+            })) {
+                busy(true);
+                validationResults.clear();
+                status.setText("Validating recorded outputs...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void loadHistory() {
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID project = UUID.fromString(projectId.getText().trim());
+            if (runner.submitValue(statePath, logPath, manager -> manager.history(project), result -> {
+                busy(false);
+                if (result.failure() == null && result.value() != null) {
+                    validationResults.setText(formatHistory(project, result.value()));
+                    status.setText(result.value().isEmpty() ? "No validation history for this project."
+                            : "Loaded " + result.value().size() + " validation report(s).");
+                } else {
+                    status.setText(failureText(result.failure(), null));
+                }
+            })) {
+                busy(true);
+                validationResults.clear();
+                status.setText("Loading validation history...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void setupAgent() {
+        Label note = new Label("Ask in plain language, for example 'check unity 6000.0 compatibility' or 'create a draft plan for "
+                + "godot 4.3 into C:\\out'. Uses the connected AI account and the Project ID above. It can show, analyze, check, "
+                + "preview, draft plans and validate, but never approves, migrates or saves reviews.");
+        note.setWrapText(true);
+        agentRequest.setPromptText("What should the agent do?");
+        Button send = new Button("Send Request");
+        send.setOnAction(event -> sendAgentRequest());
+        agentRequest.setOnAction(event -> sendAgentRequest());
+        agentTranscript.setEditable(false);
+        agentTranscript.setWrapText(true);
+        agentTranscript.setPromptText("Requests and results appear here.");
+        HBox row = new HBox(8, agentRequest, send);
+        HBox.setHgrow(agentRequest, Priority.ALWAYS);
+        agentPane.getChildren().addAll(note, row, agentTranscript);
+        VBox.setVgrow(agentTranscript, Priority.ALWAYS);
+    }
+
+    private void sendAgentRequest() {
+        try {
+            Path statePath = requiredPath(state, "State directory");
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID project = UUID.fromString(projectId.getText().trim());
+            String request = agentRequest.getText().strip();
+            if (request.isEmpty()) throw new IllegalArgumentException("Enter a request.");
+            if (runner.submitValue(statePath, logPath, manager -> manager.command(project, request,
+                    io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable()), result -> {
+                busy(false);
+                agentTranscript.appendText("> " + request + "\n" + (result.failure() == null && result.value() != null
+                        ? formatCommand(result.value()) : failureText(result.failure(), null) + "\n") + "\n");
+                status.setText(result.failure() == null ? "Agent request finished; requests never approve or migrate."
+                        : "Agent request failed.");
+            })) {
+                busy(true);
+                agentRequest.clear();
+                status.setText("Interpreting request...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    static String formatCommand(AssetManager.CommandResult result) {
+        StringBuilder text = new StringBuilder(result.message()).append('\n');
+        result.draftPlan().ifPresent(plan -> text.append("Draft plan ").append(plan.id()).append(" version ").append(plan.version())
+                .append(" (").append(plan.status()).append("). Review and approve it in Copy Migration Plan or with 'approve'.\n"));
+        for (Finding finding : result.findings()) {
+            if (finding.severity() == Finding.Severity.INFO && !finding.code().startsWith("AI_")) continue;
+            text.append("  ").append(finding.severity()).append(' ').append(finding.code()).append(": ").append(finding.message()).append('\n');
+        }
+        return text.toString();
+    }
+
+    private void setupLogs() {
+        Label note = new Label("Replays the selected project's saved events after a sequence number, then follows new ones. "
+                + "Viewing is read-only: stopping or losing the viewer never stops work. Reconnecting resumes after the last event shown.");
+        note.setWrapText(true);
+        logAfter.setPrefColumnCount(8);
+        Button follow = new Button("Follow Logs");
+        Button stop = new Button("Stop");
+        Button clear = new Button("Clear View");
+        follow.setOnAction(event -> followLogs());
+        stop.setOnAction(event -> stopLogs());
+        clear.setOnAction(event -> logView.clear());
+        logView.setEditable(false);
+        logView.setWrapText(false);
+        logView.setPromptText("Events appear here.");
+        logStatus.setWrapText(true);
+        logPane.getChildren().addAll(note, new FlowPane(8, 8, new Label("After sequence"), logAfter, follow, stop, clear),
+                logStatus, logView);
+        VBox.setVgrow(logView, Priority.ALWAYS);
+        projectId.textProperty().addListener((o, a, b) -> stopLogs());
+        logs.textProperty().addListener((o, a, b) -> stopLogs());
+    }
+
+    private void followLogs() {
+        try {
+            stopLogs();
+            Path logPath = requiredPath(logs, "Log directory");
+            UUID project = UUID.fromString(projectId.getText().trim());
+            long after = Long.parseLong(logAfter.getText().trim());
+            if (after < 0) throw new IllegalArgumentException("After sequence must be nonnegative.");
+            // Observer: the follower thread delivers events; each update is marshalled onto the JavaFX thread.
+            logFollower = io.github.aiassetmigrate.logging.LogFollower.start(logPath, project, after,
+                    new io.github.aiassetmigrate.application.LogObserver() {
+                        @Override public void update(io.github.aiassetmigrate.domain.LogEvent event) {
+                            String line = formatEvent(event);
+                            Platform.runLater(() -> {
+                                logView.appendText(line);
+                                logAfter.setText(Long.toString(event.sequence()));
+                            });
+                        }
+                        @Override public void onError(Throwable failure) {
+                            Platform.runLater(() -> logStatus.setText("Disconnected: " + failure.getMessage()
+                                    + ". Work is not affected; press Follow Logs to reconnect from the last event."));
+                        }
+                    }, java.time.Duration.ofMillis(500));
+            logStatus.setText("Following project " + project + " after event " + after + ".");
+        } catch (NumberFormatException failure) {
+            logStatus.setText("Invalid input: after sequence must be a whole number.");
+        } catch (IllegalArgumentException failure) {
+            logStatus.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    private void stopLogs() {
+        if (logFollower != null) {
+            logFollower.close();
+            logFollower = null;
+            logStatus.setText("Stopped following. Work continues; Follow Logs resumes after the last event shown.");
+        }
+    }
+
+    static String formatEvent(io.github.aiassetmigrate.domain.LogEvent event) {
+        return event.sequence() + " " + event.occurredAt() + " " + event.level() + " "
+                + event.message().replace("\r", "\\r").replace("\n", "\\n") + "\n";
+    }
+
+    static String formatHistory(UUID project, List<io.github.aiassetmigrate.domain.Report> reports) {
+        if (reports.isEmpty()) return "No validation history for project " + project + ". Validate a migration run first.";
+        StringBuilder text = new StringBuilder("Validation history for project ").append(project)
+                .append(" (").append(reports.size()).append(" report(s), oldest first)\n");
+        for (var report : reports) text.append('\n').append(formatReport(report, false));
+        return text.toString();
+    }
+
+    static String formatReport(io.github.aiassetmigrate.domain.Report report, boolean findings) {
+        StringBuilder text = new StringBuilder("Validation status: ").append(report.validationStatus())
+                .append("\nReport ID: ").append(report.id()).append("\nCreated at: ").append(report.createdAt())
+                .append("\nRun ID: ").append(report.runId()).append(" (run status ").append(report.runStatus()).append(")")
+                .append("\nPlan ID: ").append(report.planId())
+                .append("\nSummary: ").append(report.summary()).append('\n');
+        report.aiSummary().ifPresent(summary -> text.append("AI summary (advisory; the status above is authoritative): ")
+                .append(summary).append('\n'));
+        if (!findings) return text.toString();
+        text.append("Findings (").append(report.findings().size()).append("):\n");
+        for (Finding finding : report.findings()) {
+            text.append(finding.severity()).append(' ').append(finding.code()).append(" | ")
+                    .append(finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).orElse("<run>"))
+                    .append(" | ").append(finding.message()).append('\n');
+        }
+        return text.toString();
     }
 
     static String formatRun(MigrationRun run) {
@@ -466,7 +733,9 @@ public final class AssetMigrateApplication extends Application {
         compatibilityResults.setEditable(false);
         compatibilityResults.setWrapText(true);
         compatibilityResults.setPromptText("Compatibility findings appear here.");
-        compatibilityPane.getChildren().addAll(note, new FlowPane(8, 8, loadTargets, compatibilityTarget, assess), compatibilityResults);
+        compatibilityAi.setWrapText(true);
+        compatibilityPane.getChildren().addAll(note, new FlowPane(8, 8, loadTargets, compatibilityTarget, assess), compatibilityAi,
+                compatibilityResults);
         VBox.setVgrow(compatibilityResults, Priority.ALWAYS);
         projectId.textProperty().addListener((observable, oldValue, newValue) -> clearCompatibility());
         state.textProperty().addListener((observable, oldValue, newValue) -> clearCompatibility());
@@ -508,7 +777,10 @@ public final class AssetMigrateApplication extends Application {
             if (target == null) throw new IllegalArgumentException("Choose a supported target.");
             var request = new CompatibilityRequest(id, target);
             long generation = compatibilityGeneration.current();
-            if (runner.submitValue(statePath, logPath, request::assess, result -> {
+            boolean ai = compatibilityAi.isSelected();
+            if (runner.submitValue(statePath, logPath, manager -> ai
+                    ? request.assess(manager, io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable())
+                    : request.assess(manager), result -> {
                 busy(false);
                 if (!compatibilityGeneration.isCurrent(generation)) {
                     status.setText("Inputs changed; compatibility results discarded.");
@@ -602,7 +874,7 @@ public final class AssetMigrateApplication extends Application {
                 ReviewedChange.Kind.NAME, ReviewedChange.Kind.FOLDER, ReviewedChange.Kind.ACKNOWLEDGMENT,
                 ReviewedChange.Kind.CONVERSION);
         reviewKind.setPromptText("Choose review kind");
-        reviewValue.setPromptText("Category, target UUID, reason, filename, folder (blank for root), or conversion such as: jpg background=#FFFFFF");
+        reviewValue.setPromptText("Category, target UUID, reason, filename, folder (blank for root), or conversion such as: jpg background=#FFFFFF, or glb for OBJ/FBX models");
         reviewReference.setPromptText("Original reference (required for material mapping; optional for relationship)");
         decision.getItems().setAll(ReviewedChange.Decision.ACCEPTED, ReviewedChange.Decision.REJECTED);
         decision.setPromptText("Choose decision");
@@ -647,6 +919,8 @@ public final class AssetMigrateApplication extends Application {
         analysisPane.setDisable(value);
         compatibilityPane.setDisable(value);
         planPane.setDisable(value);
+        validationPane.setDisable(value);
+        agentPane.setDisable(value);
         progress.setVisible(value);
     }
 

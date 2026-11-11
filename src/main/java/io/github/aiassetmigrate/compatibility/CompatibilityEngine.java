@@ -55,8 +55,17 @@ public final class CompatibilityEngine {
                         .map(io.github.aiassetmigrate.conversion.ConversionStrategy::id)
                         .collect(java.util.stream.Collectors.joining(", "))
                         + ". PNG/JPEG textures can be converted with an explicit CONVERSION review.");
-        add(result, snapshot, target, null, null, Finding.Severity.WARNING, "MODEL_CONVERTER_UNAVAILABLE",
-                "No model converter is installed; model formats are copied, never converted.");
+        if (io.github.aiassetmigrate.conversion.AssimpModelConverter.available()) {
+            add(result, snapshot, target, null, null, Finding.Severity.INFO, "MODEL_CONVERSION_AVAILABLE",
+                    "OBJ and FBX models can be converted to self-contained GLB (Assimp "
+                            + io.github.aiassetmigrate.conversion.AssimpModelConverter.assimpVersion()
+                            + ") with an explicit CONVERSION review (format=glb); otherwise models are copied unchanged.");
+        } else {
+            add(result, snapshot, target, null, null, Finding.Severity.WARNING, "MODEL_CONVERTER_UNAVAILABLE",
+                    "Model conversion is unavailable because "
+                            + io.github.aiassetmigrate.conversion.AssimpModelConverter.unavailableReason()
+                            + "; model formats are copied, never converted.");
+        }
         if (!snapshot.hasCompleteCoverage()) {
             add(result, snapshot, target, null, null, Finding.Severity.WARNING, "PARTIAL_INVENTORY",
                     "The scan is partial; compatibility cannot be assessed for unvisited entries.");

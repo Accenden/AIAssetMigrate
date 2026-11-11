@@ -59,8 +59,17 @@ public final class PlanCommands {
         @Option(names = "--target", required = true, paramLabel = "ID") String target;
         @Option(names = "--target-version", required = true, paramLabel = "VERSION") String version;
         @Option(names = "--output", required = true, paramLabel = "DIR") Path output;
+        @Option(names = "--ai", description = {
+                "Ask the connected ChatGPT account (see 'auth') to propose steps; the controller checks them.",
+                "Proposals are recorded as findings and never change commands or approve the plan."})
+        boolean ai;
+        private final AnalyzeCommand.AssistantFactory assistantFactory;
         public Plan() { this(DefaultAssetManager::new); }
-        Plan(ImportCommand.ManagerFactory factory) { super(factory); }
+        Plan(ImportCommand.ManagerFactory factory) { this(factory, AnalyzeCommand::connectedAssistant); }
+        Plan(ImportCommand.ManagerFactory factory, AnalyzeCommand.AssistantFactory assistantFactory) {
+            super(factory);
+            this.assistantFactory = assistantFactory;
+        }
         @Override public Integer call() {
             if (target == null || target.isBlank() || version == null || version.isBlank()) {
                 spec.commandLine().getErr().println("Target ID and version must not be blank.");
@@ -69,7 +78,17 @@ public final class PlanCommands {
             return super.call();
         }
         @Override int execute(AssetManager manager, PrintWriter out) throws Exception {
-            printPlan(manager, out, manager.createPlan(project, new AssetManager.TargetProfile(target, version), output), true);
+            var profile = new AssetManager.TargetProfile(target, version);
+            MigrationPlan created;
+            if (ai) {
+                io.github.aiassetmigrate.ai.LLMClient assistant;
+                try { assistant = assistantFactory.create(); }
+                catch (io.github.aiassetmigrate.ai.LLMClient.AiException e) { assistant = io.github.aiassetmigrate.ai.OpenAIAdapter.unavailable(e); }
+                created = manager.createPlan(project, profile, output, assistant);
+            } else {
+                created = manager.createPlan(project, profile, output);
+            }
+            printPlan(manager, out, created, true);
             return 0;
         }
     }

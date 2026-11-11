@@ -121,16 +121,18 @@ public final class OrganizationPreview {
             Map<String, String> conversion = Map.of();
             var convert = choices.get(ReviewedChange.Kind.CONVERSION);
             if (accepted(convert) && !excluded) {
-                String format = io.github.aiassetmigrate.conversion.TextureConverter.normalize(convert.values().get("format"));
-                if (format != null && format.equals(io.github.aiassetmigrate.conversion.TextureConverter.normalize(
+                String format = io.github.aiassetmigrate.conversion.Converters.normalizeFormat(convert.values().get("format"));
+                var strategy = format == null ? Optional.<io.github.aiassetmigrate.conversion.ConversionStrategy>empty()
+                        : io.github.aiassetmigrate.conversion.Converters.find(asset, format);
+                if (format != null && format.equals(io.github.aiassetmigrate.conversion.Converters.normalizeFormat(
                         asset.metadata().get(Asset.FORMAT)))) {
                     // Already in the requested format: copied unchanged.
-                } else if (format == null || io.github.aiassetmigrate.conversion.Converters.find(asset, format).isEmpty()) {
+                } else if (strategy.isEmpty()) {
                     findings.add(finding("CONVERSION_UNSUPPORTED", asset.id(), "No installed converter supports converting this asset to "
                             + convert.values().get("format")));
                 } else {
                     try {
-                        io.github.aiassetmigrate.conversion.TextureConverter.options(format, convert.values());
+                        strategy.get().validateOptions(format, convert.values());
                         Map<String, String> values = new HashMap<>(convert.values());
                         values.put("format", format);
                         conversion = Map.copyOf(values);
@@ -244,6 +246,20 @@ public final class OrganizationPreview {
                 findings.add(finding("MAPPING_LIBRARY_NOT_REFERENCED", owner.assetId(), "Material '" + reference
                         + "' maps to " + material + ", which is not one of this model's material libraries;"
                         + " correct the model's mtllib reference first"));
+            }
+        }
+        // A converted OBJ reads its MTL files from its own output folder (textures may be elsewhere).
+        for (Entry entry : entries) {
+            if (entry.conversion().isEmpty() || entry.destination().isEmpty() || byId.get(entry.assetId()).type() != Asset.Type.MODEL) continue;
+            Path folder = Path.of(entry.destination().get()).getParent();
+            for (UUID library : libraries.getOrDefault(entry.assetId(), Set.of())) {
+                var target = entryById.get(library);
+                if (target == null || target.destination().isEmpty()) continue;
+                Path libraryFolder = Path.of(target.destination().get()).getParent();
+                if (!Objects.equals(folder == null ? "" : MaterialAnalysis.key(folder), libraryFolder == null ? "" : MaterialAnalysis.key(libraryFolder))) {
+                    findings.add(finding("MODEL_CONVERSION_LAYOUT", entry.assetId(), "A converted model's material library ("
+                            + target.destination().get() + ") must be in the same output folder as the model"));
+                }
             }
         }
         for (int i = 0; i < entries.size(); i++) {

@@ -67,7 +67,7 @@ public class ConversionStrategyTest {
         assertThrows(IOException.class, () -> textures.check("not an image".getBytes(), "jpg", Map.of()));
     }
 
-    @Test void strategiesAreSelectedBySupportAndModelsAreHonestlyUnsupported() {
+    @Test void strategiesAreSelectedBySupportFormatAndType() {
         Asset png = asset("a.png", Asset.Type.TEXTURE, "png");
         Asset jpeg = asset("a.jpeg", Asset.Type.TEXTURE, "jpeg");
         Asset obj = asset("a.obj", Asset.Type.MODEL, "obj");
@@ -77,10 +77,15 @@ public class ConversionStrategyTest {
         assertFalse(textures.supports(jpeg, "jpg"), "jpeg and jpg are the same format");
         assertFalse(textures.supports(obj, "fbx"));
         assertEquals(TextureConverter.ID, Converters.find(png, "jpg").orElseThrow().id());
-        assertTrue(Converters.find(obj, "fbx").isEmpty());
-        ModelConverter models = new ModelConverter();
-        assertFalse(models.supports(obj, "fbx"));
-        assertThrows(IOException.class, () -> models.convert(new byte[0], "fbx", Map.of()));
-        assertEquals(models, Converters.byId(ModelConverter.ID).map(ModelConverter.class::cast).map(m -> models).orElseThrow());
+        assertTrue(Converters.find(obj, "fbx").isEmpty(), "no installed strategy writes FBX");
+        assertTrue(Converters.find(png, "glb").isEmpty(), "textures never become models");
+        assertEquals("jpg", Converters.normalizeFormat("JPEG"));
+        assertEquals("glb", Converters.normalizeFormat("GLB"));
+        assertNull(Converters.normalizeFormat("gltf"));
+        if (AssimpModelConverter.available()) {
+            var models = Converters.find(obj, "glb").orElseThrow();
+            assertEquals("assimp-lwjgl-" + AssimpModelConverter.assimpVersion(), models.id());
+            assertSame(models, Converters.byId(models.id()).orElseThrow());
+        }
     }
 }

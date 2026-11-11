@@ -50,8 +50,8 @@ class DomainContractsTest {
                 command(), plan(List.of(command())),
                 new MigrationRun(ID, ID, ID, 1, directory.resolve("output"), RunStatus.PENDING,
                         Map.of(ID, StepStatus.PENDING), TIME, Optional.empty(), Optional.empty()),
-                new Report(ID, ID, ID, RunStatus.INCOMPLETE, Report.ValidationStatus.NOT_VALIDATED,
-                        List.of(), "Not validated", TIME),
+                new Report(ID, ID, ID, ID, RunStatus.INCOMPLETE, Report.ValidationStatus.NOT_VALIDATED,
+                        List.of(), "Not validated", Optional.of("AI text"), TIME),
                 new LogEvent(ID, ID, 1, TIME, LogEvent.Level.INFO, "Created", Optional.empty(),
                         Optional.empty(), Map.of()));
     }
@@ -107,8 +107,8 @@ class DomainContractsTest {
         var findings = new ArrayList<Finding>();
         var plan = new MigrationPlan(ID, ID, 1, 1, "unity", "6", directory.resolve("output"),
                 reviews, commands, findings, PlanStatus.DRAFT, TIME);
-        var report = new Report(ID, ID, ID, RunStatus.INCOMPLETE,
-                Report.ValidationStatus.NOT_VALIDATED, findings, "summary", TIME);
+        var report = new Report(ID, ID, ID, ID, RunStatus.INCOMPLETE,
+                Report.ValidationStatus.NOT_VALIDATED, findings, "summary", Optional.empty(), TIME);
         assets.clear();
         commands.clear();
         reviews.clear();
