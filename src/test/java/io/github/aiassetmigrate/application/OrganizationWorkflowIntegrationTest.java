@@ -169,6 +169,51 @@ class OrganizationWorkflowIntegrationTest {
         }
     }
 
+    @Test void reviewedTextureConversionUsesTheStrategyAndRewritesItsReferences() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.writeString(source.resolve("crate.mtl"), "newmtl Wood\nmap_Kd crate.png\n");
+        byte[] png = io.github.aiassetmigrate.conversion.ConversionStrategyTest.png(true);
+        Files.write(source.resolve("crate.png"), png);
+        Path output = Files.createDirectory(directory.resolve("output"));
+        try (var manager = new DefaultAssetManager(directory.resolve("state"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id();
+            Map<String, UUID> ids = snapshot.project().assets().stream()
+                    .collect(Collectors.toMap(a -> PortablePath.of(a.relativePath()), Asset::id));
+            UUID mtl = ids.get("crate.mtl"), texture = ids.get("crate.png");
+            assertThrows(IllegalArgumentException.class, () -> manager.review(project, 1,
+                    List.of(accept(mtl, ReviewedChange.Kind.CONVERSION, Map.of("format", "jpg")))), "only textures convert");
+            assertThrows(IllegalArgumentException.class, () -> manager.review(project, 1,
+                    List.of(accept(texture, ReviewedChange.Kind.CONVERSION, Map.of("format", "fbx")))));
+
+            // Transparency without an approved background blocks the plan before approval.
+            manager.review(project, 1, List.of(accept(texture, ReviewedChange.Kind.CONVERSION, Map.of("format", "jpg"))));
+            var blocked = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            assertTrue(blocked.findings().stream().anyMatch(f -> f.code().equals("CONVERSION_CHECK_FAILED")));
+            assertThrows(Exception.class, () -> manager.approve(blocked.id(), blocked.version()));
+
+            manager.review(project, 1, List.of(accept(texture, ReviewedChange.Kind.CONVERSION,
+                    Map.of("format", "jpg", "background", "#FFFFFF"))));
+            var preview = manager.previewOrganization(project, 1);
+            assertFalse(preview.blocked(), preview.findings().toString());
+            var textureEntry = preview.entries().stream().filter(e -> e.assetId().equals(texture)).findFirst().orElseThrow();
+            assertEquals(java.util.Optional.of("crate.jpg"), textureEntry.destination());
+            var plan = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            var convert = plan.commands().stream().filter(c -> c.assetId().equals(texture)).findFirst().orElseThrow();
+            assertEquals(MigrationCommand.Operation.CONVERT_TEXTURE, convert.operation());
+            assertEquals(java.util.Optional.of(io.github.aiassetmigrate.conversion.TextureConverter.ID), convert.converterRequirement());
+            manager.approve(plan.id(), plan.version());
+            var run = manager.migrate(plan.id());
+            assertEquals(RunStatus.SUCCESS, run.status(), run.toString());
+
+            byte[] converted = Files.readAllBytes(output.resolve("crate.jpg"));
+            assertEquals((byte) 0xD8, converted[1], "output is JPEG");
+            assertEquals("newmtl Wood\nmap_Kd crate.jpg\n", Files.readString(output.resolve("crate.mtl")));
+            assertArrayEquals(png, Files.readAllBytes(source.resolve("crate.png")), "source preserved");
+            assertFalse(Files.exists(output.resolve("crate.png")));
+        }
+    }
+
     @Test void stemGroupingSuggestsUnreferencedTexturesWithoutReferences() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Files.writeString(source.resolve("crate.obj"), "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n");

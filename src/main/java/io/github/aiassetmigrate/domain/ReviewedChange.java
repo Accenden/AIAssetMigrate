@@ -7,8 +7,11 @@ import java.util.UUID;
 
 public record ReviewedChange(UUID id, UUID assetId, Kind kind, Decision decision,
                              Map<String, String> values, Instant reviewedAt) {
-    /** ACKNOWLEDGMENT accepts that an asset's references cannot be inspected (for example FBX). */
-    public enum Kind { CATEGORY, RELATIONSHIP, MATERIAL_MAPPING, NAME, FOLDER, EXCLUSION, ACKNOWLEDGMENT }
+    /**
+     * ACKNOWLEDGMENT accepts that an asset's references cannot be inspected (for example FBX).
+     * CONVERSION requests an output format (values: format, optional background and quality).
+     */
+    public enum Kind { CATEGORY, RELATIONSHIP, MATERIAL_MAPPING, NAME, FOLDER, EXCLUSION, ACKNOWLEDGMENT, CONVERSION }
     public enum Decision { ACCEPTED, REJECTED }
 
     public ReviewedChange {

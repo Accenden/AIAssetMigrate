@@ -626,6 +626,17 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     }
                 }
                 case EXCLUSION -> requireValue(values, "reason");
+                case CONVERSION -> {
+                    String format = requireValue(values, "format");
+                    Asset asset = assets.get(change.assetId());
+                    String target = io.github.aiassetmigrate.conversion.TextureConverter.normalize(format);
+                    if (change.decision() == ReviewedChange.Decision.ACCEPTED) {
+                        if (target == null || io.github.aiassetmigrate.conversion.Converters.find(asset, target).isEmpty()) {
+                            throw new IllegalArgumentException("No installed converter supports converting this asset to " + format);
+                        }
+                        io.github.aiassetmigrate.conversion.TextureConverter.options(target, values);
+                    }
+                }
                 case ACKNOWLEDGMENT -> {
                     requireValue(values, "reason");
                     if (MaterialAnalysis.inspectable(assets.get(change.assetId()))
@@ -663,7 +674,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             for (ReviewedChange change : incoming) {
                 merged.removeIf(old -> old.assetId().equals(change.assetId()) && old.kind() == change.kind()
                         && (change.kind() == ReviewedChange.Kind.CATEGORY || change.kind() == ReviewedChange.Kind.EXCLUSION
-                            || change.kind() == ReviewedChange.Kind.ACKNOWLEDGMENT
+                            || change.kind() == ReviewedChange.Kind.ACKNOWLEDGMENT || change.kind() == ReviewedChange.Kind.CONVERSION
                             || change.kind() == ReviewedChange.Kind.NAME || change.kind() == ReviewedChange.Kind.FOLDER
                             || (change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING
                                 && Objects.equals(old.values().get("reference"), change.values().get("reference")))
@@ -771,12 +782,46 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             var preview = previewOrganization(id, inventory.project().inventoryRevision());
             var compatibility = assessCompatibility(id, target);
             if (!loadInventory(id).equals(inventory)) throw new IOException("Inventory changed during planning");
+            List<Finding> planFindings = new ArrayList<>(compatibility.findings());
+            planFindings.addAll(conversionChecks(inventory, preview));
             var draft = CopyPlanBuilder.draft(inventory, decisions, preview, target, root, UUID.randomUUID(),
-                    Instant.now(), compatibility.findings());
+                    Instant.now(), planFindings);
             return new FileMigrationPlanRepository(stateDirectory).createDraft(draft, reviewRevision);
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot create draft plan for project " + id, e);
         }
+    }
+
+    /** Runs each reviewed conversion's strategy check on the fingerprinted source; failures block approval. */
+    private static List<Finding> conversionChecks(InventorySnapshot inventory, OrganizationPreview.Result preview) {
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        List<Finding> findings = new ArrayList<>();
+        for (var entry : preview.entries()) {
+            if (entry.conversion().isEmpty() || entry.excluded()) continue;
+            Asset asset = assets.get(entry.assetId());
+            String format = entry.conversion().get("format");
+            Map<String, String> options = new HashMap<>(entry.conversion());
+            options.remove("format");
+            try {
+                var strategy = io.github.aiassetmigrate.conversion.Converters.find(asset, format)
+                        .orElseThrow(() -> new IOException("No installed converter supports this conversion"));
+                Path file = inventory.project().sourceRoot().resolve(asset.relativePath());
+                SafeStoragePaths.requireRegularFile(file);
+                byte[] bytes;
+                try (var input = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                    bytes = input.readNBytes(64 * 1024 * 1024 + 1);
+                }
+                if (bytes.length > 64 * 1024 * 1024) throw new IOException("Texture is too large to convert");
+                String hash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+                if (!hash.equals(asset.fingerprint())) throw new IOException("Source changed since the inventory scan");
+                strategy.check(bytes, format, options);
+            } catch (IOException | java.security.NoSuchAlgorithmException e) {
+                findings.add(new Finding(UUID.randomUUID(), Optional.of(asset.id()), Optional.of(asset.relativePath()),
+                        Finding.Severity.ERROR, "CONVERSION_CHECK_FAILED", e.getMessage()));
+            }
+        }
+        return findings;
     }
 
     @Override public MigrationPlan loadPlan(UUID planId) {

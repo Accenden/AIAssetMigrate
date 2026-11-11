@@ -47,7 +47,7 @@ class CompatibilityEngineTest {
         assertEquals(5, unity.stream().filter(f -> f.code().equals("DOCUMENTED_FORMAT_CANDIDATE") && f.message().contains("Unity 6000.0") && f.message().contains("unverified")).count());
         assertTrue(unity.stream().anyMatch(f -> f.code().equals("TARGET_SUPPORT_UNKNOWN") && f.assetId().equals(Optional.of(mtl.id())) && f.message().contains("fidelity")));
         assertTrue(unity.stream().anyMatch(f -> f.code().equals("TARGET_SUPPORT_UNKNOWN") && f.assetId().equals(Optional.of(gltf.id()))));
-        for (String code : List.of("BLENDER_REQUIRED", "OBJ_MATERIAL_FIDELITY_UNKNOWN", "TEXTURE_LAYERS_FLATTENED", "CONVERTER_AVAILABILITY_UNKNOWN")) {
+        for (String code : List.of("BLENDER_REQUIRED", "OBJ_MATERIAL_FIDELITY_UNKNOWN", "TEXTURE_LAYERS_FLATTENED", "MODEL_CONVERTER_UNAVAILABLE")) {
             assertTrue(unity.stream().anyMatch(f -> f.code().equals(code) && f.severity() == Finding.Severity.WARNING), code);
         }
         assertFalse(unity.stream().anyMatch(f -> f.code().equals("PNG_PRECISION") || f.code().equals("OBJ_LIMITATIONS")));
@@ -70,7 +70,7 @@ class CompatibilityEngineTest {
         assertEquals(findings, CompatibilityEngine.check(input, TARGET));
         assertEquals(4, findings.stream().filter(f -> f.code().equals("CONTENT_UNVERIFIED") && f.severity() == Finding.Severity.WARNING).count());
         assertEquals(3, findings.stream().filter(f -> f.code().equals("DOCUMENTED_FORMAT_CANDIDATE")).count());
-        for (String code : List.of("CONVERTER_AVAILABILITY_UNKNOWN", "PARTIAL_INVENTORY", "COVERAGE_GAP", "REFERENCE_MISSING", "TARGET_SUPPORT_UNKNOWN", "PNG_PRECISION", "OBJ_LIMITATIONS", "BLENDER_REQUIRED")) {
+        for (String code : List.of("MODEL_CONVERTER_UNAVAILABLE", "PARTIAL_INVENTORY", "COVERAGE_GAP", "REFERENCE_MISSING", "TARGET_SUPPORT_UNKNOWN", "PNG_PRECISION", "OBJ_LIMITATIONS", "BLENDER_REQUIRED")) {
             assertTrue(findings.stream().anyMatch(f -> f.code().equals(code) && f.severity() == Finding.Severity.WARNING), code);
         }
         assertTrue(findings.stream().filter(f -> f.code().equals("DOCUMENTED_FORMAT_CANDIDATE")).allMatch(f -> f.message().contains("unverified")));

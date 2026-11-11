@@ -57,6 +57,17 @@ public final class CopyPlanBuilder {
         for (var entry : preview.entries()) {
             if (entry.excluded() || entry.destination().isEmpty()) continue;
             Path destination = Path.of(entry.destination().orElseThrow());
+            if (!entry.conversion().isEmpty()) {
+                Asset asset = inventory.project().assets().stream().filter(a -> a.id().equals(entry.assetId()))
+                        .findFirst().orElseThrow();
+                String strategy = io.github.aiassetmigrate.conversion.Converters.find(asset, entry.conversion().get("format"))
+                        .orElseThrow(() -> new IllegalArgumentException("No converter supports the reviewed conversion"))
+                        .id();
+                commands.add(new AssetOperationCommand(UUID.nameUUIDFromBytes((planId + ":convert:" + entry.assetId())
+                        .getBytes(StandardCharsets.UTF_8)), entry.assetId(), MigrationCommand.Operation.CONVERT_TEXTURE,
+                        destination, entry.conversion(), List.of(), Optional.of(strategy)));
+                continue;
+            }
             boolean rewrite = !entry.rewrites().isEmpty();
             UUID commandId = UUID.nameUUIDFromBytes((planId + (rewrite ? ":rewrite:" : ":copy:") + entry.assetId())
                     .getBytes(StandardCharsets.UTF_8));

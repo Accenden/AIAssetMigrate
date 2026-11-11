@@ -32,7 +32,7 @@ class AnalysisIntegrationTest {
             assertEquals(snapshot.project().inventoryRevision(), result.inventoryRevision());
             assertEquals(target, result.target());
             assertTrue(result.findings().stream().anyMatch(f -> f.code().startsWith("REFERENCE_")));
-            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("CONVERTER_AVAILABILITY_UNKNOWN")));
+            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("MODEL_CONVERTER_UNAVAILABLE")));
             assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("SOURCE_REVALIDATION_INCOMPLETE")));
             assertThrows(IllegalArgumentException.class, () -> manager.assessCompatibility(project,
                     new AssetManager.TargetProfile("godot", "unsupported")));

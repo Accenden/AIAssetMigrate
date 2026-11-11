@@ -20,9 +20,9 @@ files need an explicit acknowledgment or exclusion. Limited target compatibility
 assessment is available. Draft plans, explicit approval and migration (copies plus
 OBJ/MTL reference rewrites) are available with the restrictions below. Optional
 AI suggestions for F02-F04 (`analyze KIND --ai`, or the GUI checkbox) use a
-connected ChatGPT account and are validated before display; AI planning,
-natural-language commands, format conversion and report workflows are not
-implemented. Import and format-level checks do not establish
+connected ChatGPT account and are validated before display. PNG/JPEG texture
+conversion is available through a reviewed `CONVERSION`; model conversion, AI
+planning, natural-language commands and report workflows are not implemented. Import and format-level checks do not establish
 successful import or rendering in a target engine.
 
 ## Build and Run
@@ -77,6 +77,8 @@ Maven launch commands above until application packaging is implemented.
 - `analysis`: conservative categorization and bounded OBJ/MTL reference analysis.
 - `compatibility`: versioned, documented format rules and coverage findings.
 - `cli`: picocli import, analysis, review and logs commands, independent of JavaFX startup.
+- `conversion`: `ConversionStrategy` implementations (`TextureConverter`, `ModelConverter`).
+- `ai`: `LLMClient`, `OpenAIAdapter`, `AIEngine` and the Sign in with ChatGPT client.
 - `gui`: JavaFX import, inventory, analysis and review displays.
 - `src/test`: JUnit 5 contract and CLI tests, including temporary-directory tests.
 
@@ -84,6 +86,16 @@ The shared facade implements import, rescan, inventory loading, analysis, review
 Later workflow methods explicitly reject unsupported operations. A plan data object is not
 authorization to write files; a later execution implementation must validate
 explicit approval and source fingerprints before execution.
+
+## Design Patterns
+
+| Pattern | Roles in the code |
+| --- | --- |
+| **Facade** | `AssetManager` (interface) / `DefaultAssetManager`: the single entry point the CLI and GUI use for import, analysis, review, planning, approval, migration and logs. |
+| **Command** | `MigrationCommand` is the command, with `execute(Receiver)`; `AssetOperationCommand` is the concrete command; `MigrationPlan` stores commands in order; `CopyExecutor` is the invoker and supplies a `MigrationCommand.Receiver` that performs `copy`, `rewriteReferences` or `convertTexture`. |
+| **Strategy** | `ConversionStrategy` is the strategy; `TextureConverter` (PNG/JPEG via ImageIO) and `ModelConverter` (truthfully unsupported) are concrete strategies; `Converters` selects one by `supports()`, and the approved command records its ID. |
+| **Adapter** | `LLMClient` is the target interface; `OpenAIAdapter` adapts it to OpenAI's Responses API (`SiwcInference`); `AIEngine` is the client. |
+| **Observer** | `LogPublisher` is the subject; `LogObserver` is the observer (`update(event)`), registered through `subscribe(...)` / `AssetManager.watch(...)`; the CLI `logs --follow` viewer observes it. |
 
 ## Import
 
@@ -299,8 +311,9 @@ identify the target and inventory revision and retain import and reference
 findings. Format candidates come from the target's documented format list, not
 from a complete decode or actual engine import. Unsupported reference inspection,
 incomplete inventories, missing references and unverified content are reported.
-Installed converters are not probed and no executable conversion choices are
-claimed. The assessment does not approve or perform migration.
+An `INSTALLED_CONVERTERS` finding lists the installed conversion strategies, and
+`MODEL_CONVERTER_UNAVAILABLE` states that model formats are copied, never
+converted. The assessment does not approve or perform migration.
 
 Godot 4.3 is a version-specific reference profile based on its official
 [3D format](https://docs.godotengine.org/en/4.3/tutorials/assets_pipeline/importing_3d_scenes/available_formats.html)
@@ -323,8 +336,21 @@ inspect the recorded outcome, including an interrupted run. The GUI provides the
 same separate draft, approval and migration steps.
 
 Plans contain `COPY` commands, plus `REWRITE_REFERENCES` commands for OBJ/MTL
-files whose reviewed preview lists rewrites; their parameters record each exact
-`from -> to` replacement. Only layouts without blocking findings can be approved.
+files whose reviewed preview lists rewrites (their parameters record each exact
+`from -> to` replacement) and `CONVERT_TEXTURE` commands for reviewed conversions.
+
+**Texture conversion.** Accept a `CONVERSION` review on a PNG or JPEG texture, for
+example `review --kind CONVERSION --decision ACCEPTED --value format=jpg
+--value background=#FFFFFF ...`. Options are `format` (`png` or `jpg`),
+`background` (`#RRGGBB`, required when a texture with transparency becomes JPEG)
+and `quality` (JPEG, 0.1-1.0, default 0.9). The preview changes the destination
+extension, so MTL files referencing the texture are rewritten to the new name.
+The command records the selected strategy (`texture-imageio`) as its converter
+requirement, and execution refuses a different or missing converter. Plan creation
+runs the converter's check on the fingerprinted source, so for example transparency
+without a background produces a blocking `CONVERSION_CHECK_FAILED` before
+approval. Images over 64 megapixels or 64 MiB are rejected. Model conversion is not
+available: no model converter is installed. Only layouts without blocking findings can be approved.
 Approval and execution recheck the inventory, review revision and commands, and the
 executor rejects rewrite commands that differ from the current reviewed preview;
 each approved plan can be run once. A rewrite changes only the matching `mtllib`
@@ -347,7 +373,7 @@ still rechecked before every publish.
 Path and identity rechecks are best effort against hostile concurrent filesystem
 replacement, not a handle-anchored sandbox. Source, output, state and log paths and
 their ancestors must remain trusted against concurrent manipulation. Unsupported
-reference rewrites and conversions remain blocking or unavailable; no such
+reference rewrites and model conversions remain blocking or unavailable; no such
 operations are silently performed.
 
 ## File Logs

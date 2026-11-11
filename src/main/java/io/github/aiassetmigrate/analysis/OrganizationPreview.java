@@ -25,13 +25,21 @@ import java.util.UUID;
 public final class OrganizationPreview {
     private OrganizationPreview() {}
 
-    /** Rewrites are output-copy reference replacements; empty means the source bytes are copied unchanged. */
+    /**
+     * Rewrites are output-copy reference replacements. A non-empty conversion holds the
+     * accepted CONVERSION values (normalized "format" plus options); the destination then
+     * carries the target extension. Both empty means the source bytes are copied unchanged.
+     */
     public record Entry(UUID assetId, Path source, Optional<String> destination, boolean excluded,
-                        List<MaterialAnalysis.Rewrite> rewrites) {
+                        List<MaterialAnalysis.Rewrite> rewrites, Map<String, String> conversion) {
         public Entry(UUID assetId, Path source, Optional<String> destination, boolean excluded) {
-            this(assetId, source, destination, excluded, List.of());
+            this(assetId, source, destination, excluded, List.of(), Map.of());
         }
-        public Entry { rewrites = List.copyOf(rewrites); }
+        public Entry(UUID assetId, Path source, Optional<String> destination, boolean excluded,
+                     List<MaterialAnalysis.Rewrite> rewrites) {
+            this(assetId, source, destination, excluded, rewrites, Map.of());
+        }
+        public Entry { rewrites = List.copyOf(rewrites); conversion = Map.copyOf(conversion); }
     }
     public record Finding(String code, Optional<UUID> assetId, String message) {}
     public record Result(UUID projectId, long inventoryRevision, List<Entry> entries, List<Finding> findings) {
@@ -86,7 +94,8 @@ public final class OrganizationPreview {
                 continue;
             }
             if (decision.kind() != ReviewedChange.Kind.NAME && decision.kind() != ReviewedChange.Kind.FOLDER
-                    && decision.kind() != ReviewedChange.Kind.EXCLUSION) continue;
+                    && decision.kind() != ReviewedChange.Kind.EXCLUSION
+                    && decision.kind() != ReviewedChange.Kind.CONVERSION) continue;
             if (selected.computeIfAbsent(decision.assetId(), ignored -> new HashMap<>())
                     .putIfAbsent(decision.kind(), decision) != null)
                 throw new IllegalArgumentException("Multiple decisions for the same asset and kind");
@@ -109,13 +118,36 @@ public final class OrganizationPreview {
             var move = choices.get(ReviewedChange.Kind.FOLDER);
             if (accepted(rename)) name = rename.values().get("name");
             if (accepted(move)) folder = move.values().get("folder");
+            Map<String, String> conversion = Map.of();
+            var convert = choices.get(ReviewedChange.Kind.CONVERSION);
+            if (accepted(convert) && !excluded) {
+                String format = io.github.aiassetmigrate.conversion.TextureConverter.normalize(convert.values().get("format"));
+                if (format != null && format.equals(io.github.aiassetmigrate.conversion.TextureConverter.normalize(
+                        asset.metadata().get(Asset.FORMAT)))) {
+                    // Already in the requested format: copied unchanged.
+                } else if (format == null || io.github.aiassetmigrate.conversion.Converters.find(asset, format).isEmpty()) {
+                    findings.add(finding("CONVERSION_UNSUPPORTED", asset.id(), "No installed converter supports converting this asset to "
+                            + convert.values().get("format")));
+                } else {
+                    try {
+                        io.github.aiassetmigrate.conversion.TextureConverter.options(format, convert.values());
+                        Map<String, String> values = new HashMap<>(convert.values());
+                        values.put("format", format);
+                        conversion = Map.copyOf(values);
+                        int dot = name.lastIndexOf('.');
+                        name = (dot > 0 ? name.substring(0, dot) : name) + "." + format;
+                    } catch (IllegalArgumentException e) {
+                        findings.add(finding("INVALID_CONVERSION", asset.id(), e.getMessage()));
+                    }
+                }
+            }
             Optional<String> destination = Optional.empty();
             if (!excluded) {
                 if (!validName(name) || !validFolder(folder))
                     findings.add(finding("INVALID_DESTINATION", asset.id(), "Destination is not a portable relative path"));
                 else destination = Optional.of(folder.isEmpty() ? name : folder + "/" + name);
             }
-            Entry entry = new Entry(asset.id(), asset.relativePath(), destination, excluded);
+            Entry entry = new Entry(asset.id(), asset.relativePath(), destination, excluded, List.of(), conversion);
             entries.add(entry); entryById.put(asset.id(), entry);
         }
         for (UUID owner : conflictingCorrections.stream().sorted().toList()) {
@@ -218,7 +250,7 @@ public final class OrganizationPreview {
             Entry entry = entries.get(i);
             var changes = rewrites.get(entry.assetId());
             if (changes != null) entries.set(i, new Entry(entry.assetId(), entry.source(), entry.destination(),
-                    entry.excluded(), List.copyOf(changes.values())));
+                    entry.excluded(), List.copyOf(changes.values()), entry.conversion()));
         }
         return new Result(project.id(), project.inventoryRevision(), entries, findings);
     }

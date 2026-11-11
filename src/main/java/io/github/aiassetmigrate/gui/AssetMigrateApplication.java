@@ -599,9 +599,10 @@ public final class AssetMigrateApplication extends Application {
         reviewAsset.setPromptText("Asset UUID to review");
         reviewKind.getItems().setAll(ReviewedChange.Kind.CATEGORY, ReviewedChange.Kind.RELATIONSHIP,
                 ReviewedChange.Kind.MATERIAL_MAPPING, ReviewedChange.Kind.EXCLUSION,
-                ReviewedChange.Kind.NAME, ReviewedChange.Kind.FOLDER, ReviewedChange.Kind.ACKNOWLEDGMENT);
+                ReviewedChange.Kind.NAME, ReviewedChange.Kind.FOLDER, ReviewedChange.Kind.ACKNOWLEDGMENT,
+                ReviewedChange.Kind.CONVERSION);
         reviewKind.setPromptText("Choose review kind");
-        reviewValue.setPromptText("Category, target UUID, exclusion/acknowledgment reason, filename, or folder (blank for root)");
+        reviewValue.setPromptText("Category, target UUID, reason, filename, folder (blank for root), or conversion such as: jpg background=#FFFFFF");
         reviewReference.setPromptText("Original reference (required for material mapping; optional for relationship)");
         decision.getItems().setAll(ReviewedChange.Decision.ACCEPTED, ReviewedChange.Decision.REJECTED);
         decision.setPromptText("Choose decision");
@@ -890,6 +891,18 @@ public final class AssetMigrateApplication extends Application {
         switch (kind) {
             case CATEGORY -> values = Map.of("category", edited);
             case EXCLUSION, ACKNOWLEDGMENT -> values = Map.of("reason", edited);
+            case CONVERSION -> {
+                // "jpg" or "jpg background=#FFFFFF quality=0.9"
+                String[] parts = edited.split("\\s+");
+                Map<String, String> conversion = new java.util.LinkedHashMap<>();
+                conversion.put("format", parts[0]);
+                for (int i = 1; i < parts.length; i++) {
+                    int equals = parts[i].indexOf('=');
+                    if (equals <= 0) throw new IllegalArgumentException("Conversion options use KEY=VALUE, for example background=#FFFFFF");
+                    conversion.put(parts[i].substring(0, equals), parts[i].substring(equals + 1));
+                }
+                values = Map.copyOf(conversion);
+            }
             case NAME -> values = Map.of("name", edited);
             case FOLDER -> values = Map.of("folder", edited);
             case RELATIONSHIP, MATERIAL_MAPPING -> {

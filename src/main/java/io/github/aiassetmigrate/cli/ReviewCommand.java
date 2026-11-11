@@ -38,7 +38,8 @@ public final class ReviewCommand implements Callable<Integer> {
             "CATEGORY: category; RELATIONSHIP: targetAssetId and optional reference;",
             "MATERIAL_MAPPING: targetAssetId and reference; EXCLUSION: reason;",
             "NAME: name=FILE; FOLDER: folder=RELATIVE (empty for root);",
-            "ACKNOWLEDGMENT: reason (accepts unknown FBX or other uninspectable dependencies).",
+            "ACKNOWLEDGMENT: reason (accepts unknown FBX or other uninspectable dependencies);",
+            "CONVERSION: format=png|jpg, optional background=#RRGGBB and quality=0.1-1.0 (textures).",
             "An accepted RELATIONSHIP or MATERIAL_MAPPING whose reference matches a file",
             "reference corrects that reference; migration rewrites it in the output copy."})
     private Map<String, String> values = new LinkedHashMap<>();

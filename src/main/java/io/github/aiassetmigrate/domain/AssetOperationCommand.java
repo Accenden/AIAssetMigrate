@@ -23,4 +23,13 @@ public record AssetOperationCommand(UUID id, UUID assetId, Operation operation,
             throw new IllegalArgumentException("relativeOutputPath must be relative");
         }
     }
+
+    @Override public String execute(Receiver receiver) throws java.io.IOException {
+        Objects.requireNonNull(receiver, "receiver");
+        return switch (operation) {
+            case COPY -> receiver.copy(this);
+            case REWRITE_REFERENCES -> receiver.rewriteReferences(this);
+            case CONVERT_TEXTURE -> receiver.convertTexture(this);
+        };
+    }
 }

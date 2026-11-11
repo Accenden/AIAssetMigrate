@@ -50,8 +50,13 @@ public final class CompatibilityEngine {
             throw new IllegalArgumentException("Unsupported inventory schema or inspection version");
         }
         List<Finding> result = new ArrayList<>();
-        add(result, snapshot, target, null, null, Finding.Severity.WARNING, "CONVERTER_AVAILABILITY_UNKNOWN",
-                "Converter availability was not checked; no conversion choices are asserted.");
+        add(result, snapshot, target, null, null, Finding.Severity.INFO, "INSTALLED_CONVERTERS",
+                "Installed conversion strategies: " + io.github.aiassetmigrate.conversion.Converters.installed().stream()
+                        .map(io.github.aiassetmigrate.conversion.ConversionStrategy::id)
+                        .collect(java.util.stream.Collectors.joining(", "))
+                        + ". PNG/JPEG textures can be converted with an explicit CONVERSION review.");
+        add(result, snapshot, target, null, null, Finding.Severity.WARNING, "MODEL_CONVERTER_UNAVAILABLE",
+                "No model converter is installed; model formats are copied, never converted.");
         if (!snapshot.hasCompleteCoverage()) {
             add(result, snapshot, target, null, null, Finding.Severity.WARNING, "PARTIAL_INVENTORY",
                     "The scan is partial; compatibility cannot be assessed for unvisited entries.");
