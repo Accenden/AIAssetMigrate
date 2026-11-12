@@ -172,11 +172,12 @@ class ImportRunnerTest {
     @Test
     void organizationRulesAreCapturedAndSubmittedOnWorker() throws Exception {
         var defaults = AssetMigrateApplication.DEFAULT_ORGANIZATION_RULES;
-        assertEquals(AssetManager.NameStyle.PRESERVE, defaults.nameStyle());
-        assertEquals(AssetManager.FolderStyle.PRESERVE, defaults.folderStyle());
+        // Only changes are suggested, so preserve/preserve would always suggest nothing.
+        assertEquals(AssetManager.NameStyle.SNAKE_CASE, defaults.nameStyle());
+        assertEquals(AssetManager.FolderStyle.BY_TYPE, defaults.folderStyle());
         UUID project = UUID.randomUUID();
         for (var rules : List.of(defaults, new AssetManager.OrganizationRules(
-                AssetManager.NameStyle.SNAKE_CASE, AssetManager.FolderStyle.BY_TYPE))) {
+                AssetManager.NameStyle.KEBAB_CASE, AssetManager.FolderStyle.PRESERVE))) {
             var operation = AssetMigrateApplication.organizationAnalysis(rules);
             var analysis = new AssetManager.AnalysisResult(17L, List.of(), List.of());
             AtomicReference<Object[]> arguments = new AtomicReference<>();

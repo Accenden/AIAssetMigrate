@@ -25,8 +25,8 @@ conversion is available through a reviewed `CONVERSION`. Migrated outputs can be
 validated and the saved reports listed (`validate`, `history`), with an optional
 advisory AI summary. Optional AI also explains compatibility findings
 (`compatibility --ai`), proposes plan steps that the controller checks (`plan --ai`)
-and interprets plain-language requests (`command`). The GUI has an Agent Commands
-panel and a Live Logs viewer. OBJ and FBX models can be converted to
+and interprets plain-language requests (`command`). The GUI is a step-by-step wizard
+with an Agent and a Live logs viewer in a side drawer. OBJ and FBX models can be converted to
 self-contained GLB with the Assimp library that Maven bundles (no separate install).
 Import and format-level checks do not establish
 successful import or rendering in a target engine.
@@ -73,6 +73,31 @@ macOS/Linux. `.gitattributes` keeps `mvnw` and `*.sh` checked out with LF ending
 The build produces a library JAR, not a bundled standalone application; use the
 Maven launch commands above until application packaging is implemented.
 
+## Using the GUI
+
+The GUI walks through the workflow as five steps, shown in a stepper at the top:
+
+1. **Project**: import an asset folder, or open a saved project by ID (the last one is
+   remembered). The workspace folder, where projects, plans, reports and logs are saved,
+   is under a collapsed section; it defaults to `~/AIAssetMigrate` and its logs go in
+   `<workspace>/logs`.
+2. **Review** (optional): run a check (Categories, Relationships, Materials, Names,
+   Folders), then select a suggestion and **Accept** or **Reject** it. Editing a
+   suggestion, adding your own decision (for example an `EXCLUSION`, `ACKNOWLEDGMENT` or
+   `CONVERSION`), rename rules, saved decisions and the layout preview are in
+   collapsed sections.
+3. **Target**: pick an engine and check compatibility.
+4. **Plan**: choose the output folder, create the plan, read the files it will write, and
+   approve it. Blocking issues are listed with the next step to fix each.
+5. **Migrate**: run the approved plan; the outputs are validated and the report shown.
+   Re-validation and report history are in a collapsed section.
+
+Later steps unlock as their prerequisites are met; completed steps stay clickable.
+**Back** and **Continue** are in the footer with the current status. The Agent, Live
+logs and AI account (optional) open in a side drawer from the header. The interface
+follows wizard and progressive-disclosure guidance: one main action per step, with
+rarely needed controls collapsed.
+
 ## Structure
 
 - `domain`: immutable asset, plan, command, run, report, and event contracts.
@@ -86,7 +111,7 @@ Maven launch commands above until application packaging is implemented.
 - `conversion`: `ConversionStrategy` implementations (`TextureConverter`, `ModelConverter`).
 - `ai`: `LLMClient`, `OpenAIAdapter`, `AIEngine` (suggestions, explanations, plan proposals, summaries, interpretation) and the Sign in with ChatGPT client.
 - `validation`: `OutputValidator`, the read-only F08 output checks.
-- `gui`: JavaFX tabs for every feature, including Agent Commands and Live Logs.
+- `gui`: the JavaFX wizard (`AssetMigrateApplication`, step gating in `WizardFlow`), with the Agent, Live logs and AI account in a side drawer.
 - `src/test`: JUnit 5 contract and CLI tests, including temporary-directory tests.
 
 The shared facade implements every feature (F01-F10). A plan data object is not
@@ -101,7 +126,7 @@ fingerprints first, and no AI path can approve or migrate.
 | **Command** | `MigrationCommand` is the command, with `execute(Receiver)`; `AssetOperationCommand` is the concrete command; `MigrationPlan` stores commands in order; `CopyExecutor` is the invoker and supplies a `MigrationCommand.Receiver` that performs `copy`, `rewriteReferences` or `convertTexture`. |
 | **Strategy** | `ConversionStrategy` is the strategy; `TextureConverter` (PNG/JPEG via ImageIO) and `AssimpModelConverter` (OBJ/FBX to GLB via LWJGL's bundled Assimp) are concrete strategies; `Converters` selects one by `supports()`, and the approved command records its versioned ID. |
 | **Adapter** | `LLMClient` is the target interface; `OpenAIAdapter` adapts it to OpenAI's Responses API (`SiwcInference`); `AIEngine` is the client. |
-| **Observer** | `LogPublisher` is the subject; `LogObserver` is the observer (`update(event)`), registered through `subscribe(...)` / `AssetManager.watch(...)`; `LogFollower` delivers committed events to read-only viewers such as the GUI Live Logs tab, which marshals each `update` onto the JavaFX thread. |
+| **Observer** | `LogPublisher` is the subject; `LogObserver` is the observer (`update(event)`), registered through `subscribe(...)` / `AssetManager.watch(...)`; `LogFollower` delivers committed events to read-only viewers such as the GUI Live logs drawer, which marshals each `update` onto the JavaFX thread. |
 
 ## Import
 
@@ -176,8 +201,8 @@ bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigr
 ```
 
 The analysis kind can be `categories`, `relationships`, `materials`, `names`, or `folders`. Suggestions
-are not accepted automatically. The JavaFX Analysis and Review tab can submit an
-explicit decision; the CLI can also do so, for example:
+are not accepted automatically. The GUI's Review step accepts or rejects a selected
+suggestion; the CLI can also do so, for example:
 
 ```bash
 bash ./mvnw -q exec:java -Dexec.mainClass=io.github.aiassetmigrate.cli.AssetMigrateCli \
@@ -227,13 +252,13 @@ must already be one of the model's (possibly corrected) material libraries, othe
 preview with `INSPECTION_UNSUPPORTED` until it is excluded or explicitly
 acknowledged: `review --kind ACKNOWLEDGMENT --value reason=...`. Acknowledgments are
 rejected for OBJ/MTL (which are inspected) and for textures. Use `reviews --project PROJECT-UUID` with the
-state directory and its managed `logs` child to list saved decisions, or use **Load Saved
-Reviews** in the GUI.
+state directory and its managed `logs` child to list saved decisions, or open **Saved
+decisions** in the GUI's Review step.
 
 ### AI suggestions (hybrid F02-F04)
 
-Rule-based analysis always runs. Adding `--ai` to `analyze` (or ticking **Include
-AI suggestions** in the GUI) also asks the connected model, and the results are
+Rule-based analysis always runs. Adding `--ai` to `analyze` (or ticking **Use AI
+suggestions** in the GUI) also asks the connected model, and the results are
 merged: rule suggestions are kept, and AI suggestions appear alongside them marked
 `Source: AI` with an `AI_SUGGESTION` finding that gives the model's reason.
 Accepting one is an ordinary explicit `review`; nothing is applied automatically.
@@ -265,8 +290,8 @@ finding. There is no API-key or paid fallback.
 `auth connect` signs in with ChatGPT in the browser (OAuth with PKCE), lists the
 models the account may use (`GET /v1/models`, `visibility: "list"`) and selects
 `--model SLUG` or the first one. `auth status`, `auth models`,
-`auth use-model SLUG` and `auth disconnect` manage the saved account; the GUI has
-**Connect AI Account** and **Disconnect AI Account**. Credentials are stored per
+`auth use-model SLUG` and `auth disconnect` manage the saved account; the GUI's AI
+drawer (header button) has **Connect account** and **Disconnect**. Credentials are stored per
 user, outside project state, in `%APPDATA%\AIAssetMigrate` (Windows, encrypted with
 DPAPI for the current user) or `~/.config/aiassetmigrate` (owner-only file
 permissions). Access tokens are refreshed shortly before expiry under a
@@ -277,9 +302,15 @@ remote revocation was not confirmed. Connecting never changes migration approval
 Requests follow OpenAI's documented Sign in with ChatGPT flow, but the live service
 has only been exercised through local fakes in tests.
 
-Name and folder analysis starts with the current names and folders. Edit and
-explicitly accept a `NAME` review (`--value name=FILE`) or `FOLDER` review
-(`--value folder=RELATIVE-FOLDER`, with an empty value for the output root), then
+Name and folder analysis suggests only real changes, never a file's current name or
+folder. `analyze names` applies snake_case (lower case, words joined by `_`, extension
+unchanged); `analyze folders` uses each file's accepted category, otherwise one
+folder per type. A `NAME_RULE` or `FOLDER_RULE` finding says which rule was used and
+when every file already follows it. `analyze-organization` offers the other styles,
+also listing only changes; every file's resulting destination is still checked for
+conflicts. Accept a suggestion, or enter your own `NAME` review (`--value name=FILE`)
+or `FOLDER` review (`--value folder=RELATIVE-FOLDER`, with an empty value for the
+output root), then
 run `preview-organization --project PROJECT-UUID --inventory-revision 1` with the
 state directory and its managed `logs` child. The GUI also provides an organization preview.
 The preview is read-only and checks lexical destination conflicts, reference
@@ -292,13 +323,14 @@ rewritten only as single tokens: if the old or new text would need spaces, quote
 `REFERENCE_REWRITE_UNSUPPORTED` and blocks instead. Unresolved references without an
 accepted correction remain blocking. The plan workflow is described below.
 
-To generate rule-based proposals instead, use `analyze-organization` with
+To choose other styles, use `analyze-organization` with
 `--name-style preserve|snake-case|kebab-case` and
 `--folder-style preserve|by-type|by-category`, along with the project,
 state-directory and log-directory options. `by-category` places each asset in a
 folder named after its accepted `CATEGORY` review, falling back to its type folder
 (Models, Materials, Textures, Other) when it has none. The GUI offers
-the same rules. These are combined proposals for the current inventory, not saved
+the same rules (defaulting to snake-case and by-type). Only assets whose name or folder
+would change are listed. These are combined proposals for the current inventory, not saved
 reviews. Review each desired change explicitly and run the organization preview
 again before proceeding; its reference and destination checks use the saved
 decisions rather than the unaccepted rule proposals.
@@ -472,13 +504,13 @@ report keeps only its deterministic summary with an `AI_UNAVAILABLE` or
 Reports are append-only JSON files in `<state-dir>/projects/<project>/reports`.
 `history --project PROJECT-UUID [--details]` lists them oldest first and says so
 when there is no history; an unexpected or malformed file there is an error rather
-than being skipped. The GUI's Validation and History tab provides both operations,
-shows the report saved when a migration finishes, and fills in its run ID.
+than being skipped. The GUI's Migrate step shows the report saved when a migration finishes;
+its **Re-validate or view earlier reports** section provides both operations.
 
 ## Natural-Language Commands
 
 `command --project PROJECT-UUID --state-directory DIR --log-directory DIR REQUEST...`
-(or the GUI's Agent Commands panel) sends one plain-language request to the
+(or the GUI's Agent drawer) sends one plain-language request to the
 connected model, which must map it to exactly one allowlisted action:
 `SHOW_INVENTORY`, `LIST_TARGETS`, `ANALYZE` (rule-based), `CHECK_COMPATIBILITY`,
 `PREVIEW_ORGANIZATION`, `CREATE_PLAN` (a draft only), `SHOW_PLAN`, `SHOW_RUN`,
@@ -497,10 +529,10 @@ interpreted.
 
 ## File Logs
 
-The GUI's Live Logs tab replays a project's saved events after a sequence number and
+The GUI's Live logs drawer replays a project's saved events after a sequence number and
 then follows new ones (every 500 ms), like `logs --follow`. It only reads the
 committed log, so it never blocks writers, and stopping or losing the viewer never
-stops work. After a disconnection, Follow Logs resumes from the last event shown.
+stops work. After a disconnection, Follow resumes from the last event shown.
 
 No SQLite is used or required. Each project has a UTF-8 JSON-lines file named
 `<project-uuid>.log` in `<state-dir>/logs`. Keep the state directory outside

@@ -1,0 +1,789 @@
+/*
+ * Dark theme in the style of shadcn/ui (zinc palette): flat surfaces, 1px borders,
+ * 6px radii, muted secondary text and a light primary button. Loaded over modena.
+ */
+
+/* ---- Tokens ------------------------------------------------------------ */
+.root {
+    -c-background: #09090b;      /* zinc-950 */
+    -c-card: #0f0f11;
+    -c-foreground: #fafafa;      /* zinc-50 */
+    -c-muted: #27272a;           /* zinc-800 */
+    -c-muted-foreground: #a1a1aa;/* zinc-400 */
+    -c-subtle-foreground: #71717a;/* zinc-500 */
+    -c-border: #27272a;
+    -c-border-strong: #3f3f46;   /* zinc-700 */
+    -c-primary: #fafafa;
+    -c-primary-hover: #e4e4e7;
+    -c-primary-pressed: #d4d4d8;
+    -c-primary-foreground: #18181b;
+    -c-secondary-hover: #1c1c1f;
+    -c-destructive: #b91c1c;
+    -c-destructive-hover: #991b1b;
+    -c-ring: rgba(212, 212, 216, 0.35);
+    -c-ring-border: #71717a;
+
+    /* modena base colors, so anything not styled below still renders dark */
+    -fx-base: #18181b;
+    -fx-background: -c-background;
+    -fx-control-inner-background: -c-background;
+    -fx-control-inner-background-alt: -c-card;
+    -fx-text-base-color: -c-foreground;
+    -fx-text-background-color: -c-foreground;
+    -fx-text-inner-color: -c-foreground;
+    -fx-accent: -c-border-strong;
+    -fx-focus-color: -c-ring-border;
+    -fx-faint-focus-color: transparent;
+    -fx-selection-bar: -c-muted;
+    -fx-selection-bar-non-focused: -c-muted;
+    -fx-selection-bar-text: -c-foreground;
+    -fx-box-border: -c-border;
+    -fx-text-box-border: -c-border;
+    -fx-mark-color: -c-primary-foreground;
+
+    -fx-background-color: -c-background;
+    -fx-font-size: 13px;
+}
+
+/* ---- Typography -------------------------------------------------------- */
+.label {
+    -fx-text-fill: -c-foreground;
+}
+
+.h1 {
+    -fx-font-size: 24px;
+    -fx-font-weight: bold;
+}
+
+.h2 {
+    -fx-font-size: 20px;
+    -fx-font-weight: bold;
+}
+
+.h3 {
+    -fx-font-size: 15px;
+    -fx-font-weight: bold;
+}
+
+.brand {
+    -fx-font-size: 16px;
+    -fx-font-weight: bold;
+}
+
+.muted {
+    -fx-text-fill: -c-muted-foreground;
+}
+
+.field-label {
+    -fx-text-fill: -c-foreground;
+    -fx-font-weight: 600;
+}
+
+/* ---- Buttons ----------------------------------------------------------- */
+/* Default buttons are shadcn "outline": transparent fill with a 1px border. */
+.button {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+    -fx-text-fill: -c-foreground;
+    -fx-font-weight: 600;
+    -fx-padding: 7 14 7 14;
+    -fx-cursor: hand;
+}
+
+.button:hover {
+    -fx-background-color: -c-border, -c-muted;
+}
+
+.button:armed {
+    -fx-background-color: -c-border-strong, -c-border-strong;
+}
+
+.button:focus-visible {
+    -fx-background-color: -c-ring, -c-ring-border, -c-background;
+    -fx-background-insets: -3, 0, 1;
+    -fx-background-radius: 9, 6, 5;
+}
+
+.button:disabled {
+    -fx-opacity: 0.5;
+}
+
+/* Primary: the main action of a section. */
+.button.primary,
+.button:default {
+    -fx-background-color: -c-primary;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6;
+    -fx-text-fill: -c-primary-foreground;
+}
+
+.button.primary:hover,
+.button:default:hover {
+    -fx-background-color: -c-primary-hover;
+}
+
+.button.primary:armed,
+.button:default:armed {
+    -fx-background-color: -c-primary-pressed;
+}
+
+.button.primary:focus-visible,
+.button:default:focus-visible {
+    -fx-background-color: -c-ring, -c-primary;
+    -fx-background-insets: -3, 0;
+    -fx-background-radius: 9, 6;
+}
+
+/* Destructive: actions that remove saved state. */
+.button.destructive {
+    -fx-background-color: -c-destructive;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6;
+    -fx-text-fill: -c-foreground;
+}
+
+.button.destructive:hover {
+    -fx-background-color: -c-destructive-hover;
+}
+
+.button.destructive:focus-visible {
+    -fx-background-color: rgba(239, 68, 68, 0.35), -c-destructive;
+    -fx-background-insets: -3, 0;
+    -fx-background-radius: 9, 6;
+}
+
+/* ---- Inputs ------------------------------------------------------------ */
+.text-input {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+    -fx-text-fill: -c-foreground;
+    -fx-prompt-text-fill: -c-subtle-foreground;
+    -fx-highlight-fill: -c-border-strong;
+    -fx-highlight-text-fill: -c-foreground;
+    -fx-padding: 7 10 7 10;
+}
+
+.text-input:focused {
+    -fx-background-color: -c-ring, -c-ring-border, -c-background;
+    -fx-background-insets: -3, 0, 1;
+    -fx-background-radius: 9, 6, 5;
+}
+
+.text-input:disabled {
+    -fx-opacity: 0.5;
+}
+
+.text-area {
+    -fx-padding: 1;
+}
+
+.text-area .content {
+    -fx-background-color: transparent;
+    -fx-padding: 8 10 8 10;
+}
+
+.text-area .scroll-pane,
+.text-area .scroll-pane > .viewport {
+    -fx-background-color: transparent;
+}
+
+/* Read-only areas show reports, plans and logs: a card surface and a monospace font. */
+.text-area:readonly {
+    -fx-background-color: -c-border, -c-card;
+    -fx-font-family: "Consolas";
+}
+
+.text-area:readonly:focused {
+    -fx-background-color: -c-ring, -c-ring-border, -c-card;
+}
+
+/* ---- Combo box --------------------------------------------------------- */
+.combo-box-base {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+    -fx-padding: 1 4 1 4;
+    -fx-cursor: hand;
+}
+
+.combo-box-base:hover {
+    -fx-background-color: -c-border, -c-secondary-hover;
+}
+
+.combo-box-base:focused,
+.combo-box-base:showing {
+    -fx-background-color: -c-ring, -c-ring-border, -c-background;
+    -fx-background-insets: -3, 0, 1;
+    -fx-background-radius: 9, 6, 5;
+}
+
+.combo-box > .list-cell {
+    -fx-text-fill: -c-foreground;
+    -fx-background-color: transparent;
+    -fx-padding: 5 6 5 6;
+}
+
+.combo-box-base > .arrow-button {
+    -fx-background-color: transparent;
+    -fx-padding: 0 8 0 4;
+}
+
+.combo-box-base > .arrow-button > .arrow {
+    -fx-background-color: -c-muted-foreground;
+}
+
+.combo-box-popup > .list-view {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+    -fx-padding: 4;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.6), 16, 0, 0, 4);
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell {
+    -fx-background-color: transparent;
+    -fx-background-radius: 4;
+    -fx-text-fill: -c-foreground;
+    -fx-padding: 6 8 6 8;
+}
+
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:hover,
+.combo-box-popup > .list-view > .virtual-flow > .clipped-container > .sheet > .list-cell:selected {
+    -fx-background-color: -c-muted;
+}
+
+/* ---- Check box --------------------------------------------------------- */
+.check-box {
+    -fx-text-fill: -c-foreground;
+    -fx-label-padding: 0 0 0 8;
+    -fx-cursor: hand;
+}
+
+.check-box > .box {
+    -fx-background-color: -c-border-strong, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 4, 3;
+    -fx-padding: 3;
+}
+
+.check-box:hover > .box {
+    -fx-background-color: -c-ring-border, -c-background;
+}
+
+.check-box:selected > .box {
+    -fx-background-color: -c-primary;
+    -fx-background-insets: 0;
+    -fx-background-radius: 4;
+}
+
+.check-box > .box > .mark {
+    -fx-background-color: transparent;
+}
+
+.check-box:selected > .box > .mark {
+    -fx-background-color: -c-primary-foreground;
+}
+
+.check-box:focus-visible > .box {
+    -fx-background-color: -c-ring, -c-ring-border, -c-background;
+    -fx-background-insets: -3, 0, 1;
+    -fx-background-radius: 7, 4, 3;
+}
+
+.check-box:selected:focus-visible > .box {
+    -fx-background-color: -c-ring, -c-primary;
+    -fx-background-insets: -3, 0;
+    -fx-background-radius: 7, 4;
+}
+
+/* ---- App frame: header, stepper, step area, footer, drawer -------------- */
+.app-header {
+    -fx-padding: 12 20 12 20;
+    -fx-border-color: transparent transparent -c-border transparent;
+}
+
+.stepper {
+    -fx-padding: 10 20 10 20;
+    -fx-border-color: transparent transparent -c-border transparent;
+}
+
+.step {
+    -fx-background-color: transparent;
+    -fx-background-radius: 8;
+    -fx-padding: 6 10 6 6;
+    -fx-cursor: hand;
+}
+
+.step:hover {
+    -fx-background-color: -c-secondary-hover;
+}
+
+.step:focus-visible {
+    -fx-background-color: -c-ring-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 8, 7;
+}
+
+.step:disabled {
+    -fx-opacity: 0.4;
+}
+
+.step-index {
+    -fx-min-width: 26;
+    -fx-min-height: 26;
+    -fx-max-width: 26;
+    -fx-max-height: 26;
+    -fx-alignment: center;
+    -fx-background-color: -c-border-strong, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 13, 12;
+    -fx-text-fill: -c-muted-foreground;
+    -fx-font-weight: bold;
+    -fx-font-size: 12px;
+}
+
+.step-label {
+    -fx-text-fill: -c-muted-foreground;
+    -fx-font-weight: 600;
+}
+
+.step-current .step-index {
+    -fx-background-color: -c-primary;
+    -fx-background-insets: 0;
+    -fx-background-radius: 13;
+    -fx-text-fill: -c-primary-foreground;
+}
+
+.step-current .step-label,
+.step-complete .step-label {
+    -fx-text-fill: -c-foreground;
+}
+
+.step-complete .step-index {
+    -fx-background-color: -c-muted;
+    -fx-background-insets: 0;
+    -fx-background-radius: 13;
+    -fx-text-fill: -c-foreground;
+}
+
+.step-connector {
+    -fx-background-color: -c-border;
+    -fx-min-height: 1;
+    -fx-pref-height: 1;
+    -fx-max-height: 1;
+    -fx-min-width: 16;
+}
+
+.step-host {
+    -fx-background-color: -c-background;
+}
+
+.step-view {
+    -fx-padding: 24 28 24 28;
+}
+
+.app-footer {
+    -fx-padding: 12 20 12 20;
+    -fx-border-color: -c-border transparent transparent transparent;
+    -fx-background-color: -c-card;
+}
+
+.status {
+    -fx-text-fill: -c-muted-foreground;
+}
+
+.drawer {
+    -fx-background-color: -c-card;
+    -fx-border-color: transparent transparent transparent -c-border;
+    -fx-padding: 16;
+}
+
+/* ---- Toggle buttons: header tools, segmented controls, choice cards ---- */
+.toggle-button {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+    -fx-text-fill: -c-foreground;
+    -fx-font-weight: 600;
+    -fx-padding: 6 12 6 12;
+    -fx-cursor: hand;
+}
+
+.toggle-button:hover {
+    -fx-background-color: -c-border, -c-muted;
+}
+
+.toggle-button:selected {
+    -fx-background-color: -c-border-strong, -c-muted;
+}
+
+.toggle-button:focus-visible {
+    -fx-background-color: -c-ring, -c-ring-border, -c-background;
+    -fx-background-insets: -3, 0, 1;
+    -fx-background-radius: 9, 6, 5;
+}
+
+/* Header tools (Agent, Live logs, AI): quiet ghost buttons, highlighted while their drawer is open. */
+.tool-toggle {
+    -fx-background-color: transparent;
+    -fx-text-fill: -c-muted-foreground;
+    -fx-padding: 5 10 5 10;
+}
+
+.tool-toggle:hover {
+    -fx-background-color: -c-muted;
+    -fx-text-fill: -c-foreground;
+}
+
+.tool-toggle:selected {
+    -fx-background-color: -c-muted;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6;
+    -fx-text-fill: -c-foreground;
+}
+
+/* Segmented control, styled like shadcn Tabs: a muted track with a raised selected item. */
+.segmented {
+    -fx-background-color: -c-muted;
+    -fx-background-radius: 8;
+    -fx-padding: 3;
+}
+
+.segmented > .toggle-button {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-background-radius: 6;
+    -fx-text-fill: -c-muted-foreground;
+    -fx-padding: 5 12 5 12;
+}
+
+.segmented > .toggle-button:hover {
+    -fx-text-fill: -c-foreground;
+}
+
+.segmented > .toggle-button:selected {
+    -fx-background-color: -c-background;
+    -fx-text-fill: -c-foreground;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.5), 4, 0, 0, 1);
+}
+
+.segmented > .toggle-button:focus-visible {
+    -fx-background-color: -c-ring-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+}
+
+/* Large selectable cards, for example the target engines. */
+.choice-card {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 8, 7;
+    -fx-padding: 12 18 12 18;
+    -fx-min-width: 180;
+    -fx-alignment: center-left;
+}
+
+.choice-card:hover {
+    -fx-background-color: -c-border-strong, -c-secondary-hover;
+}
+
+.choice-card:selected {
+    -fx-background-color: -c-primary, -c-muted;
+    -fx-background-insets: 0, 2;
+    -fx-background-radius: 8, 6;
+}
+
+.choice-title {
+    -fx-font-size: 15px;
+    -fx-font-weight: bold;
+}
+
+/* ---- Badges and callouts ----------------------------------------------- */
+.badge {
+    -fx-background-color: -c-muted;
+    -fx-background-radius: 999;
+    -fx-padding: 3 10 3 10;
+    -fx-text-fill: -c-foreground;
+    -fx-font-size: 12px;
+    -fx-font-weight: 600;
+}
+
+.badge-success {
+    -fx-background-color: rgba(34, 197, 94, 0.15);
+    -fx-text-fill: #4ade80;
+}
+
+.badge-warning {
+    -fx-background-color: rgba(245, 158, 11, 0.15);
+    -fx-text-fill: #fbbf24;
+}
+
+.badge-danger {
+    -fx-background-color: rgba(239, 68, 68, 0.15);
+    -fx-text-fill: #f87171;
+}
+
+.callout {
+    -fx-background-color: -c-border, -c-card;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 8, 7;
+    -fx-padding: 12 14 12 14;
+    -fx-max-width: infinity;
+}
+
+.callout-danger {
+    -fx-background-color: rgba(239, 68, 68, 0.45), #1a0e0f;
+    -fx-text-fill: #fecaca;
+}
+
+/* ---- Collapsible sections (progressive disclosure) -------------------- */
+.titled-pane {
+    -fx-text-fill: -c-foreground;
+}
+
+.titled-pane > .title {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 0 0 1 0;
+    -fx-background-radius: 0;
+    -fx-padding: 10 4 10 2;
+    -fx-cursor: hand;
+}
+
+.titled-pane > .title > .text {
+    -fx-fill: -c-foreground;
+    -fx-font-weight: 600;
+}
+
+.titled-pane > .title:hover {
+    -fx-background-color: -c-border, -c-secondary-hover;
+}
+
+.titled-pane > .title > .arrow-button {
+    -fx-background-color: transparent;
+    -fx-padding: 0 8 0 4;
+}
+
+.titled-pane > .title > .arrow-button > .arrow {
+    -fx-background-color: -c-muted-foreground;
+}
+
+.titled-pane:focused > .title {
+    -fx-background-color: -c-border, -c-background;
+}
+
+.titled-pane > .content {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-padding: 10 2 12 2;
+}
+
+/* ---- Tables ------------------------------------------------------------ */
+.table-view {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 8, 7;
+    -fx-padding: 1;
+    -fx-table-cell-border-color: transparent;
+}
+
+.table-view:focused {
+    -fx-background-color: -c-ring-border, -c-background;
+}
+
+.table-view > .column-header-background {
+    -fx-background-color: -c-border, -c-card;
+    -fx-background-insets: 0, 0 0 1 0;
+    -fx-background-radius: 7 7 0 0, 7 7 0 0;
+}
+
+.table-view .column-header,
+.table-view .filler,
+.table-view > .column-header-background > .show-hide-columns-button {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-size: 36;
+}
+
+.table-view .column-header > .label {
+    -fx-text-fill: -c-muted-foreground;
+    -fx-font-weight: 600;
+    -fx-alignment: center-left;
+    -fx-padding: 0 8 0 8;
+}
+
+.table-view .column-header .arrow {
+    -fx-background-color: -c-muted-foreground;
+}
+
+.table-view .column-resize-line {
+    -fx-background-color: -c-ring-border;
+}
+
+.table-row-cell {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 0 0 1 0;
+    -fx-text-background-color: -c-foreground;
+    -fx-cell-size: 34;
+}
+
+.table-row-cell:empty {
+    -fx-background-color: -c-background;
+    -fx-background-insets: 0;
+}
+
+.table-row-cell:hover:filled {
+    -fx-background-color: -c-border, #18181b;
+}
+
+.table-row-cell:selected,
+.table-view:focused > .virtual-flow > .clipped-container > .sheet > .table-row-cell:filled:selected {
+    -fx-background-color: -c-border, -c-muted;
+    -fx-background-insets: 0, 0 0 1 0;
+    -fx-text-background-color: -c-foreground;
+}
+
+.table-cell {
+    -fx-padding: 0 8 0 8;
+    -fx-border-color: transparent;
+    -fx-alignment: center-left;
+}
+
+.table-view .placeholder > .label {
+    -fx-text-fill: -c-muted-foreground;
+}
+
+/* ---- Lists (fallback for any list view) -------------------------------- */
+.list-view {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 8, 7;
+}
+
+.list-cell {
+    -fx-text-fill: -c-foreground;
+    -fx-background-color: transparent;
+}
+
+.list-cell:filled:selected {
+    -fx-background-color: -c-muted;
+}
+
+/* ---- Split pane, scroll pane, scroll bars ------------------------------ */
+.split-pane {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+
+.split-pane > .split-pane-divider {
+    -fx-background-color: transparent;
+    -fx-padding: 0 6 0 6;
+}
+
+.split-pane:vertical > .split-pane-divider {
+    -fx-padding: 6 0 6 0;
+}
+
+.split-pane > .split-pane-divider:hover {
+    -fx-background-color: -c-border;
+    -fx-background-insets: 0 5 0 5;
+}
+
+.split-pane:vertical > .split-pane-divider:hover {
+    -fx-background-insets: 5 0 5 0;
+}
+
+.scroll-pane,
+.scroll-pane > .viewport {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+
+.scroll-pane > .corner,
+.table-view .corner {
+    -fx-background-color: transparent;
+}
+
+.scroll-bar {
+    -fx-background-color: transparent;
+    -fx-background-insets: 0;
+    -fx-padding: 1;
+}
+
+.scroll-bar > .thumb {
+    -fx-background-color: -c-border-strong;
+    -fx-background-insets: 1;
+    -fx-background-radius: 8;
+}
+
+.scroll-bar > .thumb:hover,
+.scroll-bar > .thumb:pressed {
+    -fx-background-color: #52525b;
+}
+
+.scroll-bar > .track,
+.scroll-bar > .track-background {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+}
+
+.scroll-bar:vertical > .increment-button,
+.scroll-bar:vertical > .decrement-button {
+    -fx-background-color: transparent;
+    -fx-padding: 0 4 0 4;
+}
+
+.scroll-bar:horizontal > .increment-button,
+.scroll-bar:horizontal > .decrement-button {
+    -fx-background-color: transparent;
+    -fx-padding: 4 0 4 0;
+}
+
+.scroll-bar > .increment-button > .increment-arrow,
+.scroll-bar > .decrement-button > .decrement-arrow {
+    -fx-background-color: transparent;
+    -fx-padding: 0;
+}
+
+/* ---- Progress, menus, tooltips ----------------------------------------- */
+.progress-indicator {
+    -fx-progress-color: -c-foreground;
+}
+
+.context-menu {
+    -fx-background-color: -c-border, -c-background;
+    -fx-background-insets: 0, 1;
+    -fx-background-radius: 6, 5;
+    -fx-padding: 4;
+    -fx-effect: dropshadow(gaussian, rgba(0, 0, 0, 0.6), 16, 0, 0, 4);
+}
+
+.menu-item {
+    -fx-background-radius: 4;
+    -fx-padding: 6 10 6 10;
+}
+
+.menu-item > .label {
+    -fx-text-fill: -c-foreground;
+}
+
+.menu-item:focused {
+    -fx-background-color: -c-muted;
+}
+
+.menu-item:disabled > .label {
+    -fx-text-fill: -c-subtle-foreground;
+}
+
+.context-menu > .separator > .line {
+    -fx-border-color: -c-border transparent transparent transparent;
+}
+
+.tooltip {
+    -fx-background-color: -c-primary;
+    -fx-background-radius: 6;
+    -fx-text-fill: -c-primary-foreground;
+    -fx-padding: 6 10 6 10;
+    -fx-font-size: 12px;
+}

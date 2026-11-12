@@ -157,20 +157,25 @@ class PlanReviewTest {
     }
 
     @Test
-    void outcomeTextShowsInterruptionAndValidationResult() {
-        UUID planId = UUID.randomUUID();
-        var run = new MigrationRun(UUID.randomUUID(), project, planId, 1, output, RunStatus.INCOMPLETE,
-                Map.of(), Instant.EPOCH, Optional.of(Instant.EPOCH), Optional.empty());
-        var report = new io.github.aiassetmigrate.domain.Report(UUID.randomUUID(), project, planId, run.id(), RunStatus.INCOMPLETE,
+    void resultTextNamesFilesAndShowsInterruptionAndValidationFailure() {
+        MigrationPlan approved = plan(PlanStatus.APPROVED);
+        var command = approved.commands().getFirst();
+        var context = context(approved);
+        var run = new MigrationRun(UUID.randomUUID(), project, approved.id(), 1, output, RunStatus.INCOMPLETE,
+                Map.of(command.id(), io.github.aiassetmigrate.domain.StepStatus.PENDING), Instant.EPOCH,
+                Optional.of(Instant.EPOCH), Optional.empty());
+        var report = new io.github.aiassetmigrate.domain.Report(UUID.randomUUID(), project, approved.id(), run.id(), RunStatus.INCOMPLETE,
                 io.github.aiassetmigrate.domain.Report.ValidationStatus.INCOMPLETE, List.of(), "summary", Optional.empty(), Instant.EPOCH);
-        String validated = AssetMigrateApplication.formatOutcome(
-                new AssetManager.MigrationOutcome(run, Optional.of(report), Optional.of("source changed"), Optional.empty()));
-        assertTrue(validated.contains("status: INCOMPLETE"), validated);
+        String validated = AssetMigrateApplication.formatResult(
+                new AssetManager.MigrationOutcome(run, Optional.of(report), Optional.of("source changed"), Optional.empty()), context);
+        assertTrue(validated.startsWith("Run INCOMPLETE: 0 of 1 step(s) succeeded."), validated);
+        assertTrue(validated.contains("PENDING  models/a.obj (copy)"), "steps are shown by output path: " + validated);
+        assertFalse(validated.contains(command.id().toString()), "command IDs are not shown");
         assertTrue(validated.contains("Migration interrupted: source changed"), validated);
-        assertTrue(validated.contains("Validation INCOMPLETE; report " + report.id() + " saved"), validated);
+        assertFalse(validated.contains("Validation failed"), validated);
 
-        String unvalidated = AssetMigrateApplication.formatOutcome(
-                new AssetManager.MigrationOutcome(run, Optional.empty(), Optional.empty(), Optional.of("Another writer")));
+        String unvalidated = AssetMigrateApplication.formatResult(
+                new AssetManager.MigrationOutcome(run, Optional.empty(), Optional.empty(), Optional.of("Another writer")), context);
         assertFalse(unvalidated.contains("interrupted"), unvalidated);
         assertTrue(unvalidated.contains("Validation failed: Another writer"), unvalidated);
         assertTrue(unvalidated.contains("No report was saved"), unvalidated);

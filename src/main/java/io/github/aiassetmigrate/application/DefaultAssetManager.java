@@ -423,15 +423,23 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             return new AnalysisResult(snapshot.project().inventoryRevision(), suggestions, findings);
         }
         if (kind == AnalysisKind.NAMES || kind == AnalysisKind.FOLDERS) {
+            // Default rules: snake_case names; folders from accepted categories, otherwise one per type.
+            // Only real changes are suggested; other styles are available through analyzeOrganization.
+            boolean names = kind == AnalysisKind.NAMES;
             InventorySnapshot snapshot = loadInventory(id);
-            List<Suggestion> suggestions = snapshot.project().assets().stream().map(asset -> {
-                Path path = asset.relativePath();
-                String value = kind == AnalysisKind.NAMES ? path.getFileName().toString()
-                        : path.getParent() == null ? "" : path.getParent().toString().replace('\\', '/');
-                return new Suggestion(UUID.nameUUIDFromBytes((kind + ":" + asset.id() + ":" + value)
-                        .getBytes(StandardCharsets.UTF_8)), asset.id(), kind, value);
-            }).toList();
-            return new AnalysisResult(snapshot.project().inventoryRevision(), suggestions, List.of());
+            List<ReviewedChange> reviews = names ? List.of() : loadReviews(id);
+            if (!loadInventory(id).equals(snapshot)) throw new IllegalStateException("Inventory changed while analyzing; retry");
+            AnalysisResult rules = OrganizationRulesAnalyzer.analyze(snapshot, names
+                    ? new OrganizationRules(NameStyle.SNAKE_CASE, FolderStyle.PRESERVE)
+                    : new OrganizationRules(NameStyle.PRESERVE, FolderStyle.BY_CATEGORY), reviews);
+            List<Finding> findings = new ArrayList<>(rules.findings());
+            findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.INFO,
+                    names ? "NAME_RULE" : "FOLDER_RULE", (names
+                    ? "Names are suggested in snake_case (lower case, words joined by _, extension unchanged)"
+                    : "Folders are suggested from accepted categories, otherwise one folder per file type")
+                    + (rules.suggestions().isEmpty() ? "; every file already follows it." : "; only changes are listed.")
+                    + " Other styles: Rename and folder rules (CLI: analyze-organization)."));
+            return new AnalysisResult(rules.inventoryRevision(), rules.suggestions(), findings);
         }
         throw new UnsupportedOperationException("Analysis not implemented: " + kind);
     }

@@ -38,6 +38,10 @@ class OrganizationRulesAnalyzerTest {
                 .findFirst().orElseThrow().proposedValue();
     }
 
+    private static boolean suggested(AssetManager.AnalysisResult result, Asset asset, AssetManager.AnalysisKind kind) {
+        return result.suggestions().stream().anyMatch(s -> s.assetId().equals(asset.id()) && s.kind() == kind);
+    }
+
     @Test void appliesStylesAndPreservesExactExtensionAndFolders() {
         Asset model = asset("old/HeroHTTPModel.FbX", Asset.Type.MODEL);
         Asset material = asset("old/Some Material.mTL", Asset.Type.MATERIAL);
@@ -50,14 +54,24 @@ class OrganizationRulesAnalyzerTest {
         assertEquals("Materials", value(result, material, AssetManager.AnalysisKind.FOLDERS));
         assertEquals("Textures", value(result, texture, AssetManager.AnalysisKind.FOLDERS));
         assertEquals("Other", value(result, other, AssetManager.AnalysisKind.FOLDERS));
-        assertEquals(8, result.suggestions().size());
+        assertFalse(suggested(result, texture, AssetManager.AnalysisKind.NAMES), "image.PNG is already snake_case");
+        assertFalse(suggested(result, other, AssetManager.AnalysisKind.NAMES), "notes is already snake_case");
+        assertEquals(6, result.suggestions().size());
         assertTrue(result.findings().isEmpty());
         var kebab = analyze(List.of(model), AssetManager.NameStyle.KEBAB_CASE, AssetManager.FolderStyle.PRESERVE);
         assertEquals("hero-http-model.FbX", value(kebab, model, AssetManager.AnalysisKind.NAMES));
-        assertEquals("old", value(kebab, model, AssetManager.AnalysisKind.FOLDERS));
+        assertFalse(suggested(kebab, model, AssetManager.AnalysisKind.FOLDERS), "a preserved folder is not a suggestion");
         var preserve = analyze(List.of(model, other), AssetManager.NameStyle.PRESERVE, AssetManager.FolderStyle.PRESERVE);
-        assertEquals("HeroHTTPModel.FbX", value(preserve, model, AssetManager.AnalysisKind.NAMES));
-        assertEquals("", value(preserve, other, AssetManager.AnalysisKind.FOLDERS));
+        assertEquals(List.of(), preserve.suggestions(), "rules that change nothing suggest nothing");
+    }
+
+    @Test void unchangedAssetsStillTakePartInConflictChecks() {
+        Asset renamed = asset("a/Hero Model.png", Asset.Type.TEXTURE);
+        Asset untouched = asset("a/hero_model.png", Asset.Type.TEXTURE);
+        var result = analyze(List.of(renamed, untouched), AssetManager.NameStyle.SNAKE_CASE, AssetManager.FolderStyle.PRESERVE);
+        assertEquals(List.of(renamed.id()), result.suggestions().stream().map(AssetManager.Suggestion::assetId).toList());
+        assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("DESTINATION_CONFLICT")),
+                "renaming onto an unchanged file's name is still reported: " + result.findings());
     }
 
     @Test void preservesUnicodeUnsafeAndEmptyStemsWithoutDroppingCharacters() {
@@ -66,7 +80,7 @@ class OrganizationRulesAnalyzerTest {
         for (String filename : names) {
             Asset a = asset(filename, Asset.Type.OTHER);
             var result = analyze(List.of(a), AssetManager.NameStyle.SNAKE_CASE, AssetManager.FolderStyle.PRESERVE);
-            assertEquals(filename, value(result, a, AssetManager.AnalysisKind.NAMES));
+            assertFalse(suggested(result, a, AssetManager.AnalysisKind.NAMES), "unsafe names are kept, so nothing is suggested: " + filename);
         }
     }
 
@@ -96,7 +110,8 @@ class OrganizationRulesAnalyzerTest {
         assertEquals(first, analyze(List.of(b, a), AssetManager.NameStyle.KEBAB_CASE, AssetManager.FolderStyle.BY_TYPE));
         assertEquals(first, analyze(List.of(a, b), AssetManager.NameStyle.KEBAB_CASE, AssetManager.FolderStyle.BY_TYPE));
         assertEquals(3, first.inventoryRevision());
-        assertEquals(4, first.suggestions().stream().map(AssetManager.Suggestion::id).distinct().count());
+        // a/Hero.png -> hero.png and both folders change; b/hero.PNG already has a kebab-case name.
+        assertEquals(3, first.suggestions().stream().map(AssetManager.Suggestion::id).distinct().count());
         assertThrows(UnsupportedOperationException.class, () -> first.suggestions().clear());
     }
 }

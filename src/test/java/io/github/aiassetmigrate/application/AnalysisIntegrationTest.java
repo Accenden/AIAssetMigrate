@@ -267,6 +267,40 @@ class AnalysisIntegrationTest {
         }
     }
 
+    @Test void nameAndFolderChecksSuggestOnlyRealChanges() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Files.createDirectory(source.resolve("Models"));
+        Files.writeString(source.resolve("Models/Hero Knight.obj"), "v 0 0 0\n");
+        Files.writeString(source.resolve("Models/rock.obj"), "v 0 0 0\n");
+        Files.writeString(source.resolve("crate.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            var snapshot = manager.importAssets(source).snapshot();
+            UUID project = snapshot.project().id();
+            Map<String, UUID> ids = snapshot.project().assets().stream()
+                    .collect(java.util.stream.Collectors.toMap(a -> io.github.aiassetmigrate.domain.PortablePath.of(a.relativePath()),
+                            io.github.aiassetmigrate.domain.Asset::id));
+            UUID hero = ids.get("Models/Hero Knight.obj"), crate = ids.get("crate.obj");
+            java.util.function.Function<AssetManager.AnalysisResult, Map<UUID, String>> values = result -> result.suggestions().stream()
+                    .collect(java.util.stream.Collectors.toMap(AssetManager.Suggestion::assetId, AssetManager.Suggestion::proposedValue));
+
+            assertEquals(Map.of(hero, "hero_knight.obj"), values.apply(manager.analyze(project, AssetManager.AnalysisKind.NAMES)),
+                    "rock.obj and crate.obj already follow the rule");
+            assertEquals(Map.of(crate, "Models"), values.apply(manager.analyze(project, AssetManager.AnalysisKind.FOLDERS)),
+                    "models already in Models are not moved");
+
+            long revision = snapshot.project().inventoryRevision();
+            manager.review(project, revision, List.of(
+                    new ReviewedChange(UUID.randomUUID(), hero, ReviewedChange.Kind.CATEGORY, ReviewedChange.Decision.ACCEPTED,
+                            Map.of("category", "Characters"), Instant.now()),
+                    new ReviewedChange(UUID.randomUUID(), crate, ReviewedChange.Kind.CATEGORY, ReviewedChange.Decision.ACCEPTED,
+                            Map.of("category", "Props"), Instant.now())));
+            var folders = manager.analyze(project, AssetManager.AnalysisKind.FOLDERS);
+            assertEquals(Map.of(hero, "Characters", crate, "Props"), values.apply(folders), "accepted categories become folders");
+            assertTrue(folders.findings().stream().anyMatch(f -> f.code().equals("FOLDER_RULE")
+                    && f.message().contains("only changes are listed")), folders.findings().toString());
+        }
+    }
+
     @Test void organizationPreviewAppliesReviewsWithoutWritingAndBlocksCollisions() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Files.writeString(source.resolve("a.obj"), "v 0 0 0\n");
@@ -277,7 +311,9 @@ class AnalysisIntegrationTest {
             long revision = snapshot.project().inventoryRevision();
             var names = manager.analyze(project, AssetManager.AnalysisKind.NAMES);
             assertEquals(revision, names.inventoryRevision());
-            assertEquals(2, names.suggestions().size());
+            assertEquals(List.of(), names.suggestions(), "a.obj and b.obj already follow the name rule");
+            assertTrue(names.findings().stream().anyMatch(f -> f.code().equals("NAME_RULE")
+                    && f.message().contains("every file already follows it")), names.findings().toString());
             var changes = snapshot.project().assets().stream().map(asset -> new ReviewedChange(
                     UUID.randomUUID(), asset.id(), ReviewedChange.Kind.NAME, ReviewedChange.Decision.ACCEPTED,
                     Map.of("name", "same.obj"), Instant.now())).toList();

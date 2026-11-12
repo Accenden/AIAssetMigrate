@@ -18,7 +18,11 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
-/** Read-only rule suggestions and lexical destination checks, not reviews or reference validation. */
+/**
+ * Read-only rule suggestions and lexical destination checks, not reviews or reference validation.
+ * A suggestion is made only where the rule changes an asset's name or folder; the conflict check
+ * still covers every asset's resulting destination.
+ */
 public final class OrganizationRulesAnalyzer {
     private OrganizationRulesAnalyzer() {}
 
@@ -49,11 +53,12 @@ public final class OrganizationRulesAnalyzer {
         List<Asset> assets = snapshot.project().assets().stream()
                 .sorted(Comparator.comparing((Asset a) -> a.relativePath().toString()).thenComparing(Asset::id)).toList();
         for (Asset asset : assets) {
-            String name = name(asset.relativePath().getFileName().toString(), rules.nameStyle());
+            String currentName = asset.relativePath().getFileName().toString();
             Path parent = asset.relativePath().getParent();
-            String folder = rules.folderStyle() == AssetManager.FolderStyle.PRESERVE
-                    ? parent == null ? "" : java.util.stream.StreamSupport.stream(parent.spliterator(), false)
-                            .map(Path::toString).collect(Collectors.joining("/"))
+            String currentFolder = parent == null ? "" : java.util.stream.StreamSupport.stream(parent.spliterator(), false)
+                    .map(Path::toString).collect(Collectors.joining("/"));
+            String name = name(currentName, rules.nameStyle());
+            String folder = rules.folderStyle() == AssetManager.FolderStyle.PRESERVE ? currentFolder
                     : rules.folderStyle() == AssetManager.FolderStyle.BY_CATEGORY && categories.containsKey(asset.id())
                     ? categories.get(asset.id())
                     : typeFolder(asset.type());
@@ -61,7 +66,8 @@ public final class OrganizationRulesAnalyzer {
                 boolean isName = kind == AssetManager.AnalysisKind.NAMES;
                 String value = isName ? name : folder;
                 UUID id = id("suggestion:" + asset.id() + ":" + kind + ":" + value);
-                suggestions.add(new AssetManager.Suggestion(id, asset.id(), kind, value));
+                // Every asset's resulting layout is checked for conflicts, but only real changes are suggested.
+                if (!value.equals(isName ? currentName : currentFolder)) suggestions.add(new AssetManager.Suggestion(id, asset.id(), kind, value));
                 decisions.add(new ReviewedChange(id, asset.id(), isName ? ReviewedChange.Kind.NAME : ReviewedChange.Kind.FOLDER,
                         ReviewedChange.Decision.ACCEPTED, Map.of(isName ? "name" : "folder", value), snapshot.scannedAt()));
             }
