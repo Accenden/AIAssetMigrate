@@ -343,9 +343,18 @@ Use `plan --project PROJECT-UUID --target unity --target-version 6000.0 --output
 /absolute/output` with the state directory and its managed `logs` child to create a draft.
 Inspect its sources, destinations and findings using `show-plan --plan PLAN-UUID`.
 Then explicitly use `approve --plan PLAN-UUID --version 1`, followed by the
-separate `migrate --plan PLAN-UUID` command. Use `show-run --plan PLAN-UUID` to
-inspect the recorded outcome, including an interrupted run. The GUI provides the
-same separate draft, approval and migration steps.
+separate `migrate --plan PLAN-UUID` command. When the run ends, `migrate` validates
+its outputs and saves a report (see [Validation and History](#validation-and-history)),
+so every attempted run leaves a success, partial, failed or incomplete report; `--ai`
+adds the advisory summary. It exits 0 only if the run succeeded and validation
+`PASSED`. A migration blocked before a run starts (unapproved, stale or already
+consumed plan) saves no report. A run that started but was interrupted is still
+validated, normally as `INCOMPLETE`. If validation itself fails (for example, another
+writer holds the project), the run outcome is still printed and
+`validate --run RUN-UUID` retries. Use `show-run --plan PLAN-UUID` to inspect the
+recorded outcome, including an interrupted run. The GUI provides the same separate
+draft, approval and migration steps, and shows the completion report in Validation
+and History.
 
 **AI-proposed steps (hybrid F06).** `plan ... --ai`, or the GUI checkbox, asks the
 model to propose one step per asset. The controller checks every proposal against
@@ -431,8 +440,10 @@ operations are silently performed.
 
 ## Validation and History
 
-`validate --run RUN-UUID` (or `--plan PLAN-UUID` for that plan's run) checks every
-output the run recorded and saves a report; it never modifies outputs or sources.
+`migrate` validates each run when it ends. `validate --run RUN-UUID` (or `--plan
+PLAN-UUID` for that plan's run) does the same again for an existing run, for example
+after outputs were moved or edited, and saves another report. Validation checks every
+output the run recorded and never modifies outputs or sources.
 Each output is checked for:
 
 - existence as a regular file with no links in its path, and readability;
@@ -461,8 +472,8 @@ report keeps only its deterministic summary with an `AI_UNAVAILABLE` or
 Reports are append-only JSON files in `<state-dir>/projects/<project>/reports`.
 `history --project PROJECT-UUID [--details]` lists them oldest first and says so
 when there is no history; an unexpected or malformed file there is an error rather
-than being skipped. The GUI's Validation and History tab provides both operations
-and fills in the run ID after a migration.
+than being skipped. The GUI's Validation and History tab provides both operations,
+shows the report saved when a migration finishes, and fills in its run ID.
 
 ## Natural-Language Commands
 
