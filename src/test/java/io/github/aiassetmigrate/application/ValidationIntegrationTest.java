@@ -89,6 +89,38 @@ class ValidationIntegrationTest {
         }
     }
 
+    @Test void migrationValidatesOnCompletionAndBlockedOrRepeatedRunsSaveNoReport() throws Exception {
+        try (var manager = manager()) {
+            source = Files.createDirectory(directory.resolve("source"));
+            output = Files.createDirectory(directory.resolve("output"));
+            Files.writeString(source.resolve("hero.obj"), "mtllib hero.mtl\nusemtl Skin\nv 0 0 0\n");
+            Files.writeString(source.resolve("hero.mtl"), "newmtl Skin\nmap_Kd hero.png\n");
+            Files.write(source.resolve("hero.png"), ConversionStrategyTest.png(false));
+            UUID project = manager.importAssets(source).snapshot().project().id();
+            var plan = manager.createPlan(project, UNITY, output);
+
+            assertThrows(UncheckedIOException.class, () -> manager.migrateAndValidate(plan.id(), Optional.empty()),
+                    "an unapproved plan is blocked before any run starts");
+            assertTrue(manager.history(project).isEmpty(), "a blocked migration saves no report");
+
+            manager.approve(plan.id(), plan.version());
+            var outcome = manager.migrateAndValidate(plan.id(), Optional.empty());
+            assertEquals(RunStatus.SUCCESS, outcome.run().status(), outcome.toString());
+            assertTrue(outcome.migrationFailure().isEmpty() && outcome.validationFailure().isEmpty(), outcome.toString());
+            Report report = outcome.report().orElseThrow();
+            assertEquals(Report.ValidationStatus.PASSED, report.validationStatus(), report.findings().toString());
+            assertEquals(outcome.run().id(), report.runId());
+            assertEquals(manager.loadRun(plan.id()), outcome.run());
+            assertEquals(List.of(report), manager.history(project), "the completion report is saved");
+            String log = Files.readString(io.github.aiassetmigrate.logging.LogPublisher.logFile(state.resolve("logs"), project));
+            assertTrue(log.indexOf("Validation report " + report.id() + " saved: PASSED") > 0, log);
+
+            assertThrows(UncheckedIOException.class, () -> manager.migrateAndValidate(plan.id(), Optional.empty()),
+                    "an approval is single-use");
+            assertEquals(List.of(report), manager.history(project), "the consumed plan's earlier run is not revalidated");
+        }
+    }
+
     @Test void modifiedAndMissingOutputsFailWithoutTouchingSources() throws Exception {
         try (var manager = manager()) {
             MigrationRun run = migrateChain(manager);

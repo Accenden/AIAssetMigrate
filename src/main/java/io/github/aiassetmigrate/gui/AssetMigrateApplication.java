@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.BiFunction;
 import java.util.function.Function;
@@ -178,7 +179,9 @@ public final class AssetMigrateApplication extends Application {
             return approved;
         }
 
-        MigrationRun migrate(AssetManager manager) {
+        /** Migrates the exact approved plan, then validates the run and saves a report (UC07). */
+        AssetManager.MigrationOutcome migrate(AssetManager manager,
+                                              Optional<io.github.aiassetmigrate.ai.LLMClient> assistant) {
             if (plan.status() != PlanStatus.APPROVED) throw new IllegalStateException("Explicitly approve the displayed plan first.");
             if (!sourcesVerified()) {
                 throw new IllegalStateException("Source paths could not be verified; migration is blocked.");
@@ -186,7 +189,9 @@ public final class AssetMigrateApplication extends Application {
             if (!plan.equals(manager.loadPlan(plan.id()))) {
                 throw new IllegalStateException("Stored plan changed; create and review a new draft.");
             }
-            return manager.migrate(plan.id());
+            AssetManager.MigrationOutcome outcome = manager.migrateAndValidate(plan.id(), assistant);
+            if (!outcome.run().planId().equals(plan.id())) throw new IllegalStateException("Migration returned a run for a different plan.");
+            return outcome;
         }
     }
 
@@ -449,21 +454,32 @@ public final class AssetMigrateApplication extends Application {
             PlanContext context = requirePlan();
             if (context.plan().status() != PlanStatus.APPROVED) throw new IllegalArgumentException("Explicitly approve the displayed plan first.");
             long generation = planGeneration.current();
-            if (runner.submitValue(context.request().state(), context.request().logs(), context::migrate, result -> {
+            boolean ai = validationAi.isSelected();
+            // The saved account is loaded on the worker thread, never the JavaFX thread.
+            if (runner.submitValue(context.request().state(), context.request().logs(), manager -> context.migrate(manager,
+                    ai ? Optional.of(io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable()) : Optional.empty()), result -> {
                 busy(false);
                 if (!planGeneration.isCurrent(generation)) return;
                 clearPlan();
-                if (result.failure() == null && result.value() != null) validationRun.setText(result.value().id().toString());
-                status.setText(result.failure() == null ? formatRun(result.value()) + "\nUse Validation and History to check the outputs."
-                        : failureText(result.failure(), null) + "\nMigration may have started; inspect output and run history before retrying.");
-            })) { busy(true); status.setText("Running approved copy migration..."); }
+                if (result.failure() != null || result.value() == null) {
+                    status.setText(failureText(result.failure(), null)
+                            + "\nMigration may have started; inspect output and run history before retrying.");
+                    return;
+                }
+                var outcome = result.value();
+                validationRun.setText(outcome.run().id().toString());
+                outcome.report().ifPresentOrElse(report -> validationResults.setText(formatReport(report, true)),
+                        validationResults::clear);
+                status.setText(formatOutcome(outcome));
+            })) { busy(true); validationResults.clear(); status.setText("Running approved copy migration, then validating outputs..."); }
         } catch (IllegalArgumentException failure) { status.setText("Invalid input: " + failure.getMessage()); }
     }
 
     private void setupValidation() {
         Label note = new Label("Validate Migration checks the outputs a run recorded: existence, readability, published SHA-256, "
                 + "PNG/JPEG decoding and OBJ/MTL references. Checks that cannot be performed, such as FBX contents, are "
-                + "reported as not checked, never as passed. Outputs are not modified. Each validation saves a report.");
+                + "reported as not checked, never as passed. Outputs are not modified. Each validation saves a report; every migration "
+                + "is validated when it finishes, using the AI option below for its advisory summary.");
         note.setWrapText(true);
         validationRun.setPromptText("Run ID (filled in after a migration)");
         Button validate = new Button("Validate Migration");
@@ -649,7 +665,7 @@ public final class AssetMigrateApplication extends Application {
     }
 
     static String formatHistory(UUID project, List<io.github.aiassetmigrate.domain.Report> reports) {
-        if (reports.isEmpty()) return "No validation history for project " + project + ". Validate a migration run first.";
+        if (reports.isEmpty()) return "No validation history for project " + project + ". Each migration saves a report; Validate Migration adds one for an existing run.";
         StringBuilder text = new StringBuilder("Validation history for project ").append(project)
                 .append(" (").append(reports.size()).append(" report(s), oldest first)\n");
         for (var report : reports) text.append('\n').append(formatReport(report, false));
@@ -682,6 +698,18 @@ public final class AssetMigrateApplication extends Application {
             String detail = run.stepDetails().get(id);
             if (detail != null && !detail.isBlank()) text.append(" - ").append(detail);
         });
+        return text.toString();
+    }
+
+    /** Run result first, then the interruption and validation outcome; the report itself is shown in Validation. */
+    static String formatOutcome(AssetManager.MigrationOutcome outcome) {
+        StringBuilder text = new StringBuilder(formatRun(outcome.run()));
+        outcome.migrationFailure().ifPresent(failure -> text.append("\nMigration interrupted: ").append(failure));
+        outcome.report().ifPresentOrElse(
+                report -> text.append("\nValidation ").append(report.validationStatus()).append("; report ")
+                        .append(report.id()).append(" saved (see Validation and History)."),
+                () -> text.append("\nValidation failed: ").append(outcome.validationFailure().orElseThrow())
+                        .append("\nNo report was saved; use Validate Migration to retry."));
         return text.toString();
     }
 

@@ -72,7 +72,7 @@ public final class ValidationCommands {
         @Override int execute(AssetManager manager, PrintWriter out) {
             List<Report> reports = manager.history(project);
             if (reports.isEmpty()) {
-                out.println("No validation history for project " + project + ". Run 'validate' after a migration.");
+                out.println("No validation history for project " + project + ". 'migrate' saves a report for each run; 'validate' adds one for an existing run.");
                 return 0;
             }
             out.println("Validation reports (" + reports.size() + "):");

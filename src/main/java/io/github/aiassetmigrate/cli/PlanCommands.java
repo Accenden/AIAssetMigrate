@@ -1,9 +1,12 @@
 package io.github.aiassetmigrate.cli;
 
+import io.github.aiassetmigrate.ai.LLMClient;
+import io.github.aiassetmigrate.ai.OpenAIAdapter;
 import io.github.aiassetmigrate.application.AssetManager;
 import io.github.aiassetmigrate.application.DefaultAssetManager;
 import io.github.aiassetmigrate.domain.MigrationPlan;
 import io.github.aiassetmigrate.domain.MigrationRun;
+import io.github.aiassetmigrate.domain.Report;
 import io.github.aiassetmigrate.domain.RunStatus;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Model.CommandSpec;
@@ -15,6 +18,7 @@ import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -123,15 +127,43 @@ public final class PlanCommands {
         }
     }
 
-    @Command(name = "migrate", mixinStandardHelpOptions = true, description = "Execute an explicitly approved plan.")
+    @Command(name = "migrate", mixinStandardHelpOptions = true,
+            description = {"Execute an explicitly approved plan, then validate its outputs and save a report.",
+                    "Exit code 0 only when the run succeeded and validation PASSED."})
     public static final class Migrate extends Base {
         @Option(names = "--plan", required = true, paramLabel = "UUID") UUID plan;
-        public Migrate() { this(DefaultAssetManager::new); }
-        Migrate(ImportCommand.ManagerFactory factory) { super(factory); }
+        @Option(names = "--ai", description = {
+                "Add an advisory AI summary to the validation report (see 'validate --ai').",
+                "AI never runs, approves or changes the migration."})
+        boolean ai;
+
+        private final AnalyzeCommand.AssistantFactory assistantFactory;
+
+        public Migrate() { this(DefaultAssetManager::new, AnalyzeCommand::connectedAssistant); }
+        Migrate(ImportCommand.ManagerFactory factory) { this(factory, AnalyzeCommand::connectedAssistant); }
+        Migrate(ImportCommand.ManagerFactory factory, AnalyzeCommand.AssistantFactory assistantFactory) {
+            super(factory);
+            this.assistantFactory = assistantFactory;
+        }
+
         @Override int execute(AssetManager manager, PrintWriter out) {
-            MigrationRun run = manager.migrate(plan);
-            printRun(out, run);
-            return run.status() == RunStatus.SUCCESS ? 0 : 1;
+            Optional<LLMClient> assistant = Optional.empty();
+            if (ai) {
+                try { assistant = Optional.of(assistantFactory.create()); }
+                catch (LLMClient.AiException e) { assistant = Optional.of(OpenAIAdapter.unavailable(e)); }
+            }
+            AssetManager.MigrationOutcome outcome = manager.migrateAndValidate(plan, assistant);
+            printRun(out, outcome.run());
+            outcome.migrationFailure().ifPresent(failure -> out.println("Migration interrupted: " + quote(failure)));
+            out.println();
+            if (outcome.report().isPresent()) {
+                ValidationCommands.printReport(out, outcome.report().get(), true);
+            } else {
+                out.println("Validation failed: " + quote(outcome.validationFailure().orElseThrow()));
+                out.println("No report was saved; run 'validate --run " + outcome.run().id() + "' to retry.");
+            }
+            return outcome.run().status() == RunStatus.SUCCESS && outcome.report()
+                    .filter(report -> report.validationStatus() == Report.ValidationStatus.PASSED).isPresent() ? 0 : 1;
         }
     }
 

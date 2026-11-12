@@ -142,20 +142,92 @@ class PlanCommandsTest {
         }
     }
 
-    @Test void migrationReportsActualStatusAndNonSuccessExit() {
-        requireHostilePaths();
+    private Report report(MigrationRun run, Report.ValidationStatus status, Optional<String> ai) {
+        return new Report(UUID.randomUUID(), project, planId, run.id(), run.status(), status,
+                List.of(new Finding(UUID.randomUUID(), Optional.empty(), Optional.of(Path.of("hero.obj")),
+                        Finding.Severity.ERROR, "OUTPUT_MISSING", "gone")), "Validation " + status, ai, time);
+    }
+
+    private AssetManager.MigrationOutcome validated(MigrationRun run, Report.ValidationStatus status) {
+        return new AssetManager.MigrationOutcome(run, Optional.of(report(run, status, Optional.empty())), Optional.empty(), Optional.empty());
+    }
+
+    @Test void migrationReportsActualStatusAndExitsZeroOnlyWhenSucceededAndPassed() {
         for (RunStatus status : RunStatus.values()) {
+            for (Report.ValidationStatus validation : Report.ValidationStatus.values()) {
+                StringWriter output = new StringWriter();
+                var cli = new CommandLine(new PlanCommands.Migrate((state, logs) -> manager((name, args) -> {
+                    if (name.equals("close")) return null;
+                    assertEquals("migrateAndValidate", name);
+                    assertArrayEquals(new Object[]{planId, Optional.empty()}, args, "no AI unless requested");
+                    return validated(new MigrationRun(UUID.randomUUID(), project, planId, 4, Path.of("out"), status,
+                            Map.of(command, StepStatus.FAILED), time, Optional.empty(), Optional.empty()), validation);
+                }), () -> { throw new AssertionError("AI not requested"); })).setOut(new PrintWriter(output));
+                assertEquals(status == RunStatus.SUCCESS && validation == Report.ValidationStatus.PASSED ? 0 : 1,
+                        cli.execute("--plan", planId.toString(), "--state-directory", "s", "--log-directory", "l"));
+                String text = output.toString();
+                assertTrue(text.contains("Status: " + status), text);
+                assertTrue(text.contains(command + " Status: FAILED"), text);
+                assertTrue(text.contains("Validation status: " + validation), text);
+                assertTrue(text.contains("ERROR OUTPUT_MISSING Source: hero.obj: gone"), "report findings are shown");
+                assertFalse(text.contains("interrupted"), text);
+            }
+        }
+    }
+
+    @Test void migrationShowsInterruptionsAndValidationFailuresWithoutHidingTheRun() {
+        var run = new MigrationRun(UUID.randomUUID(), project, planId, 4, Path.of("out"), RunStatus.SUCCESS,
+                Map.of(command, StepStatus.SUCCESS), time, Optional.of(time), Optional.of(time));
+        var interrupted = new MigrationRun(run.id(), project, planId, 4, Path.of("out"), RunStatus.INCOMPLETE,
+                Map.of(command, StepStatus.PENDING), time, Optional.of(time), Optional.empty());
+        var outcomes = List.of(
+                new AssetManager.MigrationOutcome(run, Optional.empty(), Optional.empty(), Optional.of("Another\nwriter")),
+                new AssetManager.MigrationOutcome(interrupted, Optional.of(report(interrupted, Report.ValidationStatus.INCOMPLETE,
+                        Optional.empty())), Optional.of("source changed"), Optional.empty()));
+        for (var outcome : outcomes) {
+            StringWriter output = new StringWriter();
+            var cli = new CommandLine(new PlanCommands.Migrate((state, logs) -> manager((name, args) ->
+                    name.equals("close") ? null : outcome))).setOut(new PrintWriter(output));
+            assertEquals(1, cli.execute("--plan", planId.toString(), "--state-directory", "s", "--log-directory", "l"));
+            String text = output.toString();
+            assertTrue(text.contains("Run ID: " + run.id()), text);
+            if (outcome.report().isEmpty()) {
+                assertTrue(text.contains("Status: SUCCESS"), text);
+                assertTrue(text.contains("Validation failed: \"Another\\u000awriter\""), "failure is escaped: " + text);
+                assertTrue(text.contains("validate --run " + run.id()), text);
+            } else {
+                assertTrue(text.contains("Status: INCOMPLETE"), text);
+                assertTrue(text.contains("Migration interrupted: \"source changed\""), text);
+                assertTrue(text.contains("Validation status: INCOMPLETE"), text);
+            }
+        }
+    }
+
+    @Test void migrationAiSummaryUsesTheConnectedAccountOrRecordsItsAbsence() {
+        var model = new io.github.aiassetmigrate.ai.LLMClient() {
+            @Override public com.fasterxml.jackson.databind.JsonNode generate(String prompt) { throw new AssertionError(); }
+            @Override public String description() { return "fake"; }
+        };
+        var run = new MigrationRun(UUID.randomUUID(), project, planId, 4, Path.of("out"), RunStatus.SUCCESS,
+                Map.of(command, StepStatus.SUCCESS), time, Optional.of(time), Optional.of(time));
+        for (boolean connected : List.of(true, false)) {
             StringWriter output = new StringWriter();
             var cli = new CommandLine(new PlanCommands.Migrate((state, logs) -> manager((name, args) -> {
                 if (name.equals("close")) return null;
-                assertEquals("migrate", name); assertEquals(planId, args[0]);
-                return new MigrationRun(UUID.randomUUID(), project, planId, 4, Path.of("out"), status,
-                        Map.of(command, StepStatus.FAILED), time, Optional.empty(), Optional.empty());
-            }))).setOut(new PrintWriter(output));
-            assertEquals(status == RunStatus.SUCCESS ? 0 : 1,
-                    cli.execute("--plan", planId.toString(), "--state-directory", "s", "--log-directory", "l"));
-            assertTrue(output.toString().contains("Status: " + status));
-            assertTrue(output.toString().contains(command + " Status: FAILED"));
+                var assistant = (Optional<?>) args[1];
+                assertTrue(assistant.isPresent());
+                if (connected) assertSame(model, assistant.get());
+                else assertTrue(((io.github.aiassetmigrate.ai.LLMClient) assistant.get()).description().contains("unavailable"),
+                        ((io.github.aiassetmigrate.ai.LLMClient) assistant.get()).description());
+                return new AssetManager.MigrationOutcome(run, Optional.of(report(run, Report.ValidationStatus.PASSED,
+                        Optional.of("Looks fine."))), Optional.empty(), Optional.empty());
+            }), () -> {
+                if (connected) return model;
+                throw new io.github.aiassetmigrate.ai.LLMClient.AiException(
+                        io.github.aiassetmigrate.ai.LLMClient.AiException.Reason.NOT_CONNECTED, "Not connected");
+            })).setOut(new PrintWriter(output));
+            assertEquals(0, cli.execute("--plan", planId.toString(), "--ai", "--state-directory", "s", "--log-directory", "l"));
+            assertTrue(output.toString().contains("AI summary (advisory; the status above is authoritative): Looks fine."));
         }
     }
 
@@ -165,10 +237,11 @@ class PlanCommandsTest {
             StringWriter output = new StringWriter();
             var factory = (ImportCommand.ManagerFactory) (state, logs) -> manager((name, args) -> {
                 if (name.equals("close")) return null;
-                assertEquals(show ? "loadRun" : "migrate", name);
-                return new MigrationRun(UUID.randomUUID(), project, planId, 4, Path.of("out"), RunStatus.PARTIAL,
+                assertEquals(show ? "loadRun" : "migrateAndValidate", name);
+                var run = new MigrationRun(UUID.randomUUID(), project, planId, 4, Path.of("out"), RunStatus.PARTIAL,
                         Map.of(command, StepStatus.FAILED), time, Optional.of(time), Optional.of(time),
                         Optional.of("preflight failed"), Map.of(command, "cleanup \"warning\""));
+                return show ? run : validated(run, Report.ValidationStatus.FAILED);
             });
             var cli = new CommandLine(show ? new PlanCommands.ShowRun(factory) : new PlanCommands.Migrate(factory))
                     .setOut(new PrintWriter(output));

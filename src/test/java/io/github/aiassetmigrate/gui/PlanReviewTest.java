@@ -116,11 +116,11 @@ class PlanReviewTest {
         List<String> calls = new ArrayList<>();
         AssetManager manager = (AssetManager) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{AssetManager.class},
                 (proxy, method, args) -> { calls.add(method.getName()); return plan(PlanStatus.APPROVED); });
-        assertThrows(IllegalStateException.class, () -> context(draft).migrate(manager));
+        assertThrows(IllegalStateException.class, () -> context(draft).migrate(manager, Optional.empty()));
         assertTrue(calls.isEmpty());
         assertThrows(IllegalStateException.class, () -> context(draft).approve(manager));
         calls.clear();
-        assertThrows(IllegalStateException.class, () -> context(approved).migrate(manager));
+        assertThrows(IllegalStateException.class, () -> context(approved).migrate(manager, Optional.empty()));
         assertEquals(List.of("loadPlan"), calls);
         var generation = new AssetMigrateApplication.CompatibilityGeneration();
         long captured = generation.current();
@@ -133,15 +133,47 @@ class PlanReviewTest {
         MigrationPlan approved = plan(PlanStatus.APPROVED);
         var run = new MigrationRun(UUID.randomUUID(), project, approved.id(), approved.version(), output,
                 RunStatus.values()[0], Map.of(), Instant.EPOCH, Optional.empty(), Optional.empty());
+        var outcome = new AssetManager.MigrationOutcome(run, Optional.empty(), Optional.empty(), Optional.of("busy"));
         List<String> calls = new ArrayList<>();
         AssetManager manager = (AssetManager) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{AssetManager.class},
                 (proxy, method, args) -> {
                     calls.add(method.getName());
-                    assertArrayEquals(new Object[]{approved.id()}, args);
-                    return method.getName().equals("loadPlan") ? approved : run;
+                    if (method.getName().equals("loadPlan")) {
+                        assertArrayEquals(new Object[]{approved.id()}, args);
+                        return approved;
+                    }
+                    assertArrayEquals(new Object[]{approved.id(), Optional.empty()}, args);
+                    return outcome;
                 });
-        assertEquals(run, context(approved).migrate(manager));
-        assertEquals(List.of("loadPlan", "migrate"), calls);
+        assertEquals(outcome, context(approved).migrate(manager, Optional.empty()));
+        assertEquals(List.of("loadPlan", "migrateAndValidate"), calls);
+
+        var otherPlan = new AssetManager.MigrationOutcome(new MigrationRun(UUID.randomUUID(), project, UUID.randomUUID(),
+                approved.version(), output, RunStatus.SUCCESS, Map.of(), Instant.EPOCH, Optional.empty(), Optional.empty()),
+                Optional.empty(), Optional.empty(), Optional.of("busy"));
+        AssetManager wrong = (AssetManager) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{AssetManager.class},
+                (proxy, method, args) -> method.getName().equals("loadPlan") ? approved : otherPlan);
+        assertThrows(IllegalStateException.class, () -> context(approved).migrate(wrong, Optional.empty()));
+    }
+
+    @Test
+    void outcomeTextShowsInterruptionAndValidationResult() {
+        UUID planId = UUID.randomUUID();
+        var run = new MigrationRun(UUID.randomUUID(), project, planId, 1, output, RunStatus.INCOMPLETE,
+                Map.of(), Instant.EPOCH, Optional.of(Instant.EPOCH), Optional.empty());
+        var report = new io.github.aiassetmigrate.domain.Report(UUID.randomUUID(), project, planId, run.id(), RunStatus.INCOMPLETE,
+                io.github.aiassetmigrate.domain.Report.ValidationStatus.INCOMPLETE, List.of(), "summary", Optional.empty(), Instant.EPOCH);
+        String validated = AssetMigrateApplication.formatOutcome(
+                new AssetManager.MigrationOutcome(run, Optional.of(report), Optional.of("source changed"), Optional.empty()));
+        assertTrue(validated.contains("status: INCOMPLETE"), validated);
+        assertTrue(validated.contains("Migration interrupted: source changed"), validated);
+        assertTrue(validated.contains("Validation INCOMPLETE; report " + report.id() + " saved"), validated);
+
+        String unvalidated = AssetMigrateApplication.formatOutcome(
+                new AssetManager.MigrationOutcome(run, Optional.empty(), Optional.empty(), Optional.of("Another writer")));
+        assertFalse(unvalidated.contains("interrupted"), unvalidated);
+        assertTrue(unvalidated.contains("Validation failed: Another writer"), unvalidated);
+        assertTrue(unvalidated.contains("No report was saved"), unvalidated);
     }
 
     @Test

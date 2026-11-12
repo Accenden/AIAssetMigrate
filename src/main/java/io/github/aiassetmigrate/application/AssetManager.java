@@ -101,6 +101,57 @@ public interface AssetManager {
     MigrationRun loadRun(UUID planId);
 
     /**
+     * UC07/UC08: runs {@link #migrate(UUID)}, then validates the run it recorded and saves a
+     * report, so every attempted run leaves a success, partial, failed or incomplete report.
+     * A migration blocked before any run started (unapproved, stale or already consumed plan,
+     * failed rechecks) throws exactly as {@code migrate} does and nothing is validated. A run that
+     * started but was interrupted is still validated (normally INCOMPLETE) and the interruption is
+     * returned in {@code migrationFailure}. A validation failure never hides the run outcome: it
+     * is returned in {@code validationFailure} and no report is present. The optional assistant
+     * only adds the advisory summary described in {@link #validate(UUID, io.github.aiassetmigrate.ai.LLMClient)}.
+     */
+    default MigrationOutcome migrateAndValidate(UUID planId, Optional<io.github.aiassetmigrate.ai.LLMClient> assistant) {
+        Objects.requireNonNull(planId, "planId");
+        Objects.requireNonNull(assistant, "assistant");
+        boolean startedBefore = existingRun(planId).isPresent();
+        MigrationRun run;
+        Optional<String> migrationFailure = Optional.empty();
+        try {
+            run = migrate(planId);
+        } catch (RuntimeException failure) {
+            // Only a run this call reserved is validated; a consumed plan's earlier run is not.
+            Optional<MigrationRun> interrupted = startedBefore ? Optional.empty() : existingRun(planId);
+            if (interrupted.isEmpty()) throw failure;
+            run = interrupted.get();
+            migrationFailure = Optional.of(describe(failure));
+        }
+        try {
+            Report report = assistant.isPresent() ? validate(run.id(), assistant.get()) : validate(run.id());
+            return new MigrationOutcome(run, Optional.of(report), migrationFailure, Optional.empty());
+        } catch (RuntimeException failure) {
+            return new MigrationOutcome(run, Optional.empty(), migrationFailure, Optional.of(describe(failure)));
+        }
+    }
+
+    private Optional<MigrationRun> existingRun(UUID planId) {
+        try {
+            return Optional.of(loadRun(planId));
+        } catch (RuntimeException notStarted) {
+            return Optional.empty();
+        }
+    }
+
+    private static String describe(RuntimeException failure) {
+        Throwable cause = failure;
+        String text = failure.getMessage();
+        while ((text == null || text.isBlank()) && cause.getCause() != null) {
+            cause = cause.getCause();
+            text = cause.getMessage();
+        }
+        return text == null || text.isBlank() ? failure.getClass().getSimpleName() : text;
+    }
+
+    /**
      * Read-only check of the outputs a run recorded (existence, readability, published hash,
      * PNG/JPEG decoding, OBJ/MTL text and references); unsupported checks are UNKNOWN, never
      * passed. Saves and returns a new Report with a deterministic summary. Fails if the run is
@@ -212,6 +263,23 @@ public interface AssetManager {
             if (inventoryRevision < 1) throw new IllegalArgumentException("Inventory revision must be positive");
             suggestions = List.copyOf(suggestions);
             findings = List.copyOf(findings);
+        }
+    }
+
+    /** Exactly one of {@code report} and {@code validationFailure} is present. */
+    record MigrationOutcome(MigrationRun run, Optional<Report> report, Optional<String> migrationFailure,
+                            Optional<String> validationFailure) {
+        public MigrationOutcome {
+            Objects.requireNonNull(run, "run");
+            Objects.requireNonNull(report, "report");
+            Objects.requireNonNull(migrationFailure, "migrationFailure");
+            Objects.requireNonNull(validationFailure, "validationFailure");
+            if (report.isPresent() == validationFailure.isPresent()) {
+                throw new IllegalArgumentException("Exactly one of report and validationFailure must be present");
+            }
+            if (report.isPresent() && !report.get().runId().equals(run.id())) {
+                throw new IllegalArgumentException("Report does not belong to the run");
+            }
         }
     }
 
