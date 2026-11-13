@@ -82,7 +82,10 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
    is under a collapsed section; it defaults to `~/AIAssetMigrate` and its logs go in
    `<workspace>/logs`.
 2. **Review** (optional): run a check (Categories, Relationships, Materials, Names,
-   Folders), then select a suggestion and **Accept** or **Reject** it. Editing a
+   Folders), then select a suggestion and **Accept** it (the plan will use it) or
+   **Reject** it (the file stays as it is). A box under the buttons says what each would do
+   for the selected suggestion, for example the name its output copy would get; a later
+   decision for the same file replaces the earlier one. Editing a
    suggestion, adding your own decision (for example an `EXCLUSION`, `ACKNOWLEDGMENT` or
    `CONVERSION`), rename rules, saved decisions and the layout preview are in
    collapsed sections. With **Use AI suggestions** ticked, an **AI review summary** box below

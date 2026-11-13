@@ -538,6 +538,12 @@
     -fx-text-fill: #fecaca;
 }
 
+/* What Accept and Reject would do for the selected suggestion. */
+.decision-hint {
+    -fx-line-spacing: 3;
+    -fx-padding: 10 14 10 14;
+}
+
 .badge-info {
     -fx-background-color: rgba(59, 130, 246, 0.18);
     -fx-text-fill: #93c5fd;

@@ -132,6 +132,10 @@ public final class AssetMigrateApplication extends Application {
     private final VBox aiSummary = new VBox(10);
     private ReviewSummary currentSummary;
     private final Map<UUID, ReviewedChange.Decision> decidedSuggestions = new HashMap<>();
+    /** What Accept and Reject would do for the selected suggestion. */
+    private final Label decisionHint = new Label();
+    static final String NO_SELECTION_HINT = "Select a suggestion to see exactly what Accept and Reject would do. "
+            + "Accept uses the change when the plan is created; Reject keeps the file as it is.";
 
     // Step 3: target
     private final ObjectProperty<AssetManager.TargetProfile> selectedTarget = new SimpleObjectProperty<>();
@@ -542,6 +546,7 @@ public final class AssetMigrateApplication extends Application {
         suggestions.setPrefHeight(300);
         suggestions.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
             renderSummary();
+            decisionHint.setText(selected == null ? NO_SELECTION_HINT : decisionHint(selected, assetPaths));
             if (selected == null) return;
             reviewAsset.setText(selected.assetId().toString());
             reviewKind.setValue(suggestionKind(selected.kind()));
@@ -553,6 +558,9 @@ public final class AssetMigrateApplication extends Application {
         Button accept = styled(new Button("Accept"), "primary");
         Button reject = new Button("Reject");
         Button edit = new Button("Edit...");
+        accept.setTooltip(new Tooltip("Use this change when the plan is created. Nothing is written until you run the plan."));
+        reject.setTooltip(new Tooltip("Keep the file as it is; this suggestion is not used."));
+        edit.setTooltip(new Tooltip("Change the suggested value before saving it."));
         accept.setOnAction(event -> decide(ReviewedChange.Decision.ACCEPTED));
         reject.setOnAction(event -> decide(ReviewedChange.Decision.REJECTED));
         for (Button button : List.of(accept, reject, edit)) {
@@ -561,6 +569,9 @@ public final class AssetMigrateApplication extends Application {
         analysisRevision.getStyleClass().add("muted");
         HBox decisionBar = new HBox(8, analysisRevision, spacer(), accept, reject, edit);
         decisionBar.setAlignment(Pos.CENTER_LEFT);
+        decisionHint.setText(NO_SELECTION_HINT);
+        decisionHint.setWrapText(true);
+        decisionHint.getStyleClass().addAll("callout", "decision-hint");
 
         aiSummary.getStyleClass().addAll("callout", "ai-summary");
         aiSummary.setVisible(false);
@@ -626,9 +637,9 @@ public final class AssetMigrateApplication extends Application {
         TitledPane previewPane = collapsible("Output layout preview", new VBox(8, preview, organizationPreview));
 
         VBox view = stepView("Review suggestions",
-                "Optional. Run a check, then accept or reject what it suggests. Accepted decisions are used when you "
-                        + "create the plan; nothing is copied or changed yet.",
-                checks, suggestions, decisionBar, aiSummary, analysisFindingsPane, manualReviewPane, rulesPane, savedPane, previewPane);
+                "Optional. Run a check, then Accept a suggestion to use it in the plan, or Reject it to keep the file "
+                        + "as it is. Undecided suggestions are ignored, and nothing is copied or changed yet.",
+                checks, suggestions, decisionBar, decisionHint, aiSummary, analysisFindingsPane, manualReviewPane, rulesPane, savedPane, previewPane);
         VBox.setVgrow(suggestions, Priority.ALWAYS);
         return scrollable(view);
     }
@@ -1257,6 +1268,59 @@ public final class AssetMigrateApplication extends Application {
         suggestions.scrollTo(index);
         suggestions.requestFocus();
         status.setText("Selected. Accept or Reject it, or use Edit... to change it first.");
+    }
+
+    /**
+     * What Accept and Reject would each do for this suggestion, in terms of the file's output, followed by
+     * the two rules that hold for every decision: nothing is written yet, and a later decision replaces it.
+     */
+    static String decisionHint(AssetManager.Suggestion suggestion, Map<UUID, String> paths) {
+        String file = paths.getOrDefault(suggestion.assetId(), suggestion.assetId().toString());
+        String value = suggestion.proposedValue();
+        String accept;
+        String reject;
+        switch (suggestion.kind()) {
+            case CATEGORIES -> {
+                boolean none = value.equals(io.github.aiassetmigrate.analysis.CategoryAnalyzer.UNCATEGORIZED);
+                accept = none ? file + " is recorded as Uncategorized."
+                        : file + " is recorded under " + value + ", which is used when folders are sorted by category. "
+                        + "The file itself does not change.";
+                reject = "the category " + value + " is not used.";
+            }
+            case NAMES -> {
+                accept = "the output copy of " + file + " is named " + value + ". OBJ and MTL files that refer to it "
+                        + "are updated in the output to match.";
+                reject = "it keeps its current name.";
+            }
+            case FOLDERS -> {
+                accept = "the output copy of " + file + (value.isEmpty() ? " goes in the output folder's root."
+                        : " goes in the folder " + value + ".") + " OBJ and MTL files that refer to it are updated in the "
+                        + "output to match.";
+                reject = "it stays in its current folder.";
+            }
+            case RELATIONSHIPS, MATERIALS -> {
+                String target;
+                try {
+                    target = paths.getOrDefault(UUID.fromString(value), value);
+                } catch (IllegalArgumentException notAnId) {
+                    target = value;
+                }
+                if (suggestion.reference().isPresent()) {
+                    String reference = "'" + suggestion.reference().get() + "'";
+                    accept = "the plan uses " + target + " for " + reference + " in " + file + ". If " + reference
+                            + " is a broken file path, the output copy is corrected to point there.";
+                    reject = reference + " is left as written; if it is broken, the plan stays blocked until you fix "
+                            + "or exclude it.";
+                } else {
+                    accept = "it is recorded that " + file + " belongs with " + target + ". The output does not change.";
+                    reject = "the grouping is not recorded.";
+                }
+            }
+            default -> throw new IllegalStateException("Unknown analysis kind: " + suggestion.kind());
+        }
+        return "Accept: " + accept + "\nReject: " + reject
+                + "\nEither way nothing is written until you approve and run a plan, and a later decision for this "
+                + "file replaces this one.";
     }
 
     /** Relationship and material suggestions propose a target asset ID; show its path instead. */
