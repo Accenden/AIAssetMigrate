@@ -291,7 +291,9 @@ finding. There is no API-key or paid fallback.
 models the account may use (`GET /v1/models`, `visibility: "list"`) and selects
 `--model SLUG` or the first one. `auth status`, `auth models`,
 `auth use-model SLUG` and `auth disconnect` manage the saved account; the GUI's AI
-drawer (header button) has **Connect account** and **Disconnect**. Credentials are stored per
+drawer (header button) has **Connect account** and **Disconnect**, and a **Model**
+dropdown. At startup, and on **Refresh**, the GUI fetches the models the connected account
+may use and selects the saved one; choosing another saves it, and later AI requests use it. Credentials are stored per
 user, outside project state, in `%APPDATA%\AIAssetMigrate` (Windows, encrypted with
 DPAPI for the current user) or `~/.config/aiassetmigrate` (owner-only file
 permissions). Access tokens are refreshed shortly before expiry under a

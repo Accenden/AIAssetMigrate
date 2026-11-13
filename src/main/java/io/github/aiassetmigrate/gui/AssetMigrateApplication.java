@@ -167,6 +167,10 @@ public final class AssetMigrateApplication extends Application {
     private final Label drawerTitle = new Label();
     private final StackPane drawerContent = new StackPane();
     private final Label aiStatus = new Label("AI account: checking...");
+    private final ComboBox<io.github.aiassetmigrate.ai.SiwcInference.Model> aiModel = new ComboBox<>();
+    private final Button refreshModels = new Button("Refresh");
+    /** True while the model list is replaced in code, so only user choices are saved. */
+    private boolean updatingModels;
     private final VBox agentPane = new VBox(10);
     private final TextField agentRequest = new TextField();
     private final TextArea agentTranscript = new TextArea();
@@ -746,7 +750,25 @@ public final class AssetMigrateApplication extends Application {
         connectAi.setOnAction(event -> connectAi());
         Button disconnectAi = styled(new Button("Disconnect"), "destructive");
         disconnectAi.setOnAction(event -> disconnectAi());
+        aiModel.setConverter(new javafx.util.StringConverter<>() {
+            @Override public String toString(io.github.aiassetmigrate.ai.SiwcInference.Model model) {
+                return model == null ? "" : modelLabel(model);
+            }
+            @Override public io.github.aiassetmigrate.ai.SiwcInference.Model fromString(String text) { return null; }
+        });
+        aiModel.setPromptText("Connect to list models");
+        aiModel.setMaxWidth(Double.MAX_VALUE);
+        aiModel.setDisable(true);
+        aiModel.setTooltip(new Tooltip("The ChatGPT model used by every AI feature"));
+        HBox.setHgrow(aiModel, Priority.ALWAYS);
+        aiModel.valueProperty().addListener((o, previous, chosen) -> {
+            if (!updatingModels && chosen != null && !chosen.equals(previous)) selectAiModel(chosen);
+        });
+        refreshModels.setTooltip(new Tooltip("Fetch the models this account can use again"));
+        refreshModels.setOnAction(event -> refreshAiStatus());
+        refreshModels.setDisable(true);
         aiPane.getChildren().addAll(aiStatus, new HBox(8, connectAi, disconnectAi),
+                muted("Model"), row(aiModel, refreshModels),
                 muted("AI is optional. It adds suggestions, explanations and summaries; it never approves a plan or runs a "
                         + "migration. Requests send relative paths, types and finding codes, never file contents. "
                         + "Sign-in uses your ChatGPT account in the browser."));
@@ -1553,26 +1575,47 @@ public final class AssetMigrateApplication extends Application {
         }
     }
 
+    /** Loads the saved account and, when connected, the models it may use, then fills the model list. */
     private void refreshAiStatus() {
+        aiStatus.setText("Checking AI account...");
+        refreshModels.setDisable(true);
         Thread worker = new Thread(() -> {
             String text;
             boolean connected = false;
+            List<io.github.aiassetmigrate.ai.SiwcInference.Model> models = List.of();
+            Optional<String> saved = Optional.empty();
             try {
                 var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
                 var account = store.load();
-                connected = account.isPresent();
-                text = account.map(value -> "Connected as " + value.credentials().email().orElse(value.credentials().subject())
-                        + ", model " + value.model().orElse("<none selected>") + ".")
-                        .orElse("Not connected. AI features are optional.");
+                if (account.isEmpty()) {
+                    text = "Not connected. AI features are optional.";
+                } else {
+                    connected = true;
+                    saved = account.get().model();
+                    String who = "Connected as " + accountName(account.get()) + ".";
+                    try {
+                        String token = io.github.aiassetmigrate.auth.AccountSession.forStore(store).accessToken(false);
+                        models = io.github.aiassetmigrate.ai.SiwcInference.listModels(
+                                new io.github.aiassetmigrate.ai.SiwcHttpTransport(), token, java.time.Duration.ofSeconds(30));
+                        text = who + " " + modelStatus(models, saved);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        text = who + " Loading the model list was interrupted.";
+                    } catch (Exception e) {
+                        text = who + " Could not load the model list (" + e.getMessage() + "). AI features keep using "
+                                + saved.orElse("<no model>") + "; use Refresh to try again.";
+                    }
+                }
             } catch (Exception e) {
                 text = "Unavailable (" + e.getMessage() + ").";
             }
-            showAi(text, connected);
+            showAi(text, connected, models, saved);
         }, "ai-status");
         worker.setDaemon(true);
         worker.start();
     }
 
+    /** Updates only the status text and header label; the model list is left as it is. */
     private void showAi(String text, boolean connected) {
         Platform.runLater(() -> {
             aiStatus.setText(text);
@@ -1580,11 +1623,81 @@ public final class AssetMigrateApplication extends Application {
         });
     }
 
+    /** Updates the status and replaces the model list, selecting the saved model if it is listed. */
+    private void showAi(String text, boolean connected, List<io.github.aiassetmigrate.ai.SiwcInference.Model> models,
+                        Optional<String> saved) {
+        Platform.runLater(() -> {
+            aiStatus.setText(text);
+            aiTool.setText(connected ? "AI: connected" : "AI: off");
+            updatingModels = true;
+            try {
+                aiModel.getItems().setAll(models);
+                aiModel.setValue(chosenModel(models, saved).orElse(null));
+            } finally {
+                updatingModels = false;
+            }
+            aiModel.setPromptText(!connected ? "Connect to list models"
+                    : models.isEmpty() ? "No models listed; use Refresh" : "Choose a model");
+            aiModel.setDisable(models.isEmpty());
+            refreshModels.setDisable(!connected);
+        });
+    }
+
+    /** Saves the user's model choice; every later AI request reads it from the saved account. */
+    private void selectAiModel(io.github.aiassetmigrate.ai.SiwcInference.Model model) {
+        aiModel.setDisable(true);
+        aiStatus.setText("Switching to " + modelLabel(model) + "...");
+        Thread worker = new Thread(() -> {
+            String text;
+            boolean saved = false;
+            try {
+                var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
+                // Under the store lock so a concurrent token refresh cannot overwrite the choice.
+                var account = store.locked(() -> {
+                    var current = store.load().orElseThrow(io.github.aiassetmigrate.auth.AccountSession.NotConnectedException::new);
+                    var updated = new io.github.aiassetmigrate.auth.AccountStore.Account(current.credentials(),
+                            Optional.of(model.slug()));
+                    store.save(updated);
+                    return updated;
+                });
+                saved = true;
+                text = "Connected as " + accountName(account) + ". Using " + modelLabel(model) + " for AI features.";
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                text = "Switching model was interrupted.";
+            } catch (Exception e) {
+                text = "Could not switch model (" + e.getMessage() + ").";
+            }
+            // On failure, show the model still in use rather than the rejected choice.
+            Optional<String> inUse = Optional.of(model.slug());
+            if (!saved) {
+                try {
+                    inUse = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser().load()
+                            .flatMap(io.github.aiassetmigrate.auth.AccountStore.Account::model);
+                } catch (Exception unreadable) {
+                    inUse = Optional.empty();
+                }
+            }
+            String message = text;
+            Optional<String> selection = inUse;
+            Platform.runLater(() -> {
+                aiStatus.setText(message);
+                updatingModels = true;
+                try {
+                    aiModel.setValue(chosenModel(aiModel.getItems(), selection).orElse(null));
+                } finally {
+                    updatingModels = false;
+                }
+                aiModel.setDisable(aiModel.getItems().isEmpty());
+            });
+        }, "ai-model");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
     private void connectAi() {
         aiStatus.setText("Complete sign-in in your browser (up to 5 minutes)...");
         Thread worker = new Thread(() -> {
-            String text;
-            boolean connected = false;
             try {
                 var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
                 var previous = store.load();
@@ -1595,17 +1708,16 @@ public final class AssetMigrateApplication extends Application {
                 var model = previous.flatMap(io.github.aiassetmigrate.auth.AccountStore.Account::model)
                         .filter(slug -> models.stream().anyMatch(m -> m.slug().equals(slug)))
                         .or(() -> models.stream().findFirst().map(io.github.aiassetmigrate.ai.SiwcInference.Model::slug));
-                store.save(new io.github.aiassetmigrate.auth.AccountStore.Account(credentials, model));
-                connected = true;
-                text = "Connected as " + credentials.email().orElse(credentials.subject())
-                        + ", model " + model.orElse("<none available>") + ". Migration approval is unchanged.";
+                var account = new io.github.aiassetmigrate.auth.AccountStore.Account(credentials, model);
+                store.save(account);
+                showAi("Connected as " + accountName(account) + ". " + modelStatus(models, model)
+                        + " Migration approval is unchanged.", true, models, model);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                text = "Sign-in interrupted.";
+                showAi("Sign-in interrupted.", false);
             } catch (Exception e) {
-                text = "Sign-in failed (" + e.getMessage() + ").";
+                showAi("Sign-in failed (" + e.getMessage() + ").", false);
             }
-            showAi(text, connected);
         }, "ai-connect");
         worker.setDaemon(true);
         worker.start();
@@ -1613,11 +1725,10 @@ public final class AssetMigrateApplication extends Application {
 
     private void disconnectAi() {
         Thread worker = new Thread(() -> {
-            String text;
-            boolean connected = false;
             try {
                 var store = io.github.aiassetmigrate.auth.AccountStore.forCurrentUser();
                 var account = store.load();
+                String text;
                 if (account.isEmpty()) {
                     text = "Not connected.";
                 } else {
@@ -1628,18 +1739,42 @@ public final class AssetMigrateApplication extends Application {
                     text = "Disconnected. " + (revoked ? "Remote session revoked."
                             : "Remote revocation not confirmed; you can also disconnect in ChatGPT Settings.");
                 }
+                showAi(text, false, List.of(), Optional.empty());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                text = "Disconnect interrupted.";
-                connected = true;
+                showAi("Disconnect interrupted.", true);
             } catch (Exception e) {
-                text = "Disconnect failed (" + e.getMessage() + ").";
-                connected = true;
+                showAi("Disconnect failed (" + e.getMessage() + ").", true);
             }
-            showAi(text, connected);
         }, "ai-disconnect");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    private static String accountName(io.github.aiassetmigrate.auth.AccountStore.Account account) {
+        return account.credentials().email().orElse(account.credentials().subject());
+    }
+
+    /** Dropdown text: "Display name (slug)", or just the slug when the name adds nothing. */
+    static String modelLabel(io.github.aiassetmigrate.ai.SiwcInference.Model model) {
+        String name = model.displayName() == null ? "" : model.displayName().strip();
+        return name.isEmpty() || name.equals(model.slug()) ? model.slug() : name + " (" + model.slug() + ")";
+    }
+
+    /** The listed model matching the saved selection; empty when none is saved or it is no longer listed. */
+    static Optional<io.github.aiassetmigrate.ai.SiwcInference.Model> chosenModel(
+            List<io.github.aiassetmigrate.ai.SiwcInference.Model> models, Optional<String> saved) {
+        return saved.flatMap(slug -> models.stream().filter(m -> m.slug().equals(slug)).findFirst());
+    }
+
+    static String modelStatus(List<io.github.aiassetmigrate.ai.SiwcInference.Model> models, Optional<String> saved) {
+        if (models.isEmpty()) return "No models are available to this account.";
+        Optional<io.github.aiassetmigrate.ai.SiwcInference.Model> chosen = chosenModel(models, saved);
+        if (chosen.isPresent()) return "Using " + modelLabel(chosen.get()) + ".";
+        if (saved.isPresent()) {
+            return "The saved model " + saved.get() + " is no longer available to this account; choose another.";
+        }
+        return "Choose a model to use AI features.";
     }
 
     // ---------------------------------------------------------------- formatting (tested)
