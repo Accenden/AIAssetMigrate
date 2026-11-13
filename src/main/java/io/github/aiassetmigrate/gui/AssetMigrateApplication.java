@@ -144,6 +144,9 @@ public final class AssetMigrateApplication extends Application {
     private final CheckBox compatibilityAi = new CheckBox("Explain issues with AI");
     private final HBox compatibilityBadges = new HBox(6);
     private final TextArea compatibilityResults = new TextArea();
+    /** One card per issue type, with the AI explanation when requested; the raw list is collapsed below. */
+    private final VBox compatibilityIssues = new VBox(10);
+    private final TitledPane compatibilityRawPane = collapsible("All findings", compatibilityResults);
     private final CompatibilityGeneration compatibilityGeneration = new CompatibilityGeneration();
 
     // Step 4: plan
@@ -664,11 +667,14 @@ public final class AssetMigrateApplication extends Application {
         actions.setAlignment(Pos.CENTER_LEFT);
         compatibilityBadges.setAlignment(Pos.CENTER_LEFT);
         readOnly(compatibilityResults, "Run the check to list likely problems for the selected engine.");
+        compatibilityResults.setPrefRowCount(14);
+        compatibilityIssues.getStyleClass().add("callout");
+        compatibilityIssues.setVisible(false);
+        compatibilityIssues.managedProperty().bind(compatibilityIssues.visibleProperty());
         VBox view = stepView("Choose a target engine",
                 "Pick the engine these assets are going to, then check them against it. The check lists likely "
                         + "problems before anything is copied; it is not a full validation.",
-                fieldLabel("Engine"), targetCards, actions, compatibilityBadges, compatibilityResults);
-        VBox.setVgrow(compatibilityResults, Priority.ALWAYS);
+                fieldLabel("Engine"), targetCards, actions, compatibilityBadges, compatibilityIssues, compatibilityRawPane);
         return scrollable(view);
     }
 
@@ -1447,7 +1453,9 @@ public final class AssetMigrateApplication extends Application {
                 boolean current = compatibilityGeneration.isCurrent(generation);
                 if (current && result.value() != null) {
                     compatibilityResults.setText(formatCompatibility(result.value()));
+                    compatibilityRawPane.setText("All findings (" + result.value().findings().size() + ")");
                     compatibilityBadges.getChildren().setAll(severityBadges(result.value().findings()));
+                    renderCompatibility(CompatibilitySummary.of(result.value().findings()), ai);
                 }
                 busy(false);
                 if (!current) {
@@ -1470,7 +1478,64 @@ public final class AssetMigrateApplication extends Application {
     private void clearCompatibility() {
         compatibilityGeneration.invalidate();
         compatibilityResults.clear();
+        compatibilityRawPane.setText("All findings");
         compatibilityBadges.getChildren().clear();
+        compatibilityIssues.getChildren().clear();
+        compatibilityIssues.setVisible(false);
+    }
+
+    /** "Issues to look at": one card per issue type; the AI explanation replaces the rule's wording when present. */
+    private void renderCompatibility(CompatibilitySummary summary, boolean aiRequested) {
+        Label title = new Label("Issues to look at");
+        title.getStyleClass().add("h3");
+        String intro = summary.issues().isEmpty() ? "No errors or warnings for this engine."
+                : summary.issues().size() + " kind(s) of issue. Errors block the plan; warnings and unchecked items do not,"
+                + " but are worth a look." + (aiRequested && summary.explained() > 0
+                ? " AI explanations are advisory; the severities come from the rules." : "");
+        compatibilityIssues.getChildren().setAll(title, muted(intro));
+        for (String note : summary.notes()) {
+            Label line = muted(note);
+            line.getStyleClass().add("summary-issue");
+            compatibilityIssues.getChildren().add(line);
+        }
+        for (CompatibilitySummary.Issue issue : summary.issues()) {
+            Label severity = badge(issue.severity() == Finding.Severity.UNKNOWN ? "Not checked" : label(issue.severity().toString()),
+                    issue.severity() == Finding.Severity.ERROR ? "badge-danger" : "badge-warning");
+            Label name = new Label(label(issue.code()));
+            name.getStyleClass().add("summary-file");
+            HBox header = new HBox(8, severity, name, muted(issue.count() == 1 ? "1 finding" : issue.count() + " findings"));
+            header.setAlignment(Pos.CENTER_LEFT);
+            VBox card = new VBox(4, header);
+            card.getStyleClass().add("summary-item");
+            if (issue.aiExplanation().isPresent()) {
+                Label source = badge("AI", "badge-info");
+                source.setMinWidth(Region.USE_PREF_SIZE);
+                Label text = new Label(issue.aiExplanation().get());
+                text.setWrapText(true);
+                HBox explanation = new HBox(8, source, text);
+                explanation.setAlignment(Pos.TOP_LEFT);
+                HBox.setHgrow(text, Priority.ALWAYS);
+                card.getChildren().add(explanation);
+                Label rule = muted("Rule: " + issue.ruleMessage());
+                rule.getStyleClass().add("summary-reason");
+                card.getChildren().add(rule);
+            } else {
+                Label rule = new Label(issue.ruleMessage());
+                rule.setWrapText(true);
+                card.getChildren().add(rule);
+            }
+            if (!issue.examples().isEmpty()) {
+                card.getChildren().add(muted((issue.count() > issue.examples().size() ? "For example: " : "Files: ")
+                        + String.join(", ", issue.examples())));
+            }
+            compatibilityIssues.getChildren().add(card);
+        }
+        if (aiRequested && summary.issues().stream().anyMatch(issue -> issue.aiExplanation().isEmpty()) && summary.notes().isEmpty()) {
+            compatibilityIssues.getChildren().add(muted("Issues without an AI badge were not explained by the model; their "
+                    + "rule wording is shown."));
+        }
+        summary.aiSource().ifPresent(source -> compatibilityIssues.getChildren().add(muted(source)));
+        compatibilityIssues.setVisible(true);
     }
 
     // ---------------------------------------------------------------- step 4: plan

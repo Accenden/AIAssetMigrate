@@ -93,7 +93,10 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
    (marked AI or Rule, with the model's reason), or a next step when there is none. Clicking
    a suggestion selects it in the table for Accept or Reject. While a table row is selected,
    the box shows only that file; **Show all** (or clearing the selection) lists every file again.
-3. **Target**: pick an engine and check compatibility.
+3. **Target**: pick an engine and check compatibility. **Issues to look at** lists one card
+   per kind of issue (errors first) with its severity, how many findings it covers, example
+   files, and, with **Explain issues with AI** ticked, the model's explanation next to the
+   rule's own wording. The raw list is under **All findings**.
 4. **Plan**: choose the output folder, create the plan, read the files it will write, and
    approve it. Blocking issues are listed with the next step to fix each.
 5. **Migrate**: run the approved plan; the outputs are validated and the report shown.
