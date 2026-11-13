@@ -26,6 +26,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContentDisplay;
+import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.ScrollPane;
@@ -127,6 +128,10 @@ public final class AssetMigrateApplication extends Application {
     private final ComboBox<AssetManager.FolderStyle> folderStyle = new ComboBox<>();
     private TitledPane manualReviewPane;
     private AnalysisContext analysisContext;
+    /** Plain-language summary of the last AI-assisted check, shown below the suggestions; null when hidden. */
+    private final VBox aiSummary = new VBox(10);
+    private ReviewSummary currentSummary;
+    private final Map<UUID, ReviewedChange.Decision> decidedSuggestions = new HashMap<>();
 
     // Step 3: target
     private final ObjectProperty<AssetManager.TargetProfile> selectedTarget = new SimpleObjectProperty<>();
@@ -536,6 +541,7 @@ public final class AssetMigrateApplication extends Application {
         suggestions.setPlaceholder(new Label("Pick a check above to see its suggestions."));
         suggestions.setPrefHeight(300);
         suggestions.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, selected) -> {
+            renderSummary();
             if (selected == null) return;
             reviewAsset.setText(selected.assetId().toString());
             reviewKind.setValue(suggestionKind(selected.kind()));
@@ -555,6 +561,10 @@ public final class AssetMigrateApplication extends Application {
         analysisRevision.getStyleClass().add("muted");
         HBox decisionBar = new HBox(8, analysisRevision, spacer(), accept, reject, edit);
         decisionBar.setAlignment(Pos.CENTER_LEFT);
+
+        aiSummary.getStyleClass().addAll("callout", "ai-summary");
+        aiSummary.setVisible(false);
+        aiSummary.managedProperty().bind(aiSummary.visibleProperty());
 
         readOnly(analysisFindings, "Findings from the last check appear here.");
         analysisFindings.setPrefRowCount(6);
@@ -596,7 +606,7 @@ public final class AssetMigrateApplication extends Application {
         Button generateOrganization = new Button("Suggest with these rules");
         generateOrganization.setOnAction(event -> {
             var rules = new AssetManager.OrganizationRules(nameStyle.getValue(), folderStyle.getValue());
-            analyze(organizationAnalysis(rules));
+            analyze(organizationAnalysis(rules), false);
         });
         HBox rules = new HBox(8, fieldLabel("Names"), nameStyle, fieldLabel("Folders"), folderStyle, generateOrganization);
         rules.setAlignment(Pos.CENTER_LEFT);
@@ -618,7 +628,7 @@ public final class AssetMigrateApplication extends Application {
         VBox view = stepView("Review suggestions",
                 "Optional. Run a check, then accept or reject what it suggests. Accepted decisions are used when you "
                         + "create the plan; nothing is copied or changed yet.",
-                checks, suggestions, decisionBar, analysisFindingsPane, manualReviewPane, rulesPane, savedPane, previewPane);
+                checks, suggestions, decisionBar, aiSummary, analysisFindingsPane, manualReviewPane, rulesPane, savedPane, previewPane);
         VBox.setVgrow(suggestions, Priority.ALWAYS);
         return scrollable(view);
     }
@@ -983,7 +993,8 @@ public final class AssetMigrateApplication extends Application {
     // ---------------------------------------------------------------- step 2: review
 
     private void analyze(AssetManager.AnalysisKind kind) {
-        analyze(useAi.isSelected() ? assistedAnalysis(kind) : (manager, id) -> manager.analyze(id, kind));
+        boolean ai = useAi.isSelected();
+        analyze(ai ? assistedAnalysis(kind) : (manager, id) -> manager.analyze(id, kind), ai);
     }
 
     /** Runs on the worker thread: loads the saved account there, never on the JavaFX thread. */
@@ -995,7 +1006,8 @@ public final class AssetMigrateApplication extends Application {
         return (manager, id) -> manager.analyzeOrganization(id, rules);
     }
 
-    private void analyze(BiFunction<AssetManager, UUID, AssetManager.AnalysisResult> operation) {
+    /** {@code summarize}: show the plain-language summary box, used when the check asked the AI. */
+    private void analyze(BiFunction<AssetManager, UUID, AssetManager.AnalysisResult> operation, boolean summarize) {
         try {
             Path statePath = workspace();
             Path logPath = logDirectory();
@@ -1008,6 +1020,10 @@ public final class AssetMigrateApplication extends Application {
                     suggestions.getItems().setAll(result.value().suggestions());
                     analysisFindings.setText(formatAnalysisFindings(result.value().findings()));
                     analysisFindingsPane.setText("Check findings (" + result.value().findings().size() + ")");
+                    if (summarize) {
+                        currentSummary = ReviewSummary.of(result.value(), assetPaths);
+                        renderSummary();
+                    }
                 }
                 busy(false);
                 status.setText(result.failure() == null ? "Select a suggestion, then Accept or Reject it. Undecided suggestions are simply ignored."
@@ -1031,7 +1047,11 @@ public final class AssetMigrateApplication extends Application {
         }
         try {
             ReviewedChange change = makeReview(selected, choice, selected.proposedValue(), selected.reference().orElse(""));
-            saveReview(change, () -> suggestions.getItems().remove(selected));
+            saveReview(change, () -> {
+                suggestions.getItems().remove(selected);
+                decidedSuggestions.put(selected.id(), choice);
+                renderSummary();
+            });
         } catch (IllegalArgumentException failure) {
             status.setText("This suggestion needs editing first (" + failure.getMessage() + "). Use Edit...");
             manualReviewPane.setExpanded(true);
@@ -1129,6 +1149,9 @@ public final class AssetMigrateApplication extends Application {
         suggestions.getItems().clear();
         analysisFindings.clear();
         analysisFindingsPane.setText("Check findings");
+        currentSummary = null;
+        decidedSuggestions.clear();
+        renderSummary();
         clearDisplayedResults();
         clearReview();
     }
@@ -1145,6 +1168,95 @@ public final class AssetMigrateApplication extends Application {
         reviewValue.clear();
         reviewReference.clear();
         decision.setValue(null);
+    }
+
+    /**
+     * Rebuilds the summary box. With a suggestion selected in the table it shows only that file's entry;
+     * otherwise every file. Decided suggestions show their decision and can no longer be clicked.
+     */
+    private void renderSummary() {
+        ReviewSummary summary = currentSummary;
+        aiSummary.getChildren().clear();
+        aiSummary.setVisible(summary != null);
+        if (summary == null) return;
+        Label title = new Label("AI review summary");
+        title.getStyleClass().add("h3");
+        AssetManager.Suggestion selected = suggestions.getSelectionModel().getSelectedItem();
+        Optional<ReviewSummary.Item> focused = selected == null ? Optional.empty() : summary.itemFor(selected.assetId());
+        if (focused.isPresent()) {
+            Hyperlink showAll = new Hyperlink("Show all " + summary.items().size() + " files");
+            showAll.getStyleClass().add("summary-suggestion");
+            showAll.setOnAction(event -> suggestions.getSelectionModel().clearSelection());
+            HBox header = new HBox(8, title, spacer(), showAll);
+            header.setAlignment(Pos.CENTER_LEFT);
+            aiSummary.getChildren().addAll(header, summaryItem(focused.get(), selected));
+            return;
+        }
+        Label overview = new Label(summary.overview());
+        overview.setWrapText(true);
+        aiSummary.getChildren().addAll(title, overview);
+        for (String note : summary.notes()) aiSummary.getChildren().add(muted(note));
+        for (ReviewSummary.Item item : summary.shown()) aiSummary.getChildren().add(summaryItem(item, null));
+        if (summary.hiddenItems() > 0) {
+            aiSummary.getChildren().add(muted("...and " + summary.hiddenItems() + " more file(s); see the table above."));
+        }
+    }
+
+    /** {@code selected} (nullable) is the table's selected suggestion, highlighted in the entry. */
+    private Node summaryItem(ReviewSummary.Item item, AssetManager.Suggestion selected) {
+        VBox box = new VBox(4);
+        box.getStyleClass().add("summary-item");
+        Label file = new Label(item.file());
+        file.getStyleClass().add("summary-file");
+        file.setWrapText(true);
+        box.getChildren().add(file);
+        for (String issue : item.issues()) {
+            Label line = new Label("⚠  " + issue);
+            line.getStyleClass().add("summary-issue");
+            line.setWrapText(true);
+            box.getChildren().add(line);
+        }
+        for (ReviewSummary.Line line : item.suggestions()) {
+            Label source = new Label(line.ai() ? "AI" : "Rule");
+            source.getStyleClass().addAll("badge", line.ai() ? "badge-info" : "badge-neutral");
+            source.setMinWidth(Region.USE_PREF_SIZE);
+            Hyperlink link = new Hyperlink(line.text());
+            link.getStyleClass().add("summary-suggestion");
+            link.setWrapText(true);
+            link.setMaxWidth(Double.MAX_VALUE);
+            ReviewedChange.Decision done = decidedSuggestions.get(line.suggestion().id());
+            if (done != null) {
+                link.setText(line.text() + "  (" + label(done.toString()) + ")");
+                link.setDisable(true);
+            } else {
+                link.setTooltip(new Tooltip("Select this suggestion in the table"));
+                link.setOnAction(event -> selectSuggestion(line.suggestion()));
+            }
+            HBox row = new HBox(8, source, link);
+            row.setAlignment(Pos.CENTER_LEFT);
+            if (line.suggestion().equals(selected)) row.getStyleClass().add("summary-selected");
+            HBox.setHgrow(link, Priority.ALWAYS);
+            box.getChildren().add(row);
+            line.reason().ifPresent(reason -> {
+                Label why = muted("Why: " + reason);
+                why.getStyleClass().add("summary-reason");
+                box.getChildren().add(why);
+            });
+        }
+        item.nextStep().ifPresent(step -> box.getChildren().add(muted("Next: " + step)));
+        return box;
+    }
+
+    private void selectSuggestion(AssetManager.Suggestion suggestion) {
+        int index = suggestions.getItems().indexOf(suggestion);
+        if (index < 0) {
+            status.setText("That suggestion is no longer in the table; run the check again.");
+            return;
+        }
+        suggestions.getSelectionModel().select(index);
+        suggestions.scrollTo(index);
+        suggestions.requestFocus();
+        status.setText("Selected. Accept or Reject it, or use Edit... to change it first.");
     }
 
     /** Relationship and material suggestions propose a target asset ID; show its path instead. */

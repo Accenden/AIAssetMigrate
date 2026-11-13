@@ -239,14 +239,21 @@ public interface AssetManager {
     /** RULES suggestions are deterministic; AI suggestions came from a model and were validated. */
     enum Source { RULES, AI }
 
-    /** Suggestions are not accepted reviews and must never be applied implicitly. */
+    /**
+     * Suggestions are not accepted reviews and must never be applied implicitly. {@code reason} is the
+     * model's short, sanitized explanation for an AI suggestion; it is advisory text only.
+     */
     record Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference,
-                      Source source) {
+                      Source source, Optional<String> reason) {
         public Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue) {
             this(id, assetId, kind, proposedValue, Optional.empty());
         }
         public Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference) {
             this(id, assetId, kind, proposedValue, reference, Source.RULES);
+        }
+        public Suggestion(UUID id, UUID assetId, AnalysisKind kind, String proposedValue, Optional<String> reference,
+                          Source source) {
+            this(id, assetId, kind, proposedValue, reference, source, Optional.empty());
         }
         public Suggestion {
             Objects.requireNonNull(id, "id");
@@ -255,6 +262,7 @@ public interface AssetManager {
             Objects.requireNonNull(proposedValue, "proposedValue");
             Objects.requireNonNull(reference, "reference");
             Objects.requireNonNull(source, "source");
+            Objects.requireNonNull(reason, "reason");
         }
     }
 

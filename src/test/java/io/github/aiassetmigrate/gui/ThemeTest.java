@@ -19,7 +19,8 @@ class ThemeTest {
                 ".button.destructive", ".text-input", ".table-view", ".app-header", ".stepper", ".step", ".step-index",
                 ".step-label", ".step-current", ".step-complete", ".step-connector", ".step-host", ".step-view",
                 ".app-footer", ".status", ".drawer", ".tool-toggle", ".segmented", ".choice-card", ".choice-title",
-                ".badge", ".badge-success", ".badge-warning", ".badge-danger", ".callout", ".callout-danger", ".titled-pane"}) {
+                ".badge", ".badge-success", ".badge-warning", ".badge-danger", ".callout", ".callout-danger", ".titled-pane", ".badge-info", ".badge-neutral", ".summary-item",
+                ".summary-file", ".summary-issue", ".summary-suggestion", ".summary-selected", ".summary-reason"}) {
             assertTrue(css.contains(selector), "missing " + selector);
         }
     }

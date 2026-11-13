@@ -102,7 +102,7 @@ public final class AIEngine {
         for (Proposal proposal : accepted.proposals()) {
             Suggestion suggestion = new Suggestion(UUID.nameUUIDFromBytes(("ai:" + kind + ":" + proposal.assetId() + ":"
                     + proposal.value() + ":" + proposal.reference().orElse("")).getBytes(StandardCharsets.UTF_8)),
-                    proposal.assetId(), kind, proposal.value(), proposal.reference(), Source.AI);
+                    proposal.assetId(), kind, proposal.value(), proposal.reference(), Source.AI, proposal.reason());
             if (!existing.add(key(suggestion))) continue;
             suggestions.add(suggestion);
             Asset asset = byId.get(proposal.assetId());

@@ -85,7 +85,11 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
    Folders), then select a suggestion and **Accept** or **Reject** it. Editing a
    suggestion, adding your own decision (for example an `EXCLUSION`, `ACKNOWLEDGMENT` or
    `CONVERSION`), rename rules, saved decisions and the layout preview are in
-   collapsed sections.
+   collapsed sections. With **Use AI suggestions** ticked, an **AI review summary** box below
+   the table lists each file with its problems in plain words and the suggestions for it
+   (marked AI or Rule, with the model's reason), or a next step when there is none. Clicking
+   a suggestion selects it in the table for Accept or Reject. While a table row is selected,
+   the box shows only that file; **Show all** (or clearing the selection) lists every file again.
 3. **Target**: pick an engine and check compatibility.
 4. **Plan**: choose the output folder, create the plan, read the files it will write, and
    approve it. Blocking issues are listed with the next step to fix each.

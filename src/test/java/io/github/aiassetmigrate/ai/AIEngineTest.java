@@ -69,7 +69,7 @@ class AIEngineTest {
                   {"assetId":"not-a-uuid","category":"Props"}]}
                 """.formatted(blob.id(), thing.id(), hero.id(), blob.id()))).assist(AnalysisKind.CATEGORIES, inventory, base, Map.of());
         assertEquals(List.of(new Suggestion(ai(result).getFirst().id(), blob.id(), AnalysisKind.CATEGORIES, "Props",
-                Optional.empty(), Source.AI)), ai(result));
+                Optional.empty(), Source.AI, Optional.of("looks like a prop"))), ai(result));
         assertEquals(base.suggestions(), result.suggestions().subList(0, base.suggestions().size()));
         assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("AI_OUTPUT_REJECTED") && f.message().startsWith("4 ")));
         assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("AI_SUGGESTION") && f.message().contains("looks like a prop")));

@@ -538,6 +538,52 @@
     -fx-text-fill: #fecaca;
 }
 
+.badge-info {
+    -fx-background-color: rgba(59, 130, 246, 0.18);
+    -fx-text-fill: #93c5fd;
+}
+
+.badge-neutral {
+    -fx-text-fill: -c-muted-foreground;
+}
+
+/* ---- AI review summary (Review step) ----------------------------------- */
+.summary-item {
+    -fx-border-color: -c-border transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+    -fx-padding: 10 0 0 0;
+}
+
+.summary-file {
+    -fx-font-weight: bold;
+}
+
+.summary-issue {
+    -fx-text-fill: #fbbf24;
+}
+
+.summary-suggestion,
+.summary-suggestion:visited {
+    -fx-text-fill: -c-foreground;
+    -fx-padding: 0;
+    -fx-border-color: transparent;
+}
+
+.summary-suggestion:hover {
+    -fx-underline: true;
+}
+
+.summary-selected {
+    -fx-background-color: -c-muted;
+    -fx-background-radius: 6;
+    -fx-padding: 3 6 3 6;
+}
+
+.summary-reason {
+    -fx-font-style: italic;
+    -fx-padding: 0 0 0 4;
+}
+
 /* ---- Collapsible sections (progressive disclosure) -------------------- */
 .titled-pane {
     -fx-text-fill: -c-foreground;
