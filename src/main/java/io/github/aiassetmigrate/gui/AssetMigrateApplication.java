@@ -2023,8 +2023,9 @@ public final class AssetMigrateApplication extends Application {
     /**
      * Lets the user accept proposed decisions one by one (none is preselected), with the ones the checks dropped listed
      * underneath. Accepted ones are saved like Fix blockers saves fixes; with a plan request a new plan is created.
+     * Returns true when saving started (the user accepted at least one).
      */
-    private void chooseDecisions(Optional<PlanRequest> request, BlockerFixes.Proposal proposal, String title, String explanation) {
+    private boolean chooseDecisions(Optional<PlanRequest> request, BlockerFixes.Proposal proposal, String title, String explanation) {
         VBox list = new VBox(8);
         Map<CheckBox, BlockerFixes.Fix> boxes = new java.util.LinkedHashMap<>();
         proposal.fixes().forEach(fix -> list.getChildren().add(fixRow(fix, false, boxes)));
@@ -2072,11 +2073,11 @@ public final class AssetMigrateApplication extends Application {
         List<BlockerFixes.Fix> chosen = boxes.entrySet().stream().filter(e -> e.getKey().isSelected()).map(Map.Entry::getValue).toList();
         if (answer != apply || chosen.isEmpty()) {
             status.setText("Nothing was accepted; no decisions were saved.");
-            return;
+            return false;
         }
         if (request.isPresent()) {
             applyFixes(request.get(), proposal, chosen);
-            return;
+            return true;
         }
         // No plan inputs yet (for example from the agent): save the decisions only.
         if (runner.submitValue(workspace(), logDirectory(), manager -> {
@@ -2098,7 +2099,9 @@ public final class AssetMigrateApplication extends Application {
         })) {
             busy(true);
             status.setText("Saving " + chosen.size() + " decision(s)...");
+            return true;
         }
+        return false;
     }
 
     static String fixHeader(BlockerFixes.Proposal proposal) {
@@ -2564,10 +2567,15 @@ public final class AssetMigrateApplication extends Application {
                     agentDecisions.setOnAction(event -> {
                         Optional<PlanRequest> plan;
                         try { plan = Optional.of(planRequest()); } catch (IllegalArgumentException incomplete) { plan = Optional.empty(); }
-                        chooseDecisions(plan, proposal, "Proposed by the agent", "The agent gathered these with the program's "
-                                + "read-only tools, and the program checked each one. Tick the ones you want; they are saved as "
-                                + "review decisions" + (plan.isPresent() ? " and a new plan is created" : "")
+                        boolean applied = chooseDecisions(plan, proposal, "Proposed by the agent", "The agent gathered these with "
+                                + "the program's read-only tools, and the program checked each one. Tick the ones you want; they are "
+                                + "saved as review decisions" + (plan.isPresent() ? " and a new plan is created" : "")
                                 + ". Your asset folder is not changed and nothing is approved.");
+                        if (applied) {
+                            // The decisions are saved now; the bundle is out of date, and the new plan is in the Plan step.
+                            agentDecisions.setVisible(false);
+                            if (plan.isPresent()) showStep(WizardFlow.Step.PLAN);
+                        }
                     });
                 });
                 busy(false);
@@ -2588,7 +2596,8 @@ public final class AssetMigrateApplication extends Application {
         result.draftPlan().ifPresent(plan -> text.append("Draft plan ").append(plan.id()).append(" version ").append(plan.version())
                 .append(" (").append(plan.status()).append("). Review and approve it in the Plan step or with 'approve'.\n"));
         for (Finding finding : result.findings()) {
-            if (finding.severity() == Finding.Severity.INFO && !finding.code().startsWith("AI_")) continue;
+            // INFO notes (such as which model was used) bury the answer at the end of the transcript; problems stay.
+            if (finding.severity() == Finding.Severity.INFO) continue;
             text.append("  ").append(finding.severity()).append(' ').append(finding.code()).append(": ").append(finding.message()).append('\n');
         }
         return text.toString();

@@ -89,9 +89,10 @@ class AiSuggestionsIntegrationTest {
             var suggestions = manager.suggestPlanSteps(project, UNITY, model(prompt -> proposals()));
             List<String> passed = suggestions.proposal().fixes().stream().map(BlockerFixes.Fix::description).toList();
             assertEquals(3, passed.size(), passed + " / " + suggestions.proposal().unfixable());
-            assertTrue(passed.get(0).startsWith("Convert ui/icon.png to jpg on a #FFFFFF background (AI: UI on white)"), passed.toString());
-            assertTrue(passed.get(1).startsWith("Leave misc/broken.png out of the migration"), passed.toString());
-            assertTrue(passed.get(2).startsWith("Point 'skin.png' in hero.mtl to textures/skin.png"), passed.toString());
+            // Conversions are checked (and listed) after the other kinds.
+            assertTrue(passed.get(0).startsWith("Leave misc/broken.png out of the migration"), passed.toString());
+            assertTrue(passed.get(1).startsWith("Point 'skin.png' in hero.mtl to textures/skin.png"), passed.toString());
+            assertTrue(passed.get(2).startsWith("Convert ui/icon.png to jpg on a #FFFFFF background (AI: UI on white)"), passed.toString());
             assertTrue(suggestions.proposal().fixes().stream().allMatch(fix -> fix.source() == BlockerFixes.Source.AI && !fix.recommended()));
 
             List<String> dropped = suggestions.proposal().unfixable();
@@ -167,6 +168,33 @@ class AiSuggestionsIntegrationTest {
         }
     }
 
+    @Test void aConversionThatNeedsAReferenceFixPassesTogetherWithItAndSaysSo() throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(io.github.aiassetmigrate.conversion.AssimpModelConverter.available());
+        try (var manager = new DefaultAssetManager(directory.resolve("state"))) {
+            UUID project = importProject(manager);
+            // The AI lists the conversion first; alone it fails (hero.mtl's skin.png is missing).
+            String reply = """
+                    {"proposals":[{"kind":"CONVERT","assetId":"%s","format":"glb","reason":"GLB"},
+                      {"kind":"FIX_REFERENCE","assetId":"%s","reference":"skin.png","targetAssetId":"%s","reason":"moved"}]}
+                    """.formatted(ids.get("hero.obj"), ids.get("hero.mtl"), ids.get("textures/skin.png"));
+            var suggestions = manager.suggestPlanSteps(project, UNITY, model(prompt -> reply));
+            List<String> passed = suggestions.proposal().fixes().stream().map(BlockerFixes.Fix::description).toList();
+            assertEquals(2, passed.size(), passed + " / " + suggestions.proposal().unfixable());
+            assertTrue(passed.get(0).startsWith("Point 'skin.png' in hero.mtl"), passed.toString());
+            assertTrue(passed.get(1).startsWith("Convert hero.obj to glb") && passed.get(1).contains("Works only together with \"Point 'skin.png'")
+                    && passed.get(1).contains("glTFast"), passed.toString());
+
+            var rechecked = manager.checkDecisions(project, suggestions.proposal().inventoryRevision(), Optional.of(UNITY),
+                    suggestions.proposal().fixes());
+            assertEquals(passed, rechecked.fixes().stream().map(BlockerFixes.Fix::description).toList(), "re-checking adds no second note");
+
+            var conversionOnly = manager.suggestPlanSteps(project, UNITY, model(prompt -> """
+                    {"proposals":[{"kind":"CONVERT","assetId":"%s","format":"glb"}]}""".formatted(ids.get("hero.obj"))));
+            assertTrue(conversionOnly.proposal().fixes().isEmpty(), "without the fix in the list it is still dropped");
+            assertTrue(conversionOnly.proposal().unfixable().getFirst().contains("converter's check fails"));
+        }
+    }
+
     @Test void preparingLetsTheAgentChooseToolsAndReturnsOneCheckedBundle() throws Exception {
         try (var manager = new DefaultAssetManager(directory.resolve("state"))) {
             UUID project = importProject(manager);
@@ -177,10 +205,10 @@ class AiSuggestionsIntegrationTest {
             String corrections = """
                     {"corrections":[{"ownerId":"%s","reference":"skin.png","targetAssetId":"%s","reason":"same name"}],"groups":[]}
                     """.formatted(ids.get("hero.mtl"), ids.get("textures/skin.png"));
+            // The AI misses the damaged image; Fix blockers' rule-based fix for it joins the bundle.
             String proposals = """
-                    {"proposals":[{"kind":"EXCLUDE","assetId":"%s","reason":"damaged"},
-                      {"kind":"FIX_REFERENCE","assetId":"%s","reference":"skin.png","targetAssetId":"%s"}]}
-                    """.formatted(ids.get("misc/broken.png"), ids.get("hero.mtl"), ids.get("textures/skin.png"));
+                    {"proposals":[{"kind":"FIX_REFERENCE","assetId":"%s","reference":"skin.png","targetAssetId":"%s"}]}
+                    """.formatted(ids.get("hero.mtl"), ids.get("textures/skin.png"));
             String route = "{\"action\":\"PREPARE\",\"parameters\":{\"target\":\"unity\",\"version\":\"6000.0\",\"output\":\""
                     + output.toString().replace("\\", "\\\\") + "\"},\"message\":\"Preparing\"}";
             LLMClient scripted = model(prompt -> prompt.contains("You route a user's request") ? route
@@ -193,7 +221,9 @@ class AiSuggestionsIntegrationTest {
             assertTrue(result.message().contains("Nothing was approved or migrated"), result.message());
             var decisions = result.decisions().orElseThrow();
             assertEquals(2, decisions.fixes().size(), decisions.fixes() + " / " + decisions.unfixable());
-            assertTrue(decisions.unfixable().isEmpty(), "the same fix from the analysis is offered once: " + decisions.unfixable());
+            assertTrue(decisions.unfixable().isEmpty(), "the same fix from the analysis and Fix blockers is offered once: " + decisions.unfixable());
+            assertTrue(decisions.fixes().stream().anyMatch(fix -> fix.source() == BlockerFixes.Source.RULES
+                    && fix.description().contains("misc/broken.png")), "Fix blockers fills what the AI missed: " + decisions.fixes());
             assertEquals(PlanStatus.DRAFT, result.draftPlan().orElseThrow().status());
             assertTrue(manager.loadReviews(project).isEmpty(), "the agent saves nothing");
             assertTrue(prompts.stream().filter(p -> p.contains("You operate")).noneMatch(p -> p.contains(source.toString())),

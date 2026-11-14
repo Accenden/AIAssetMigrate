@@ -1079,6 +1079,10 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
      * on the exact input the run would use. Fixes that change nothing are left out silently, and of two fixes for the
      * same decision only the first is kept. Conversion warnings (for example GLB needing glTFast in Unity) are added
      * to the description so the user sees them before accepting.
+     *
+     * <p>Each fix is checked on top of the fixes that passed before it, so a conversion that works only once a
+     * reference fix in the same list is applied passes, and its description names the fix it needs. Fix blockers'
+     * own fixes that leave files out of the scan are passed through unchanged.
      */
     private BlockerFixes.Proposal check(PlanState state, Optional<TargetProfile> target, List<BlockerFixes.Fix> candidates) {
         InventorySnapshot inventory = state.inventory();
@@ -1106,13 +1110,59 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                 if (finding.code().equals("CONVERSION_CHECK_FAILED")) currentConversionErrors.add(finding.assetId() + "|" + finding.message());
             }
         }
+        // Simulates the preview and conversion checks for {@code effective} on top of {@code base}; returns the problem, if any.
+        record Outcome(Optional<String> problem, List<String> notes) {}
+        java.util.function.BiFunction<List<ReviewedChange>, List<ReviewedChange>, Outcome> simulate = (base, effective) -> {
+            List<ReviewedChange> merged = merge(merge(state.saved(), base), effective);
+            OrganizationPreview.Result simulated = preview(inventory, state.references(), merged);
+            Optional<OrganizationPreview.Finding> blocker = simulated.findings().stream()
+                    .filter(finding -> !currentPreview.contains(previewKey(finding))).findFirst();
+            if (blocker.isPresent()) {
+                return new Outcome(Optional.of("it would block the plan (" + blocker.get().assetId().map(assets::get)
+                        .map(asset -> PortablePath.of(asset.relativePath()) + ": ").orElse("") + blocker.get().message() + ")"), List.of());
+            }
+            for (ReviewedChange change : effective) {
+                String reference = change.values().get("reference");
+                if (reference != null && simulated.findings().stream().anyMatch(finding -> finding.code().equals("UNRESOLVED_REFERENCE")
+                        && finding.assetId().equals(Optional.of(change.assetId()))
+                        && finding.message().equals(OrganizationPreview.UNRESOLVED_PREFIX + reference))) {
+                    return new Outcome(Optional.of("the reference would still not resolve"), List.of());
+                }
+            }
+            List<String> notes = new ArrayList<>();
+            if (target.isPresent() && effective.stream().anyMatch(change -> change.kind() == ReviewedChange.Kind.CONVERSION)) {
+                Set<UUID> converted = new HashSet<>();
+                effective.stream().filter(change -> change.kind() == ReviewedChange.Kind.CONVERSION).forEach(change -> converted.add(change.assetId()));
+                for (Finding finding : conversionChecks(inventory, simulated, target.get())) {
+                    if (finding.severity() == Finding.Severity.ERROR
+                            && !currentConversionErrors.contains(finding.assetId() + "|" + finding.message())) {
+                        return new Outcome(Optional.of("the converter's check fails: " + finding.message()), List.of());
+                    }
+                    if (finding.severity() == Finding.Severity.WARNING && finding.assetId().filter(converted::contains).isPresent()
+                            && !finding.code().equals("MODEL_CONVERSION_FIDELITY")) {
+                        notes.add(finding.message());
+                    }
+                }
+            }
+            return new Outcome(Optional.empty(), notes);
+        };
         List<BlockerFixes.Fix> passed = new ArrayList<>();
+        List<List<ReviewedChange>> passedChanges = new ArrayList<>();
         List<String> dropped = new ArrayList<>();
         Map<String, Map<String, String>> taken = new HashMap<>();
-        for (BlockerFixes.Fix fix : candidates) {
+        Set<Path> leftOut = new HashSet<>();
+        // Conversions last: they are the fixes most likely to depend on another one (a reference fix) in the list.
+        List<BlockerFixes.Fix> ordered = candidates.stream().sorted(java.util.Comparator.comparingInt(fix -> fix.changes().stream()
+                .anyMatch(change -> change.kind() == ReviewedChange.Kind.CONVERSION) ? 1 : 0)).toList();
+        for (BlockerFixes.Fix fix : ordered) {
             String label = fix.description();
             if (!fix.leaveOut().isEmpty()) {
-                dropped.add(label + ": leaving files out of the scan is only offered by Fix blockers");
+                if (fix.source() != BlockerFixes.Source.RULES || !fix.changes().isEmpty()) {
+                    dropped.add(label + ": leaving files out of the scan is only offered by Fix blockers");
+                } else if (leftOut.addAll(fix.leaveOut())) {
+                    passed.add(fix); // Fix blockers' own rescan fix; applying it rescans and carries decisions over.
+                    passedChanges.add(List.of());
+                }
                 continue;
             }
             String problem = null;
@@ -1144,54 +1194,54 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             if (effective.isEmpty()) continue; // nothing would change
             Set<String> slots = new HashSet<>();
             effective.forEach(change -> slots.add(slot(change)));
-            // The same decision from two sources is offered once; a different one for the same slot is dropped.
-            if (effective.stream().allMatch(change -> change.values().equals(taken.get(slot(change))))) continue;
+            // The same decision from two sources is offered once (a reason may differ); a different one for the slot is dropped.
+            if (effective.stream().allMatch(change -> withoutReason(change.values()).equals(
+                    Optional.ofNullable(taken.get(slot(change))).map(DefaultAssetManager::withoutReason).orElse(null)))) continue;
             if (slots.stream().anyMatch(taken::containsKey)) {
                 dropped.add(label + ": another suggestion already decides this for the same file");
                 continue;
             }
-            List<ReviewedChange> merged = merge(state.saved(), effective);
-            OrganizationPreview.Result simulated = preview(inventory, state.references(), merged);
-            Optional<OrganizationPreview.Finding> blocker = simulated.findings().stream()
-                    .filter(finding -> !currentPreview.contains(previewKey(finding))).findFirst();
-            if (blocker.isPresent()) {
-                dropped.add(label + ": it would block the plan (" + blocker.get().assetId().map(assets::get)
-                        .map(asset -> PortablePath.of(asset.relativePath()) + ": ").orElse("") + blocker.get().message() + ")");
-                continue;
-            }
-            for (ReviewedChange change : effective) {
-                String reference = change.values().get("reference");
-                if (reference != null && simulated.findings().stream().anyMatch(finding -> finding.code().equals("UNRESOLVED_REFERENCE")
-                        && finding.assetId().equals(Optional.of(change.assetId()))
-                        && finding.message().equals(OrganizationPreview.UNRESOLVED_PREFIX + reference))) {
-                    problem = "the reference would still not resolve";
-                }
-            }
-            List<String> notes = new ArrayList<>();
-            if (problem == null && target.isPresent() && effective.stream().anyMatch(change -> change.kind() == ReviewedChange.Kind.CONVERSION)) {
-                Set<UUID> converted = new HashSet<>();
-                effective.stream().filter(change -> change.kind() == ReviewedChange.Kind.CONVERSION).forEach(change -> converted.add(change.assetId()));
-                for (Finding finding : conversionChecks(inventory, simulated, target.get())) {
-                    if (finding.severity() == Finding.Severity.ERROR
-                            && !currentConversionErrors.contains(finding.assetId() + "|" + finding.message())) {
-                        problem = "the converter's check fails: " + finding.message();
-                        break;
-                    }
-                    if (finding.severity() == Finding.Severity.WARNING && finding.assetId().filter(converted::contains).isPresent()
-                            && !finding.code().equals("MODEL_CONVERSION_FIDELITY")) {
-                        notes.add(finding.message());
+            Outcome alone = simulate.apply(List.of(), effective);
+            Outcome outcome = alone;
+            String needs = null;
+            if (alone.problem().isPresent() && !passedChanges.isEmpty()) {
+                // It may only work together with fixes that passed before it: find the one it needs, else all of them.
+                List<ReviewedChange> before = passedChanges.stream().flatMap(List::stream).toList();
+                Outcome together = simulate.apply(before, effective);
+                if (together.problem().isEmpty()) {
+                    outcome = together;
+                    needs = "the decisions listed before it";
+                    for (int i = 0; i < passedChanges.size(); i++) {
+                        if (passedChanges.get(i).isEmpty()) continue;
+                        Outcome withOne = simulate.apply(passedChanges.get(i), effective);
+                        if (withOne.problem().isEmpty()) {
+                            needs = "\"" + passed.get(i).description() + "\"";
+                            outcome = withOne;
+                            break;
+                        }
                     }
                 }
             }
-            if (problem != null) {
-                dropped.add(label + ": " + problem);
+            if (outcome.problem().isPresent()) {
+                dropped.add(label + ": " + outcome.problem().get());
                 continue;
             }
             effective.forEach(change -> taken.put(slot(change), change.values()));
-            passed.add(notes.isEmpty() ? fix : new BlockerFixes.Fix(fix.code(), fix.assetId(), label + ". Note: "
-                    + String.join(" ", notes), fix.changes(), fix.leaveOut(), fix.source(), fix.recommended()));
+            // A fix checked before (for example plan suggestions re-checked in the agent's bundle) already carries its notes.
+            boolean annotated = label.contains(". Works only together with ") || label.contains(". Note: ");
+            String description = annotated ? label : label + (needs == null ? "" : ". Works only together with " + needs)
+                    + (outcome.notes().isEmpty() ? "" : ". Note: " + String.join(" ", outcome.notes()));
+            passed.add(description.equals(label) ? fix : new BlockerFixes.Fix(fix.code(), fix.assetId(), description,
+                    fix.changes(), fix.leaveOut(), fix.source(), fix.recommended()));
+            passedChanges.add(effective);
         }
         return new BlockerFixes.Proposal(inventory.project().id(), inventory.project().inventoryRevision(), passed, dropped);
+    }
+
+    private static Map<String, String> withoutReason(Map<String, String> values) {
+        Map<String, String> copy = new HashMap<>(values);
+        copy.remove("reason");
+        return copy;
     }
 
     private static String previewKey(OrganizationPreview.Finding finding) {

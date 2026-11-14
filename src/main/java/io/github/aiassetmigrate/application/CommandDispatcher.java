@@ -242,12 +242,34 @@ final class CommandDispatcher {
         AIEngine.Operation operation = new AIEngine(assistant).operate(request, target.get(), tools);
         findings.addAll(operation.findings());
 
-        // Target-aware plan suggestions first, so an analysis suggestion for the same decision is the one dropped.
+        // A draft of the project as it is now; its blockers also get Fix blockers' rule-based fixes (for example
+        // including an FBX the reader cannot read), so one bundle can clear every blocker the rules can fix.
+        Optional<MigrationPlan> draft = Optional.empty();
+        if (output != null) {
+            try {
+                draft = Optional.of(manager.createPlan(project, target.get(), output));
+            } catch (RuntimeException e) {
+                findings.add(finding(Finding.Severity.WARNING, "COMMAND_FAILED", "Draft plan failed: " + message(e)));
+            }
+        }
+        List<BlockerFixes.Fix> blockerFixes = List.of();
+        if (draft.isPresent() && draft.get().findings().stream().anyMatch(f -> f.severity() == Finding.Severity.ERROR
+                || f.severity() == Finding.Severity.UNKNOWN)) {
+            try {
+                blockerFixes = manager.proposeBlockerFixes(project, draft.get(), Optional.empty()).fixes().stream()
+                        .filter(BlockerFixes.Fix::recommended).toList();
+            } catch (RuntimeException e) {
+                findings.add(finding(Finding.Severity.WARNING, "COMMAND_FAILED", "Fix blockers failed: " + message(e)));
+            }
+        }
+        // Target-aware plan suggestions first, then Fix blockers, then analyses: for the same decision the earlier
+        // source is kept (an identical one is offered once).
         List<BlockerFixes.Fix> candidates = new ArrayList<>();
         if (gathered.plan != null) {
             candidates.addAll(gathered.plan.proposal().fixes());
             findings.addAll(gathered.plan.findings());
         }
+        candidates.addAll(blockerFixes);
         candidates.addAll(fromAnalyses(gathered.analyses, paths));
         BlockerFixes.Proposal decisions = candidates.isEmpty()
                 ? new BlockerFixes.Proposal(project, revision, List.of(), List.of())
@@ -273,19 +295,15 @@ final class CommandDispatcher {
             if (decisions.fixes().size() > MAX_LISTED) text.append("\n  ...and ").append(decisions.fixes().size() - MAX_LISTED).append(" more");
             if (!dropped.isEmpty()) text.append("\n").append(dropped.size()).append(" other suggestion(s) failed the checks and are not offered.");
         }
-        Optional<MigrationPlan> draft = Optional.empty();
-        if (output != null) {
-            try {
-                MigrationPlan plan = manager.createPlan(project, target.get(), output);
-                draft = Optional.of(plan);
-                long blocking = plan.findings().stream().filter(f -> f.severity() == Finding.Severity.ERROR
-                        || f.severity() == Finding.Severity.UNKNOWN).count();
-                text.append("\nDraft plan ").append(plan.id()).append(" (version ").append(plan.version()).append(", ")
-                        .append(blocking).append(" blocking finding(s)) shows the project as it is now");
-                text.append(decisions.fixes().isEmpty() ? "." : "; confirming the decisions creates a new plan.");
-            } catch (RuntimeException e) {
-                findings.add(finding(Finding.Severity.WARNING, "COMMAND_FAILED", "Draft plan failed: " + message(e)));
-            }
+        if (draft.isPresent()) {
+            MigrationPlan plan = draft.get();
+            long blocking = plan.findings().stream().filter(f -> f.severity() == Finding.Severity.ERROR
+                    || f.severity() == Finding.Severity.UNKNOWN).count();
+            text.append("\nDraft plan ").append(plan.id()).append(" (version ").append(plan.version()).append(", ")
+                    .append(blocking).append(" blocking finding(s)) shows the project as it is now");
+            text.append(decisions.fixes().isEmpty() ? "." : "; confirming the decisions creates a new plan.");
+        } else if (output == null) {
+            text.append("\nAdd an output folder to the request to also get Fix blockers' fixes and a draft plan.");
         }
         text.append("\nNothing was approved or migrated.");
         return new AssetManager.CommandResult(text.toString(), draft, findings, Optional.of(decisions));

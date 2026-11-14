@@ -478,7 +478,10 @@ the program checks exactly as it checks a plan: review rules, converter support 
 converter's own check on the input the run would use, image decoding, and the
 organization preview (destination clashes, references to files left out). A proposal is
 dropped, with the reason shown, if it fails a check, leaves out a file that nothing
-blocks, or would block the plan; one that changes nothing is left out silently.
+blocks, or would block the plan; one that changes nothing is left out silently. Each
+suggestion is checked on top of those that passed before it (conversions last), so a
+conversion that only works once a reference fix is applied passes and says which fix it
+needs ("Works only together with ...").
 
 In the GUI the suggestions that pass appear in an **AI suggestions** card; **Review**
 lists them with checkboxes (none preselected) and the dropped ones underneath. Applying
@@ -629,10 +632,12 @@ codes only; a tool's error text is never sent) and calls `FINISH` with a short m
 for at most 8 steps. What the tools found becomes one bundle of proposed decisions: the
 checked plan suggestions, reference corrections, the AI's categories, and names or
 folders if it ran those analyses (the AI wins over a disagreeing rule; ties are left
-out). The program checks the whole bundle as above. Nothing is saved: in the GUI's Agent
+out). When the request names an output folder, a draft plan is created and Fix blockers'
+rule-based fixes for its blockers join the bundle (for example including an FBX the reader
+cannot read), so one bundle can clear every blocker the rules can fix. The program checks
+the whole bundle as above. Nothing is saved: in the GUI's Agent
 drawer **Review N proposed decisions** opens the same accept-or-reject list, and the CLI
-prints the `review` command for each. With an output folder in the request, a draft plan
-of the current state is also created. Approving and running stay explicit.
+prints the `review` command for each. Approving and running stay explicit.
 
 ## Measuring the AI
 
