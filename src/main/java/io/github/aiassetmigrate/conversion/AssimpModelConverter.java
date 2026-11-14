@@ -51,7 +51,8 @@ public final class AssimpModelConverter implements ConversionStrategy {
      */
     private static final int OBJ_FLAGS = FLAGS | aiProcess_EmbedTextures;
     private static final int MAX_TEXTURE_TYPE = 30;
-    private static final Object LOCK = new Object();
+    /** Held for every Assimp call in this package: its callback state and error string are process-wide. */
+    static final Object LOCK = new Object();
     private static final Availability AVAILABILITY = probe();
 
     private record Availability(boolean available, String version, String reason) {}

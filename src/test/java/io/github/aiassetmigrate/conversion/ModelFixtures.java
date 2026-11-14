@@ -48,9 +48,11 @@ public final class ModelFixtures {
         byte[] glb = new AssimpModelConverter().convert(objInput());
         ByteBuffer data = MemoryUtil.memAlloc(glb.length).put(glb).flip();
         try {
-            AIScene scene = aiImportFileFromMemory(data, aiProcess_ValidateDataStructure, "glb");
-            if (scene == null) throw new IllegalStateException("GLB import failed: " + aiGetErrorString());
-            try { return exportFbx(scene); } finally { aiReleaseImport(scene); }
+            synchronized (AssimpModelConverter.LOCK) { // Assimp's error string is process-wide
+                AIScene scene = aiImportFileFromMemory(data, aiProcess_ValidateDataStructure, "glb");
+                if (scene == null) throw new IllegalStateException("GLB import failed: " + aiGetErrorString());
+                try { return exportFbx(scene); } finally { aiReleaseImport(scene); }
+            }
         } finally {
             MemoryUtil.memFree(data);
         }
@@ -63,8 +65,10 @@ public final class ModelFixtures {
                 "mtllib crate.mtl\nusemtl Wood\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n");
         Files.writeString(scratch.resolve("crate.mtl"), "newmtl Wood\nmap_Kd wood.png\n");
         Files.write(scratch.resolve("wood.png"), ConversionStrategyTest.png(false));
-        AIScene scene = aiImportFile(scratch.resolve("crate.obj").toString(), aiProcess_ValidateDataStructure);
-        if (scene == null) throw new IllegalStateException("OBJ import failed: " + aiGetErrorString());
-        try { return exportFbx(scene); } finally { aiReleaseImport(scene); }
+        synchronized (AssimpModelConverter.LOCK) { // Assimp's error string is process-wide
+            AIScene scene = aiImportFile(scratch.resolve("crate.obj").toString(), aiProcess_ValidateDataStructure);
+            if (scene == null) throw new IllegalStateException("OBJ import failed: " + aiGetErrorString());
+            try { return exportFbx(scene); } finally { aiReleaseImport(scene); }
+        }
     }
 }

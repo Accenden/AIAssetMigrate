@@ -78,7 +78,7 @@ class OrganizationWorkflowIntegrationTest {
             assertTrue(relationships.findings().stream().anyMatch(f -> f.code().equals("REFERENCE_CANDIDATE")));
             var blocked = manager.previewOrganization(project, revision);
             assertTrue(blocked.findings().stream().anyMatch(f -> f.code().equals("UNRESOLVED_REFERENCE")));
-            assertTrue(blocked.findings().stream().anyMatch(f -> f.code().equals("INSPECTION_UNSUPPORTED")
+            assertTrue(blocked.findings().stream().anyMatch(f -> f.code().equals(AnalysisIntegrationTest.UNINSPECTED_FBX)
                     && f.assetId().equals(java.util.Optional.of(fbx))));
 
             // Acknowledgments are only for assets whose references cannot be inspected.

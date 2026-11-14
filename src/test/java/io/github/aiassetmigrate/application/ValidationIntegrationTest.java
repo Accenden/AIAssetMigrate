@@ -256,31 +256,65 @@ class ValidationIntegrationTest {
         }
     }
 
-    @Test void aiSummaryIsAdvisoryAndSeesNoContentsOrAbsolutePaths() throws Exception {
+    private static LLMClient summarizing(List<String> prompts, java.util.function.Function<String, String> summary) {
+        return new LLMClient() {
+            @Override public com.fasterxml.jackson.databind.JsonNode generate(String prompt) {
+                prompts.add(prompt);
+                return new ObjectMapper().createObjectNode().put("summary", summary.apply(prompt));
+            }
+            @Override public String description() { return "fake model"; }
+        };
+    }
+
+    @Test void aiSummaryIsNotRequestedWhenEverythingPassed() throws Exception {
         try (var manager = manager()) {
             MigrationRun run = migrateChain(manager);
             List<String> prompts = new ArrayList<>();
-            LLMClient model = new LLMClient() {
-                @Override public com.fasterxml.jackson.databind.JsonNode generate(String prompt) {
-                    prompts.add(prompt);
-                    return new ObjectMapper().createObjectNode().put("summary", "All three outputs\u0007 were checked; nothing to fix.");
-                }
-                @Override public String description() { return "fake model"; }
-            };
-            Report report = manager.validate(run.id(), model);
+            Report report = manager.validate(run.id(), summarizing(prompts, prompt -> "All three outputs were checked."));
             assertEquals(Report.ValidationStatus.PASSED, report.validationStatus());
-            assertEquals(Optional.of("All three outputs were checked; nothing to fix."), report.aiSummary());
+            assertTrue(prompts.isEmpty(), "a pass with nothing to do is not sent to the model");
+            assertTrue(report.aiSummary().isEmpty());
+            assertTrue(codes(report, Finding.Severity.INFO).contains("AI_NOT_NEEDED"));
             assertTrue(report.summary().startsWith("Validation PASSED"), "deterministic summary is kept");
+        }
+    }
+
+    @Test void aiSummaryIsAdvisoryAndSeesNoContentsOrAbsolutePaths() throws Exception {
+        try (var manager = manager()) {
+            MigrationRun run = migrateChain(manager);
+            Files.delete(output.resolve("hero.obj"));
+            List<String> prompts = new ArrayList<>();
+            Report report = manager.validate(run.id(), summarizing(prompts,
+                    prompt -> "Only the model is affected\u0007; its material and texture copies are intact, so one new run fixes it."));
+            assertEquals(Report.ValidationStatus.FAILED, report.validationStatus());
+            assertEquals(Optional.of("Only the model is affected ; its material and texture copies are intact, so one new run fixes it."),
+                    report.aiSummary());
             assertTrue(codes(report, Finding.Severity.INFO).contains("AI_SOURCE"));
             assertEquals(1, prompts.size());
             String prompt = prompts.getFirst();
-            assertTrue(prompt.contains("\"validationStatus\":\"PASSED\""), prompt);
-            assertTrue(prompt.contains("\"nextSteps\":[]"), "a pass has nothing to recommend: " + prompt);
+            assertTrue(prompt.contains("\"validationStatus\":\"FAILED\"") && prompt.contains("do not repeat them"), prompt);
             assertFalse(prompt.contains(output.toString()) || prompt.contains(source.toString())
                     || prompt.contains(directory.toString()), "no absolute paths are sent");
             assertFalse(prompt.contains("newmtl") || prompt.contains("map_Kd"), "file contents are never sent");
-            assertFalse(prompt.contains("PNG decodes"), "finding messages are not sent");
             assertEquals(List.of(report), manager.history(run.projectId()));
+        }
+    }
+
+    @Test void aiSummaryThatOnlyRepeatsTheNextStepsIsNotShown() throws Exception {
+        try (var manager = manager()) {
+            MigrationRun run = migrateChain(manager);
+            Files.delete(output.resolve("hero.obj"));
+            Report deterministic = manager.validate(run.id());
+            var steps = io.github.aiassetmigrate.validation.ValidationNextSteps.of(deterministic.findings());
+            assertFalse(steps.isEmpty());
+            List<String> prompts = new ArrayList<>();
+            Report repeated = manager.validate(run.id(), summarizing(prompts, prompt -> steps.getFirst().action()));
+            assertTrue(repeated.aiSummary().isEmpty(), "a rephrased next step adds nothing");
+            assertTrue(codes(repeated, Finding.Severity.INFO).contains("AI_NOT_NEEDED"));
+            Report empty = manager.validate(run.id(), summarizing(prompts, prompt -> ""));
+            assertTrue(empty.aiSummary().isEmpty());
+            assertTrue(codes(empty, Finding.Severity.INFO).contains("AI_NOT_NEEDED"));
+            assertFalse(codes(empty, Finding.Severity.WARNING).contains("AI_OUTPUT_REJECTED"), "nothing to add is not a failure");
         }
     }
 

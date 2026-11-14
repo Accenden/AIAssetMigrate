@@ -147,7 +147,7 @@ class AgentWorkflowIntegrationTest {
             UUID png = manager.loadInventory(project).project().assets().stream()
                     .filter(a -> a.type() == Asset.Type.TEXTURE).findFirst().orElseThrow().id();
             var deterministic = manager.createPlan(project, UNITY, output);
-            replies.add("{\"steps\":[{\"assetId\":\"" + png + "\",\"operation\":\"CONVERT_TEXTURE\",\"format\":\"jpg\",\"reason\":\"smaller\"}]}");
+            replies.add("{\"proposals\":[{\"kind\":\"CONVERT\",\"assetId\":\"" + png + "\",\"format\":\"jpg\",\"reason\":\"smaller\"}]}");
             var assisted = manager.createPlan(project, UNITY, output, model);
             assertTrue(codes(assisted.findings()).contains("AI_PLAN_PROPOSAL"), assisted.findings().toString());
             assertEquals(deterministic.commands().stream().map(c -> c.operation() + ":" + PortablePath.of(c.relativeOutputPath())).toList(),

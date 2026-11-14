@@ -28,14 +28,15 @@ class ValidationNextStepsTest {
             finding(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", "props/crate_01.fbx"),
             finding(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", "textures/huge.png"));
 
-    @Test void eachProblemGetsAnActionThisToolCanDoAndFbxIsExplainedAsExpected() {
+    @Test void eachProblemGetsAnActionThisToolCanDoIncludingAnFbxTheReaderCannotRead() {
         var steps = ValidationNextSteps.of(MESSY);
         assertEquals(3, steps.size(), "the FBX and the oversized image need different advice");
         assertEquals(List.of("misc/broken.png"), steps.get(0).files());
         assertTrue(steps.get(0).action().contains("Replace it in your asset folder and Rescan"));
         assertEquals(List.of("props/crate_01.fbx"), steps.get(1).files());
-        assertTrue(steps.get(1).action().contains("cannot inspect FBX contents"));
-        assertTrue(steps.get(1).action().contains("format=glb"));
+        assertTrue(steps.get(0).canLeaveOut() && steps.get(1).canLeaveOut(), "a damaged or unreadable file can be left out");
+        assertTrue(steps.get(1).action().contains("built-in FBX reader could not read"));
+        assertTrue(steps.get(1).action().contains("binary FBX (version 7.4 or later)"));
         assertFalse(steps.stream().anyMatch(s -> s.action().toLowerCase().contains("checker can")), "no imaginary checkers");
         String text = ValidationNextSteps.describe(steps);
         assertTrue(text.startsWith("What to do next:\n• misc/broken.png: The file does not decode"), text);
@@ -47,6 +48,7 @@ class ValidationNextStepsTest {
                 finding(Finding.Severity.ERROR, "OUTPUT_MISSING", "a.png"), finding(Finding.Severity.ERROR, "OUTPUT_CHANGED", "b.png"),
                 finding(Finding.Severity.ERROR, "OUTPUT_MISSING", "c.png")));
         assertEquals(List.of("a.png", "c.png"), steps.getFirst().files());
+        assertFalse(steps.getFirst().canLeaveOut(), "an output edited after the run is not fixed by leaving the source out");
         assertTrue(ValidationNextSteps.of(List.of(finding(Finding.Severity.INFO, "OUTPUT_VERIFIED", "a.png"))).isEmpty());
         assertEquals("", ValidationNextSteps.describe(List.of()));
     }
@@ -64,8 +66,8 @@ class ValidationNextStepsTest {
                 new OutputValidator.Counts(4, 4, 1, 1, 2, 0), MESSY);
         assertTrue(summary.summary().isPresent());
         String prompt = prompts.getFirst();
-        assertTrue(prompt.contains("use only DATA.nextSteps"), prompt);
-        assertTrue(prompt.contains("never suggest other tools, external checkers"), prompt);
+        assertTrue(prompt.contains("suggest tools, external checkers or steps that are not in DATA.nextSteps"), prompt);
+        assertTrue(prompt.contains("do not repeat them"), prompt);
         assertTrue(prompt.contains("\"code\":\"OUTPUT_FORMAT_INVALID\""), prompt);
         assertTrue(prompt.contains("\"files\":[\"props/crate_01.fbx\"]"), prompt);
         assertTrue(prompt.contains("\"afterChanges\""), prompt);

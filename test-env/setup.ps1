@@ -83,6 +83,10 @@ Write-Image 'clean\ui\menu_icon.png' 32 'png' { param($g, $s)
     $g.Clear([System.Drawing.Color]::Transparent)
     $g.FillEllipse((Brush 80 160 255), 2, 2, $s - 4, $s - 4) }
 
+# A real binary FBX with its texture embedded (made with the bundled Assimp): read and validated by the
+# built-in FBX reader, and convertible to GLB.
+Copy-Item -LiteralPath (Join-Path $here 'fixtures\barrel.fbx') -Destination (Join-Path $sources 'clean\props\barrel.fbx')
+
 # ---- sources\messy: each file exercises a specific finding (see test-env\README.md) ----
 # Case-mismatched material library: the OBJ asks for Hero.mtl, the file is hero.mtl.
 Write-Text 'messy\characters\Hero Model FINAL.obj' (Cube-Obj 'HeroModelFinal' 'Hero.mtl' 'Skin')
@@ -97,7 +101,8 @@ Write-Image 'messy\textures\sword_tex.png' 64 'png' { param($g, $s) Checker $g $
 # Conflicting category words (props + weapon) and an untextured model.
 Write-Text 'messy\props\weapon_rack.obj' (Cube-Obj 'WeaponRack' $null $null)
 
-# FBX cannot be inspected: needs an ACKNOWLEDGMENT review (or exclusion) before planning.
+# Only an FBX header, no scene: the built-in FBX reader cannot read it (INSPECTION_UNREADABLE), so it needs an
+# ACKNOWLEDGMENT review (or exclusion) before planning, and validation reports it as not fully checked.
 $fbx = [byte[]](@([System.Text.Encoding]::ASCII.GetBytes('Kaydara FBX Binary  ')) + @(0x00, 0x1A, 0x00, 0xE8, 0x1C, 0x00, 0x00))
 New-Item -ItemType Directory -Force -Path (Join-Path $sources 'messy\props') | Out-Null
 [System.IO.File]::WriteAllBytes((Join-Path $sources 'messy\props\crate_01.fbx'), $fbx)

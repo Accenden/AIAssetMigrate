@@ -38,11 +38,12 @@ public final class ReviewCommand implements Callable<Integer> {
             "CATEGORY: category; RELATIONSHIP: targetAssetId and optional reference;",
             "MATERIAL_MAPPING: targetAssetId and reference; EXCLUSION: reason;",
             "NAME: name=FILE; FOLDER: folder=RELATIVE (empty for root);",
-            "ACKNOWLEDGMENT: reason (accepts unknown FBX or other uninspectable dependencies);",
+            "ACKNOWLEDGMENT: reason (accepts an FBX the built-in reader cannot read, or other uninspectable models);",
             "CONVERSION: textures format=png|jpg, optional background=#RRGGBB and quality=0.1-1.0;",
             "  OBJ/FBX models format=glb (self-contained; an OBJ's MTL must share its output folder).",
             "An accepted RELATIONSHIP or MATERIAL_MAPPING whose reference matches a file",
-            "reference corrects that reference; migration rewrites it in the output copy."})
+            "reference corrects that reference; migration rewrites it in the output copy",
+            "(OBJ/MTL only: an FBX is never edited, so its textures must stay where it expects them)."})
     private Map<String, String> values = new LinkedHashMap<>();
     @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;

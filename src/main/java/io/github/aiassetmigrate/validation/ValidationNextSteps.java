@@ -18,14 +18,21 @@ import java.util.Objects;
 public final class ValidationNextSteps {
     private ValidationNextSteps() {}
 
-    /** One kind of problem: the files it affects and what to do about them. */
-    public record Step(String code, List<String> files, String action) {
+    /**
+     * One kind of problem: the files it affects and what to do about them. {@code canLeaveOut}: leaving the
+     * files out of the next plan (an EXCLUSION) settles it, so the GUI can offer that as a button.
+     */
+    public record Step(String code, List<String> files, String action, boolean canLeaveOut) {
         public Step {
             Objects.requireNonNull(code, "code");
             Objects.requireNonNull(action, "action");
             files = List.copyOf(files);
         }
     }
+
+    /** Problems in the file itself, which an EXCLUSION settles; not ones caused by editing outputs after the run. */
+    private static final java.util.Set<String> LEAVE_OUT = java.util.Set.of("OUTPUT_FORMAT_INVALID", "OUTPUT_FORMAT_UNCHECKED",
+            "OUTPUT_REFERENCE_UNRESOLVED", "OUTPUT_REFERENCE_OUTSIDE_RUN", "OUTPUT_REFERENCES_UNCHECKED");
 
     /** Outputs are never overwritten and an approved plan runs once, so most fixes end with a new run. */
     public static final String NEW_RUN = "After changing anything, create, approve and run a new plan into an empty output "
@@ -42,7 +49,8 @@ public final class ValidationNextSteps {
             Step existing = steps.get(finding.code() + "|" + action);
             List<String> files = new ArrayList<>(existing == null ? List.of() : existing.files());
             if (file != null && !files.contains(file)) files.add(file);
-            steps.put(finding.code() + "|" + action, new Step(finding.code(), files, action));
+            steps.put(finding.code() + "|" + action, new Step(finding.code(), files, action,
+                    LEAVE_OUT.contains(finding.code()) && !files.isEmpty()));
         }
         return List.copyOf(steps.values());
     }
@@ -54,9 +62,9 @@ public final class ValidationNextSteps {
             case "OUTPUT_FORMAT_INVALID" -> "The file does not decode, so the source is most likely damaged. Replace it in "
                     + "your asset folder and Rescan, or leave it out with an EXCLUSION in Review.";
             case "OUTPUT_FORMAT_UNCHECKED" -> fbx
-                    ? "This tool cannot inspect FBX contents, so the file stays not fully checked; that is expected, not an "
-                    + "error in the file. For a full check, convert it to GLB (a CONVERSION with format=glb in Review), "
-                    + "which validation can inspect, or leave it out with an EXCLUSION."
+                    ? "The built-in FBX reader could not read this file: it may be damaged, or use an FBX version the "
+                    + "reader does not support. Re-export it from your 3D tool as binary FBX (version 7.4 or later), "
+                    + "replace it and Rescan, or leave it out with an EXCLUSION."
                     : "This file could not be fully checked (for example it is very large or uses a variant the checker "
                     + "does not read). Open it in the target engine to confirm it, or leave it out with an EXCLUSION.";
             case "OUTPUT_MISSING", "OUTPUT_CHANGED", "OUTPUT_UNREADABLE", "OUTPUT_NOT_FILE", "OUTPUT_UNSAFE_PATH" ->

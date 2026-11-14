@@ -27,6 +27,12 @@ public final class OrganizationPreview {
 
     /** UNRESOLVED_REFERENCE messages are this prefix followed by the exact reference text. */
     public static final String UNRESOLVED_PREFIX = "Reference is not uniquely resolved: ";
+    /**
+     * FBX_REFERENCE_NOT_REWRITABLE messages are this prefix followed by the exact reference text: the FBX is
+     * binary and copied as it is, so the texture must be at the place the FBX names, relative to the FBX.
+     */
+    public static final String FBX_FIXED_PREFIX = "FBX files cannot be edited, so this texture must stay where the FBX "
+            + "expects it in the output: ";
 
     /**
      * Rewrites are output-copy reference replacements. A non-empty conversion holds the
@@ -209,10 +215,17 @@ public final class OrganizationPreview {
                 List<Asset> targets = ref.normalizedTargetPath()
                         .map(p -> sourcePaths.getOrDefault(MaterialAnalysis.key(p), List.of())).orElse(List.of());
                 if (ref.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED || targets.size() != 1) {
-                    findings.add(finding("UNRESOLVED_REFERENCE", owner.assetId(), UNRESOLVED_PREFIX + ref.originalText()));
-                    continue;
+                    // An FBX is never edited, so what matters is the output: a texture reviewed into the exact place
+                    // the FBX names (relative to the FBX's output folder) satisfies it, wherever it was in the source.
+                    Entry placed = MaterialAnalysis.fbx(byId.get(owner.assetId())) ? placedFor(owner, ref.originalText(), entries, byId) : null;
+                    if (placed == null) {
+                        findings.add(finding("UNRESOLVED_REFERENCE", owner.assetId(), UNRESOLVED_PREFIX + ref.originalText()));
+                        continue;
+                    }
+                    targetAsset = byId.get(placed.assetId());
+                } else {
+                    targetAsset = targets.getFirst();
                 }
-                targetAsset = targets.getFirst();
             }
             if (ref.kind() == AssetReference.Kind.MATERIAL_LIBRARY)
                 libraries.computeIfAbsent(owner.assetId(), ignored -> new HashSet<>()).add(targetAsset.id());
@@ -222,6 +235,12 @@ public final class OrganizationPreview {
                 continue;
             }
             if (resolvesTo(owner.destination().orElseThrow(), ref.originalText(), target.destination().orElseThrow())) continue;
+            if (MaterialAnalysis.fbx(byId.get(owner.assetId()))) {
+                // A converted FBX becomes a GLB whose textures must be embedded; the conversion check reports those.
+                if (owner.conversion().isEmpty()) findings.add(finding("FBX_REFERENCE_NOT_REWRITABLE", owner.assetId(),
+                        FBX_FIXED_PREFIX + ref.originalText()));
+                continue;
+            }
             String replacement = relative(owner.destination().orElseThrow(), target.destination().orElseThrow());
             if (!MaterialAnalysis.rewritableReference(ref.originalText()) || !MaterialAnalysis.rewritableReference(replacement)) {
                 findings.add(finding("REFERENCE_REWRITE_UNSUPPORTED", owner.assetId(),
@@ -272,6 +291,23 @@ public final class OrganizationPreview {
                     entry.excluded(), List.copyOf(changes.values()), entry.conversion()));
         }
         return new Result(project.id(), project.inventoryRevision(), entries, findings);
+    }
+
+    /** The single texture whose output destination is exactly where an FBX reference points, or null. */
+    private static Entry placedFor(Entry owner, String text, List<Entry> entries, Map<UUID, Asset> byId) {
+        if (owner.destination().isEmpty() || text.isEmpty() || text.contains("\\") || text.contains(":") || text.startsWith("/")) return null;
+        String expected;
+        try {
+            Path folder = Path.of(owner.destination().get()).getParent();
+            Path place = (folder == null ? Path.of(text) : folder.resolve(text)).normalize();
+            if (place.isAbsolute() || place.startsWith("..")) return null;
+            expected = MaterialAnalysis.key(place);
+        } catch (java.nio.file.InvalidPathException e) {
+            return null;
+        }
+        List<Entry> matches = entries.stream().filter(e -> e.destination().map(expected::equals).orElse(false)
+                && byId.get(e.assetId()).type() == Asset.Type.TEXTURE).toList();
+        return matches.size() == 1 ? matches.getFirst() : null;
     }
 
     /** Output-relative reference text from the owner's destination folder to the target destination. */

@@ -17,6 +17,13 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
 class AnalysisIntegrationTest {
+    /**
+     * How a placeholder FBX (only a header, no scene) is reported: the built-in FBX reader cannot read it, or,
+     * on a platform without the reader, FBX is not inspected at all. Either way it needs a decision.
+     */
+    static final String UNINSPECTED_FBX = io.github.aiassetmigrate.conversion.FbxReader.available()
+            ? "INSPECTION_UNREADABLE" : "INSPECTION_UNSUPPORTED";
+
     @TempDir Path directory;
 
     @Test void compatibilityIncludesReferenceCoverageAndChangesAreReported() throws Exception {
@@ -239,7 +246,7 @@ class AnalysisIntegrationTest {
             var snapshot = manager.importAssets(source).snapshot();
             var result = manager.analyze(snapshot.project().id(), AssetManager.AnalysisKind.RELATIONSHIPS);
             assertTrue(result.suggestions().isEmpty());
-            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals("INSPECTION_UNSUPPORTED")
+            assertTrue(result.findings().stream().anyMatch(f -> f.code().equals(UNINSPECTED_FBX)
                     && f.sourceRelativePath().orElseThrow().equals(Path.of("character.fbx"))));
         }
     }
@@ -337,7 +344,7 @@ class AnalysisIntegrationTest {
             var preview = manager.previewOrganization(snapshot.project().id(), snapshot.project().inventoryRevision());
             assertTrue(preview.blocked());
             assertTrue(preview.findings().stream().anyMatch(f -> f.code().equals("UNRESOLVED_REFERENCE")));
-            assertTrue(preview.findings().stream().anyMatch(f -> f.code().equals("INSPECTION_UNSUPPORTED")));
+            assertTrue(preview.findings().stream().anyMatch(f -> f.code().equals(UNINSPECTED_FBX)));
         }
     }
 }

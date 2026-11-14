@@ -17,7 +17,9 @@ import java.util.UUID;
 @Command(name = "command", mixinStandardHelpOptions = true,
         description = {"Run a plain-language request, for example: command --project ID ... check unity 6000.0 compatibility.",
                 "Uses the connected ChatGPT account (see 'auth'). Supported: show inventory, list targets, analyze,",
-                "check compatibility, preview organization, create a draft plan, show plans and runs, validate, history.",
+                "check compatibility, preview organization, create a draft plan, show plans and runs, validate, history,",
+                "and prepare the project for a target (for example: prepare this for godot 4.3), where the agent runs the",
+                "read-only checks it needs and prints checked, proposed decisions with the 'review' command for each.",
                 "It never approves, migrates or saves reviews; those need the explicit commands."})
 public final class AgentCommand extends PlanCommands.Base {
     @Option(names = "--project", required = true, paramLabel = "UUID") UUID project;
@@ -45,6 +47,26 @@ public final class AgentCommand extends PlanCommands.Base {
         out.println(ImportCommand.safe(result.message()).replace("\\u000a", System.lineSeparator()));
         result.draftPlan().ifPresent(plan -> out.printf("Draft plan: %s version %d (%s); approve it explicitly with 'approve'.%n",
                 plan.id(), plan.version(), plan.status()));
+        result.decisions().filter(d -> !d.fixes().isEmpty() || !d.unfixable().isEmpty()).ifPresent(decisions -> {
+            out.println("Proposed decisions (" + decisions.fixes().size() + "; none is saved). To accept one, run its review command"
+                    + " with your --state-directory and --log-directory, then create a new plan:");
+            for (var fix : decisions.fixes()) {
+                out.println("  " + (fix.source() == io.github.aiassetmigrate.application.BlockerFixes.Source.AI ? "[AI] " : "[rules] ")
+                        + ImportCommand.safe(fix.description()));
+                for (var change : fix.changes()) {
+                    StringBuilder command = new StringBuilder("    review --project ").append(decisions.projectId())
+                            .append(" --inventory-revision ").append(decisions.inventoryRevision()).append(" --asset ").append(change.assetId())
+                            .append(" --kind ").append(change.kind()).append(" --decision ").append(change.decision());
+                    new java.util.TreeMap<>(change.values()).forEach((key, value) -> command.append(" --value \"")
+                            .append(key).append('=').append(value.replace("\"", "")).append('"'));
+                    out.println(ImportCommand.safe(command.toString()));
+                }
+            }
+            if (!decisions.unfixable().isEmpty()) {
+                out.println("Dropped by the program's checks (" + decisions.unfixable().size() + "):");
+                decisions.unfixable().forEach(line -> out.println("  " + ImportCommand.safe(line)));
+            }
+        });
         out.println("Findings (" + result.findings().size() + "):");
         for (var finding : result.findings()) {
             out.printf("  %s %s %s%s%n", finding.severity(), ImportCommand.safe(finding.code()),

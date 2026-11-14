@@ -51,6 +51,8 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -157,7 +159,9 @@ public final class AssetMigrateApplication extends Application {
 
     // Step 4: plan
     private final TextField outputRoot = new TextField();
-    private final CheckBox planAi = new CheckBox("Ask AI to propose steps");
+    private final CheckBox planAi = new CheckBox("Ask AI for suggestions");
+    /** The AI's checked suggestions for the displayed plan (conversions, files to leave out, reference fixes). */
+    private final VBox planSuggestionsCard = new VBox(8);
     private final Button createPlanButton = styled(new Button("Create plan"), "primary");
     private final Button approvePlanButton = new Button("Approve this plan");
     private final Button fixBlockersButton = new Button("Fix blockers...");
@@ -174,7 +178,12 @@ public final class AssetMigrateApplication extends Application {
     private final CheckBox validationAi = new CheckBox("Add an AI summary to the report");
     private final HBox migrateBadges = new HBox(6);
     /** After a run that did not pass: what to do about each problem, from {@link io.github.aiassetmigrate.validation.ValidationNextSteps}. */
-    private final Label migrateGuidance = new Label();
+    private final VBox migrateGuidance = new VBox(8);
+    /** The report's AI summary in its own card (or why there is none); hidden when no AI summary was asked for. */
+    private final VBox reportAiSummary = new VBox(8);
+    /** The report's findings, problems first, one row per file; the full text stays in the collapsible log. */
+    private final VBox reportFindings = new VBox(8);
+    private TitledPane runLogPane;
     private final TextField validationRun = new TextField();
     private final TextArea validationResults = new TextArea();
     private AssetManager.MigrationOutcome lastOutcome;
@@ -195,6 +204,8 @@ public final class AssetMigrateApplication extends Application {
     private final VBox agentPane = new VBox(10);
     private final TextField agentRequest = new TextField();
     private final TextArea agentTranscript = new TextArea();
+    /** Opens the last agent result's proposed decisions; hidden when it had none. */
+    private final Button agentDecisions = new Button();
     private final VBox logPane = new VBox(10);
     private final VBox aiPane = new VBox(10);
     private final TextField logAfter = new TextField("0");
@@ -214,18 +225,28 @@ public final class AssetMigrateApplication extends Application {
             return PlanContext.fromInventory(this, plan, inventory);
         }
 
-        /** AI-assisted draft (F06): proposals become findings; the commands and approval rules are unchanged. */
-        PlanContext create(AssetManager manager, io.github.aiassetmigrate.ai.LLMClient assistant) {
-            MigrationPlan plan = manager.createPlan(project, target, output, assistant);
-            if (!project.equals(plan.projectId()) || !target.id().equals(plan.targetProfile())
-                    || !target.version().equals(plan.targetProfileVersion()) || !output.equals(plan.outputRoot())
-                    || plan.status() != PlanStatus.DRAFT) {
-                throw new IllegalStateException("Created plan does not match the requested draft context.");
+        /**
+         * AI-assisted draft (F05/F06): the rule-based draft plus the AI's suggestions, each already checked by the
+         * program. Suggestions change nothing until the user accepts them; a suggestion failure keeps the plan.
+         */
+        PlanResult create(AssetManager manager, io.github.aiassetmigrate.ai.LLMClient assistant) {
+            PlanContext context = create(manager);
+            try {
+                AssetManager.PlanSuggestions suggestions = manager.suggestPlanSteps(project, target, assistant);
+                if (suggestions.proposal().inventoryRevision() != context.plan().inventoryRevision()) {
+                    return new PlanResult(context, Optional.empty(), Optional.of("The project changed while the AI was asked; create the plan again."));
+                }
+                return new PlanResult(context, Optional.of(suggestions), Optional.empty());
+            } catch (RuntimeException failure) {
+                String text = failure.getMessage();
+                return new PlanResult(context, Optional.empty(), Optional.of(text == null || text.isBlank()
+                        ? failure.getClass().getSimpleName() : text));
             }
-            InventorySnapshot inventory = manager.loadInventory(plan.projectId(), plan.inventoryRevision());
-            return PlanContext.fromInventory(this, plan, inventory);
         }
     }
+
+    /** A created plan and, when AI was asked, its checked suggestions or why there are none. */
+    record PlanResult(PlanContext context, Optional<AssetManager.PlanSuggestions> suggestions, Optional<String> suggestionFailure) {}
 
     record PlanContext(PlanRequest request, MigrationPlan plan, Map<UUID, Path> sources, List<String> sourceErrors) {
         PlanContext {
@@ -637,7 +658,8 @@ public final class AssetMigrateApplication extends Application {
         GridPane.setHgrow(reviewReference, Priority.ALWAYS);
         manualReviewPane = collapsible("Edit or add a decision", new VBox(8, muted(
                 "Use this to change a suggestion before saving it, or to add one yourself: an EXCLUSION leaves a file out, "
-                        + "an ACKNOWLEDGMENT lets an FBX through, a CONVERSION changes a format (for example glb or jpg)."), form));
+                        + "an ACKNOWLEDGMENT lets through a model that cannot be read, a CONVERSION changes a format (for "
+                        + "example glb or jpg)."), form));
         edit.setOnAction(event -> manualReviewPane.setExpanded(true));
 
         nameStyle.getItems().setAll(AssetManager.NameStyle.values());
@@ -707,8 +729,12 @@ public final class AssetMigrateApplication extends Application {
 
     private Node buildPlanStep(Stage stage) {
         outputRoot.setPromptText("An existing, preferably empty folder outside the asset folder");
-        planAi.setTooltip(new Tooltip("The AI proposes steps; each is checked and recorded as a note. "
-                + "It never changes the plan or approves it."));
+        planAi.setTooltip(new Tooltip("The AI suggests conversions, files to leave out and reference fixes for this engine. "
+                + "Each is checked by the program first; you accept the ones you want and a new plan is created. "
+                + "Sends relative paths, types, formats, transparency and finding codes, never file contents."));
+        planSuggestionsCard.getStyleClass().addAll("callout", "ai-summary");
+        planSuggestionsCard.managedProperty().bind(planSuggestionsCard.visibleProperty());
+        planSuggestionsCard.setVisible(false);
         createPlanButton.setOnAction(event -> createPlan());
         approvePlanButton.setOnAction(event -> approvePlan());
         fixBlockersButton.setTooltip(new Tooltip("Lists a fix for each blocker for you to confirm, then creates a new plan. "
@@ -739,7 +765,7 @@ public final class AssetMigrateApplication extends Application {
                 "The plan lists every file that will be written to the output folder. Check it, then approve this exact "
                         + "version. Nothing is written until you run it in the next step.",
                 fieldLabel("Output folder"), row(outputRoot, browseButton(stage, outputRoot, "Select the output folder")),
-                actions, planBadges, planGuidance, planTable, details);
+                actions, planBadges, planGuidance, planSuggestionsCard, planTable, details);
         VBox.setVgrow(planTable, Priority.ALWAYS);
         return scrollable(view);
     }
@@ -753,11 +779,17 @@ public final class AssetMigrateApplication extends Application {
         HBox actions = new HBox(14, runButton, validationAi);
         actions.setAlignment(Pos.CENTER_LEFT);
         migrateBadges.setAlignment(Pos.CENTER_LEFT);
-        migrateGuidance.setWrapText(true);
         migrateGuidance.getStyleClass().addAll("callout", "callout-warning");
         migrateGuidance.managedProperty().bind(migrateGuidance.visibleProperty());
         migrateGuidance.setVisible(false);
+        for (VBox section : List.of(reportAiSummary, reportFindings)) {
+            section.getStyleClass().add("callout");
+            section.managedProperty().bind(section.visibleProperty());
+            section.setVisible(false);
+        }
         readOnly(validationResults, "The run result and its validation report appear here.");
+        validationResults.setPrefRowCount(16);
+        runLogPane = collapsible("Full run log and report (every step and check)", validationResults);
 
         validationRun.setPromptText("Run ID (filled in after a migration)");
         Button validate = new Button("Validate again");
@@ -768,26 +800,30 @@ public final class AssetMigrateApplication extends Application {
         TitledPane historyPane = collapsible("Re-validate or view earlier reports", new VBox(8,
                 row(validationRun, validate, history),
                 muted("Validation checks each output exists, is unchanged, decodes (PNG/JPEG/GLB) and that its references "
-                        + "resolve. Checks that cannot be done, such as FBX contents, are reported as not checked, never as passed.")));
+                        + "resolve. FBX models are read with the built-in FBX reader. Checks that cannot be done are reported "
+                        + "as not checked, never as passed.")));
 
         VBox view = stepView("Run the migration",
                 "Copies the approved plan into the output folder, then checks every output file and saves a report. "
                         + "Your source files are never changed.",
-                migrateReady, actions, migrateBadges, migrateGuidance, validationResults, historyPane);
-        VBox.setVgrow(validationResults, Priority.ALWAYS);
+                migrateReady, actions, migrateBadges, reportAiSummary, migrateGuidance, reportFindings, runLogPane, historyPane);
         return scrollable(view);
     }
 
     private void buildTools() {
-        Label agentNote = muted("Ask in plain language, for example \"check unity 6000.0 compatibility\" or \"create a plan for "
-                + "godot 4.3 into C:\\out\". It can show, check, preview, draft plans and validate. It never approves, "
-                + "migrates or saves decisions. Needs a connected AI account.");
+        Label agentNote = muted("Ask in plain language, for example \"prepare this project for godot 4.3\", \"check unity "
+                + "6000.0 compatibility\" or \"create a plan for godot 4.3 into C:\\out\". To prepare a project the agent runs "
+                + "the read-only checks it needs and proposes decisions for you to confirm. It never approves, migrates or "
+                + "saves anything by itself. Needs a connected AI account.");
+        styled(agentDecisions, "primary");
+        agentDecisions.managedProperty().bind(agentDecisions.visibleProperty());
+        agentDecisions.setVisible(false);
         agentRequest.setPromptText("What should the agent do?");
         Button send = styled(new Button("Send"), "primary");
         send.setOnAction(event -> sendAgentRequest());
         agentRequest.setOnAction(event -> sendAgentRequest());
         readOnly(agentTranscript, "Requests and results appear here.");
-        agentPane.getChildren().addAll(agentNote, row(agentRequest, send), agentTranscript);
+        agentPane.getChildren().addAll(agentNote, row(agentRequest, send), agentDecisions, agentTranscript);
         VBox.setVgrow(agentTranscript, Priority.ALWAYS);
 
         Label logNote = muted("Replays this project's saved events after a sequence number, then follows new ones. "
@@ -1796,6 +1832,8 @@ public final class AssetMigrateApplication extends Application {
         planTable.getItems().clear();
         planBadges.getChildren().clear();
         planGuidance.setVisible(false);
+        planSuggestionsCard.getChildren().clear();
+        planSuggestionsCard.setVisible(false);
         refreshFlow();
     }
 
@@ -1826,9 +1864,12 @@ public final class AssetMigrateApplication extends Application {
             // The saved account is loaded on the worker thread, never the JavaFX thread.
             if (runner.submitValue(request.state(), request.logs(), manager -> ai
                     ? request.create(manager, io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable())
-                    : request.create(manager), result -> {
+                    : new PlanResult(request.create(manager), Optional.empty(), Optional.empty()), result -> {
                 boolean current = planGeneration.isCurrent(generation);
-                if (current && result.failure() == null && result.value() != null) showPlan(result.value());
+                if (current && result.failure() == null && result.value() != null) {
+                    showPlan(result.value().context());
+                    showSuggestions(request, result.value());
+                }
                 busy(false);
                 if (!current) return;
                 if (result.failure() == null && result.value() != null) {
@@ -1841,7 +1882,7 @@ public final class AssetMigrateApplication extends Application {
                 }
             })) {
                 busy(true);
-                status.setText(note + "Creating the plan...");
+                status.setText(note + (ai ? "Creating the plan and asking the AI for suggestions..." : "Creating the plan..."));
             }
         } catch (IllegalArgumentException failure) {
             status.setText("Invalid input: " + failure.getMessage());
@@ -1938,6 +1979,125 @@ public final class AssetMigrateApplication extends Application {
             applyFixes(request, proposal, boxes.entrySet().stream().filter(e -> e.getKey().isSelected()).map(Map.Entry::getValue).toList());
         } else {
             status.setText("No fixes were applied.");
+        }
+    }
+
+    /** Shows the AI's checked suggestions for the displayed plan, or why there are none. */
+    private void showSuggestions(PlanRequest request, PlanResult result) {
+        planSuggestionsCard.getChildren().clear();
+        if (result.suggestions().isEmpty() && result.suggestionFailure().isEmpty()) {
+            planSuggestionsCard.setVisible(false);
+            return;
+        }
+        Label title = new Label("AI suggestions for " + request.target().id() + " " + request.target().version());
+        title.getStyleClass().add("h3");
+        planSuggestionsCard.getChildren().add(title);
+        if (result.suggestionFailure().isPresent()) {
+            planSuggestionsCard.getChildren().add(muted("No suggestions: " + result.suggestionFailure().get()));
+            planSuggestionsCard.setVisible(true);
+            return;
+        }
+        AssetManager.PlanSuggestions suggestions = result.suggestions().get();
+        planSuggestionsCard.getChildren().add(muted(suggestionsSummary(suggestions)));
+        if (!suggestions.proposal().fixes().isEmpty()) {
+            Button review = styled(new Button("Review " + suggestions.proposal().fixes().size() + " suggestion(s)..."), "primary");
+            review.setOnAction(event -> chooseDecisions(Optional.of(request), suggestions.proposal(), "AI suggestions",
+                    "Each suggestion passed the program's checks. Tick the ones you want; they are saved as review decisions "
+                            + "and a new plan is created. Your asset folder is not changed and nothing is approved."));
+            planSuggestionsCard.getChildren().add(review);
+        }
+        planSuggestionsCard.setVisible(true);
+    }
+
+    /** One line about a suggestion run: how many passed, were dropped, or why the AI gave none. */
+    static String suggestionsSummary(AssetManager.PlanSuggestions suggestions) {
+        int passed = suggestions.proposal().fixes().size(), dropped = suggestions.proposal().unfixable().size();
+        Optional<String> unavailable = suggestions.findings().stream()
+                .filter(f -> f.code().equals("AI_UNAVAILABLE")).map(Finding::message).findFirst();
+        if (unavailable.isPresent()) return unavailable.get();
+        if (passed == 0 && dropped == 0) return "The AI suggested no changes for this engine; the plan is used as it is.";
+        return passed + " suggestion(s) passed the program's checks"
+                + (dropped == 0 ? "." : "; " + dropped + " failed them and are not offered (see the list when you review).");
+    }
+
+    /**
+     * Lets the user accept proposed decisions one by one (none is preselected), with the ones the checks dropped listed
+     * underneath. Accepted ones are saved like Fix blockers saves fixes; with a plan request a new plan is created.
+     */
+    private void chooseDecisions(Optional<PlanRequest> request, BlockerFixes.Proposal proposal, String title, String explanation) {
+        VBox list = new VBox(8);
+        Map<CheckBox, BlockerFixes.Fix> boxes = new java.util.LinkedHashMap<>();
+        proposal.fixes().forEach(fix -> list.getChildren().add(fixRow(fix, false, boxes)));
+        if (!proposal.unfixable().isEmpty()) {
+            list.getChildren().add(fieldLabel("Dropped by the program's checks"));
+            proposal.unfixable().forEach(line -> {
+                Label item = muted("\u2022 " + line);
+                item.setWrapText(true);
+                list.getChildren().add(item);
+            });
+        }
+        Label note = muted(explanation);
+        note.setWrapText(true);
+        ScrollPane scroll = new ScrollPane(list);
+        scroll.setFitToWidth(true);
+        scroll.setPrefViewportHeight(Math.min(420, 40 + 58.0 * (boxes.size() + proposal.unfixable().size())));
+        scroll.getStyleClass().add("fix-list");
+        javafx.scene.control.ButtonType apply = new javafx.scene.control.ButtonType("Apply",
+                javafx.scene.control.ButtonBar.ButtonData.OK_DONE);
+        javafx.scene.control.ButtonType all = new javafx.scene.control.ButtonType("Select all",
+                javafx.scene.control.ButtonBar.ButtonData.LEFT);
+        javafx.scene.control.Dialog<javafx.scene.control.ButtonType> dialog = new javafx.scene.control.Dialog<>();
+        dialog.setTitle(title);
+        dialog.setHeaderText(proposal.fixes().isEmpty() ? "Nothing to accept." : proposal.fixes().size() + " proposed decision(s)");
+        dialog.getDialogPane().setContent(new VBox(12, scroll, note));
+        dialog.getDialogPane().getButtonTypes().addAll(all, apply, javafx.scene.control.ButtonType.CANCEL);
+        dialog.getDialogPane().getStylesheets().add(stylesheet());
+        dialog.getDialogPane().setPrefWidth(660);
+        if (stepHost.getScene() != null) dialog.initOwner(stepHost.getScene().getWindow());
+        Button applyButton = (Button) dialog.getDialogPane().lookupButton(apply);
+        Button allButton = (Button) dialog.getDialogPane().lookupButton(all);
+        // Select all ticks every box and keeps the dialog open.
+        allButton.addEventFilter(javafx.event.ActionEvent.ACTION, event -> {
+            boxes.keySet().forEach(box -> box.setSelected(true));
+            event.consume();
+        });
+        Runnable refresh = () -> {
+            long chosen = boxes.keySet().stream().filter(CheckBox::isSelected).count();
+            applyButton.setDisable(chosen == 0);
+            applyButton.setText(chosen == 0 ? "Apply" : "Apply " + chosen);
+        };
+        boxes.keySet().forEach(box -> box.selectedProperty().addListener((observable, was, now) -> refresh.run()));
+        refresh.run();
+        var answer = dialog.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
+        List<BlockerFixes.Fix> chosen = boxes.entrySet().stream().filter(e -> e.getKey().isSelected()).map(Map.Entry::getValue).toList();
+        if (answer != apply || chosen.isEmpty()) {
+            status.setText("Nothing was accepted; no decisions were saved.");
+            return;
+        }
+        if (request.isPresent()) {
+            applyFixes(request.get(), proposal, chosen);
+            return;
+        }
+        // No plan inputs yet (for example from the agent): save the decisions only.
+        if (runner.submitValue(workspace(), logDirectory(), manager -> {
+            BlockerFixes.Applied applied = manager.applyBlockerFixes(proposal.projectId(), proposal.inventoryRevision(), chosen);
+            return new FixRun(applied, applied.rescanned() ? manager.loadInventory(proposal.projectId()) : null);
+        }, result -> {
+            busy(false);
+            if (result.failure() != null || result.value() == null) {
+                status.setText(failureText(result.failure(), null) + "\nSome decisions may have been saved; check Saved decisions in the Review step.");
+                return;
+            }
+            if (result.value().rescanned() != null) {
+                showSnapshot(result.value().rescanned());
+                clearAnalysis();
+            }
+            clearPlan();
+            status.setText("Saved " + result.value().applied().decisionsSaved() + " decision(s). Choose an output folder in the "
+                    + "Plan step and create the plan; nothing was approved or migrated.");
+        })) {
+            busy(true);
+            status.setText("Saving " + chosen.size() + " decision(s)...");
         }
     }
 
@@ -2071,6 +2231,9 @@ public final class AssetMigrateApplication extends Application {
                             + outcome.report().map(report -> "\n\n" + formatReport(report, true)).orElse(""));
                     migrateBadges.getChildren().setAll(outcomeBadges(outcome));
                     showNextSteps(outcome.report().orElse(null));
+                    showReport(outcome.report().orElse(null));
+                    // Without a report the log is the only account of what happened.
+                    runLogPane.setExpanded(outcome.report().isEmpty());
                 }
                 if (current) clearPlan();
                 busy(false);
@@ -2088,6 +2251,7 @@ public final class AssetMigrateApplication extends Application {
                 validationResults.clear();
                 migrateBadges.getChildren().clear();
                 migrateGuidance.setVisible(false);
+                showReport(null);
                 busy(true);
                 status.setText("Copying files, then validating the outputs...");
             }
@@ -2096,12 +2260,233 @@ public final class AssetMigrateApplication extends Application {
         }
     }
 
-    /** Shows what to do about each failed or unchecked output; hidden when nothing needs doing. */
+    /**
+     * Shows what to do about each failed or unchecked output, hidden when nothing needs doing. A problem that
+     * leaving the file out settles gets a Leave out button next to it.
+     */
     private void showNextSteps(Report report) {
-        String text = report == null ? "" : io.github.aiassetmigrate.validation.ValidationNextSteps.describe(
-                io.github.aiassetmigrate.validation.ValidationNextSteps.of(report.findings()));
-        migrateGuidance.setText(text);
-        migrateGuidance.setVisible(!text.isEmpty());
+        var steps = report == null ? List.<io.github.aiassetmigrate.validation.ValidationNextSteps.Step>of()
+                : io.github.aiassetmigrate.validation.ValidationNextSteps.of(report.findings());
+        migrateGuidance.getChildren().clear();
+        migrateGuidance.setVisible(!steps.isEmpty());
+        if (steps.isEmpty()) return;
+        Label title = new Label("What to do next");
+        title.getStyleClass().add("h3");
+        migrateGuidance.getChildren().add(title);
+        for (var step : steps) {
+            Label text = new Label("• " + (step.files().isEmpty() ? "" : fileList(step.files()) + ": ") + step.action());
+            text.setWrapText(true);
+            text.setMaxWidth(Double.MAX_VALUE);
+            HBox row = new HBox(10, text);
+            row.setAlignment(Pos.CENTER_LEFT);
+            HBox.setHgrow(text, Priority.ALWAYS);
+            if (step.canLeaveOut()) {
+                Button leaveOut = new Button(step.files().size() == 1 ? "Leave out" : "Leave out " + step.files().size() + " files");
+                leaveOut.setMinWidth(Region.USE_PREF_SIZE);
+                leaveOut.setTooltip(new Tooltip("Save an EXCLUSION for " + fileList(step.files()) + " and create a new plan "
+                        + "without it, ready to approve. Your asset folder is not changed."));
+                leaveOut.setOnAction(event -> leaveOutAfterRun(step, report, leaveOut));
+                row.getChildren().add(leaveOut);
+            }
+            migrateGuidance.getChildren().add(row);
+        }
+        migrateGuidance.getChildren().add(muted(io.github.aiassetmigrate.validation.ValidationNextSteps.NEW_RUN));
+    }
+
+    /** A report's findings by outcome; the AI step's own notes are not findings about outputs. */
+    record ReportSections(List<Finding> failed, List<Finding> unchecked, List<Finding> warnings, long passed,
+                          Optional<String> aiSource, Optional<String> aiMissing) {}
+
+    static ReportSections reportSections(Report report) {
+        List<Finding> failed = new ArrayList<>(), unchecked = new ArrayList<>(), warnings = new ArrayList<>();
+        long passed = 0;
+        Optional<String> source = Optional.empty(), missing = Optional.empty();
+        for (Finding finding : report.findings()) {
+            switch (finding.code()) {
+                case "AI_SOURCE" -> source = Optional.of(finding.message());
+                case "AI_UNAVAILABLE", "AI_OUTPUT_REJECTED" -> missing = Optional.of(finding.message());
+                case "OUTPUT_VERIFIED" -> passed++;
+                default -> {
+                    if (finding.code().startsWith("AI_")) continue;
+                    switch (finding.severity()) {
+                        case ERROR -> failed.add(finding);
+                        case UNKNOWN -> unchecked.add(finding);
+                        case WARNING -> warnings.add(finding);
+                        default -> { }
+                    }
+                }
+            }
+        }
+        return new ReportSections(failed, unchecked, warnings, passed, source, missing);
+    }
+
+    /** Fills the AI summary card and the findings section for a report; null hides both. */
+    private void showReport(Report report) {
+        reportAiSummary.getChildren().clear();
+        reportFindings.getChildren().clear();
+        reportAiSummary.setVisible(false);
+        reportFindings.setVisible(report != null);
+        if (report == null) return;
+        ReportSections sections = reportSections(report);
+
+        if (report.aiSummary().isPresent() || sections.aiMissing().isPresent()) {
+            Label title = new Label("AI summary");
+            title.getStyleClass().add("h3");
+            Label ai = badge("AI", "badge-info");
+            ai.setMinWidth(Region.USE_PREF_SIZE);
+            HBox header = new HBox(8, ai, title);
+            header.setAlignment(Pos.CENTER_LEFT);
+            Label text = new Label(report.aiSummary().orElseGet(() -> "No AI summary: " + sections.aiMissing().orElseThrow()));
+            text.setWrapText(true);
+            if (report.aiSummary().isEmpty()) text.getStyleClass().add("muted");
+            reportAiSummary.getChildren().addAll(header, text, muted("Advisory. The validation status ("
+                    + label(report.validationStatus().toString()).toLowerCase(Locale.ROOT) + ") comes from the checks, never "
+                    + "from the AI." + sections.aiSource().map(source -> " " + source.split(";", 2)[0]
+                    + "; it saw only statuses, counts, finding codes and relative file paths.").orElse("")));
+            reportAiSummary.setVisible(true);
+        }
+
+        Label title = new Label("Validation findings");
+        title.getStyleClass().add("h3");
+        Label summary = new Label(sections.passed() + " output(s) passed every check; " + sections.failed().size()
+                + " failed, " + sections.unchecked().size() + " not fully checked"
+                + (sections.warnings().isEmpty() ? "." : ", " + sections.warnings().size() + " warning(s)."));
+        summary.setWrapText(true);
+        reportFindings.getChildren().addAll(title, summary);
+        addFindingRows(sections.failed(), "Failed", "badge-danger");
+        addFindingRows(sections.unchecked(), "Not checked", "badge-warning");
+        addFindingRows(sections.warnings(), "Warning", "badge-neutral");
+        if (sections.failed().isEmpty() && sections.unchecked().isEmpty() && sections.warnings().isEmpty()) {
+            reportFindings.getChildren().add(muted("Nothing to look at. Every check for every output is in the full log below."));
+        }
+    }
+
+    private void addFindingRows(List<Finding> findings, String label, String variant) {
+        for (Finding finding : findings) {
+            Label kind = badge(label, variant);
+            kind.setMinWidth(Region.USE_PREF_SIZE);
+            Label file = new Label(finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).orElse("Run"));
+            file.getStyleClass().add("summary-file");
+            HBox header = new HBox(8, kind, file);
+            header.setAlignment(Pos.CENTER_LEFT);
+            Label message = new Label(finding.message());
+            message.setWrapText(true);
+            Label code = muted(label(finding.code()));
+            VBox row = new VBox(4, header, message, code);
+            row.getStyleClass().add("summary-item");
+            reportFindings.getChildren().add(row);
+        }
+    }
+
+    private static String fileList(List<String> files) {
+        return String.join(", ", files.stream().limit(3).toList()) + (files.size() > 3 ? " and " + (files.size() - 3) + " more" : "");
+    }
+
+    /**
+     * Leaves a problem's files out of the next plan: saves an EXCLUSION for each, picks a fresh output folder (the
+     * last run's folder already holds files that are never overwritten), and creates the new plan in the Plan step,
+     * ready for the user to approve. {@code button} (nullable) is marked as done once the decision is saved.
+     */
+    private void leaveOutAfterRun(io.github.aiassetmigrate.validation.ValidationNextSteps.Step step, Report report, Button button) {
+        InventorySnapshot snapshot = currentSnapshot;
+        if (snapshot == null || !snapshot.project().id().equals(report.projectId())) {
+            status.setText("Open this report's project in the Project step first, then try again.");
+            return;
+        }
+        Map<String, UUID> ids = new HashMap<>();
+        snapshot.project().assets().forEach(asset -> ids.put(io.github.aiassetmigrate.domain.PortablePath.of(asset.relativePath()), asset.id()));
+        List<ReviewedChange> changes = leaveOutChanges(step, ids, Instant.now());
+        if (changes.isEmpty()) {
+            status.setText("These files are not in the project's current scan, so they cannot be left out. Rescan in the Project step.");
+            return;
+        }
+        String files = fileList(step.files());
+        if (!confirm("Leave files out", "Leave " + files + " out of the next plan?",
+                "Each file is saved as an EXCLUSION decision, so the next plan does not copy it. Your asset folder is not "
+                        + "changed, and the run that already finished is not touched.\n\nA new plan without it is then created "
+                        + "for you to approve and run. Existing outputs are never overwritten, so if the output folder already "
+                        + "has files, an empty folder next to it (for example messy-2) is created and used.",
+                "Leave out")) {
+            status.setText("Nothing was left out.");
+            return;
+        }
+        try {
+            Path statePath = workspace();
+            Path logPath = logDirectory();
+            UUID project = snapshot.project().id();
+            long revision = snapshot.project().inventoryRevision();
+            String previous = outputRoot.getText().trim();
+            if (runner.submitValue(statePath, logPath, manager -> {
+                manager.review(project, revision, changes);
+                return previous.isEmpty() ? Optional.<Path>empty() : Optional.of(freshOutputFolder(Path.of(previous)));
+            }, result -> {
+                busy(false);
+                if (result.failure() != null || result.value() == null) {
+                    status.setText(failureText(result.failure(), null) + "\nIf the decisions were saved, Saved decisions in the "
+                            + "Review step lists them; choose an empty output folder before the next run.");
+                    return;
+                }
+                Optional<Path> next = result.value();
+                next.ifPresent(folder -> outputRoot.setText(folder.toString()));
+                if (button != null) {
+                    button.setText("Left out");
+                    button.setDisable(true);
+                }
+                showStep(WizardFlow.Step.PLAN);
+                // The new plan is created right away so the exclusion takes effect; approving and running it stay
+                // explicit, since nothing is written without an approved plan.
+                createPlan("Left out " + files + ". " + (next.isPresent() && !next.get().toString().equals(previous)
+                        ? "New output folder: " + next.get() + " (the last one already has files). " : ""));
+            })) {
+                busy(true);
+                status.setText("Saving the decision to leave " + files + " out...");
+            }
+        } catch (IllegalArgumentException failure) {
+            status.setText("Invalid input: " + failure.getMessage());
+        }
+    }
+
+    /** One accepted EXCLUSION per file of the step that is in the inventory; files no longer scanned are skipped. */
+    static List<ReviewedChange> leaveOutChanges(io.github.aiassetmigrate.validation.ValidationNextSteps.Step step,
+                                                Map<String, UUID> ids, Instant now) {
+        List<ReviewedChange> changes = new ArrayList<>();
+        for (String file : step.files()) {
+            UUID asset = ids.get(file);
+            if (asset != null) changes.add(new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.EXCLUSION,
+                    ReviewedChange.Decision.ACCEPTED, Map.of("reason", "Left out after validation (" + step.code() + ")"), now));
+        }
+        return changes;
+    }
+
+    /**
+     * Runs on the worker thread: the folder for the next run, which must exist. This one if it is empty; otherwise
+     * an empty sibling ({@code <name>-2}, ...) is created. Nothing else is created or changed.
+     */
+    static Path freshOutputFolder(Path folder) throws IOException {
+        Path next = nextOutputFolder(folder);
+        if (!Files.exists(next)) Files.createDirectory(next);
+        return next;
+    }
+
+    /**
+     * The folder for the next run: this one if it is missing or empty, otherwise the first free sibling named
+     * {@code <name>-2}, {@code <name>-3}, ...
+     */
+    static Path nextOutputFolder(Path folder) {
+        try {
+            if (!Files.exists(folder)) return folder;
+            try (var entries = Files.list(folder)) {
+                if (entries.findAny().isEmpty()) return folder;
+            }
+        } catch (IOException | RuntimeException unreadable) {
+            // Unreadable: propose a sibling rather than a folder that may not be usable.
+        }
+        String name = folder.getFileName() == null ? "output" : folder.getFileName().toString();
+        for (int n = 2; n < 1000; n++) {
+            Path candidate = folder.resolveSibling(name + "-" + n);
+            if (!Files.exists(candidate)) return candidate;
+        }
+        return folder;
     }
 
     private void validateRun() {
@@ -2118,6 +2503,7 @@ public final class AssetMigrateApplication extends Application {
                     validationResults.setText(formatReport(result.value(), true));
                     migrateBadges.getChildren().setAll(validationBadge(result.value().validationStatus()));
                     showNextSteps(result.value());
+                    showReport(result.value());
                 }
                 busy(false);
                 status.setText(result.failure() == null && result.value() != null
@@ -2139,7 +2525,10 @@ public final class AssetMigrateApplication extends Application {
             Path logPath = logDirectory();
             UUID project = projectUuid();
             if (runner.submitValue(statePath, logPath, manager -> manager.history(project), result -> {
-                if (result.failure() == null && result.value() != null) validationResults.setText(formatHistory(project, result.value()));
+                if (result.failure() == null && result.value() != null) {
+                    validationResults.setText(formatHistory(project, result.value()));
+                    runLogPane.setExpanded(true); // the history is shown in the log
+                }
                 busy(false);
                 status.setText(result.failure() != null ? failureText(result.failure(), null)
                         : result.value().isEmpty() ? "No reports for this project yet."
@@ -2167,6 +2556,20 @@ public final class AssetMigrateApplication extends Application {
                     io.github.aiassetmigrate.ai.OpenAIAdapter.connectedOrUnavailable()), result -> {
                 agentTranscript.appendText("> " + request + "\n" + (result.failure() == null && result.value() != null
                         ? formatCommand(result.value()) : failureText(result.failure(), null) + "\n") + "\n");
+                Optional<BlockerFixes.Proposal> decisions = result.failure() == null && result.value() != null
+                        ? result.value().decisions().filter(d -> !d.fixes().isEmpty()) : Optional.empty();
+                agentDecisions.setVisible(decisions.isPresent());
+                decisions.ifPresent(proposal -> {
+                    agentDecisions.setText("Review " + proposal.fixes().size() + " proposed decision(s)...");
+                    agentDecisions.setOnAction(event -> {
+                        Optional<PlanRequest> plan;
+                        try { plan = Optional.of(planRequest()); } catch (IllegalArgumentException incomplete) { plan = Optional.empty(); }
+                        chooseDecisions(plan, proposal, "Proposed by the agent", "The agent gathered these with the program's "
+                                + "read-only tools, and the program checked each one. Tick the ones you want; they are saved as "
+                                + "review decisions" + (plan.isPresent() ? " and a new plan is created" : "")
+                                + ". Your asset folder is not changed and nothing is approved.");
+                    });
+                });
                 busy(false);
                 status.setText(result.failure() == null ? "Agent request finished; requests never approve or migrate."
                         : "Agent request failed.");
@@ -2623,8 +3026,12 @@ public final class AssetMigrateApplication extends Application {
                     + "out (they are not copied and your folder is not changed), or fix them and Rescan.";
             case "UNRESOLVED_REFERENCE" -> "A model or material points to a file that cannot be found. Accept a suggested "
                     + "correction in Review (Relationships or Materials), or exclude the file.";
-            case "INSPECTION_UNSUPPORTED" -> "FBX files cannot be inspected. In Review, add an ACKNOWLEDGMENT (to include it "
-                    + "anyway) or an EXCLUSION, using Edit or add a decision.";
+            case "INSPECTION_UNSUPPORTED" -> "This model format cannot be inspected. In Review, add an ACKNOWLEDGMENT (to "
+                    + "include it anyway) or an EXCLUSION, using Edit or add a decision.";
+            case "INSPECTION_UNREADABLE" -> "The built-in FBX reader could not read this file (it may be damaged or use an "
+                    + "unsupported FBX version). Add an ACKNOWLEDGMENT to include it unchecked, re-export it, or exclude it.";
+            case "FBX_REFERENCE_NOT_REWRITABLE" -> "An FBX is copied as it is, so its texture must stay where the FBX expects it. "
+                    + "Keep the texture's place relative to the FBX in Review, or convert the model to GLB.";
             case "CONVERSION_CHECK_FAILED" -> "A conversion cannot be done as reviewed. Change or reject the CONVERSION "
                     + "decision in Review (for example add background=#FFFFFF for a transparent texture).";
             case "CONVERSION_UNSUPPORTED", "INVALID_CONVERSION" -> "This conversion is not available for the file. "

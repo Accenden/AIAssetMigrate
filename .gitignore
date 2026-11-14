@@ -15,3 +15,4 @@
 # Machine-specific Maven launchers (pin a local JDK path)
 /mvnw-local.cmd
 /mvnw-local.sh
+/AI_PLAN.md

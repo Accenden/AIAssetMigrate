@@ -75,7 +75,7 @@ class BlockerFixesIntegrationTest {
                     accepted(ids.get("textures/sword_tex.png"), ReviewedChange.Kind.CATEGORY, Map.of("category", "Weapons"))));
             var target = manager.supportedTargets().getFirst();
             MigrationPlan blocked = manager.createPlan(id, target, output);
-            assertEquals(Set.of("PARTIAL_INVENTORY", "UNRESOLVED_REFERENCE", "INSPECTION_UNSUPPORTED", "DESTINATION_CONFLICT",
+            assertEquals(Set.of("PARTIAL_INVENTORY", "UNRESOLVED_REFERENCE", AnalysisIntegrationTest.UNINSPECTED_FBX, "DESTINATION_CONFLICT",
                     "CONVERSION_CHECK_FAILED", "SOURCE_IMAGE_INVALID"), blockers(blocked));
             assertTrue(blocked.findings().stream().anyMatch(f -> f.code().equals("SOURCE_IMAGE_INVALID")
                     && f.sourceRelativePath().map(PortablePath::of).equals(Optional.of("misc/broken.png"))
@@ -84,7 +84,7 @@ class BlockerFixesIntegrationTest {
             var proposal = manager.proposeBlockerFixes(id, blocked, Optional.empty());
             assertTrue(proposal.unfixable().isEmpty(), proposal.unfixable().toString());
             assertTrue(proposal.fixes().stream().allMatch(BlockerFixes.Fix::recommended), proposal.fixes().toString());
-            assertEquals(Set.of("PARTIAL_INVENTORY", "UNRESOLVED_REFERENCE", "INSPECTION_UNSUPPORTED", "DESTINATION_CONFLICT",
+            assertEquals(Set.of("PARTIAL_INVENTORY", "UNRESOLVED_REFERENCE", AnalysisIntegrationTest.UNINSPECTED_FBX, "DESTINATION_CONFLICT",
                     "CONVERSION_CHECK_FAILED", "SOURCE_IMAGE_INVALID"),
                     proposal.fixes().stream().map(BlockerFixes.Fix::code).collect(Collectors.toSet()));
             assertEquals(1, proposal.fixes().stream().filter(f -> f.code().equals("DESTINATION_CONFLICT")).count(),

@@ -15,8 +15,8 @@ in-memory credentials, not yet a saved AI account connection.
 F02-F04 provide deterministic category, relationship/material and organization
 analysis with explicit reviews: uncertain categories stay Uncategorized, broken
 OBJ/MTL references get uncertain correction candidates, accepted corrections and
-renames/moves become reviewed reference rewrites in output copies, and opaque FBX
-files need an explicit acknowledgment or exclusion. Limited target compatibility
+renames/moves become reviewed reference rewrites in output copies, FBX models are read with
+the built-in FBX reader, and an FBX it cannot read needs an explicit acknowledgment or exclusion. Limited target compatibility
 assessment is available. Draft plans, explicit approval and migration (copies plus
 OBJ/MTL reference rewrites) are available with the restrictions below. Optional
 AI suggestions for F02-F04 (`analyze KIND --ai`, or the GUI checkbox) use a
@@ -24,8 +24,10 @@ connected ChatGPT account and are validated before display. PNG/JPEG texture
 conversion is available through a reviewed `CONVERSION`. Migrated outputs can be
 validated and the saved reports listed (`validate`, `history`), with an optional
 advisory AI summary. Optional AI also explains compatibility findings
-(`compatibility --ai`), proposes plan steps that the controller checks (`plan --ai`)
-and interprets plain-language requests (`command`). The GUI is a step-by-step wizard
+(`compatibility --ai`), suggests conversions, files to leave out and reference fixes
+that the program checks before you see them (`plan --ai`), interprets plain-language
+requests and can prepare a project for a target by running the read-only tools itself
+(`command`). `benchmark [--ai]` measures what the AI adds on a sample with known answers. The GUI is a step-by-step wizard
 with an Agent and a Live logs viewer in a side drawer. OBJ and FBX models can be converted to
 self-contained GLB with the Assimp library that Maven bundles (no separate install).
 Import and format-level checks do not establish
@@ -112,7 +114,8 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
    decisions you could make by hand, and your asset folder is never changed:
    - skipped files are left out of the scan;
    - a broken reference with exactly one matching file is pointed to it;
-   - an uninspectable FBX gets an acknowledgment;
+   - an FBX the built-in reader cannot read gets an acknowledgment, and a texture an FBX needs
+     is placed where the FBX expects it (an FBX is never edited);
    - a damaged PNG or JPEG is left out of the migration. Creating a plan decodes every image that
      is copied unchanged, using validation's own check, so a damaged image is caught before the run
      instead of failing validation after it;
@@ -126,11 +129,18 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
    Leaving a file out of the migration is offered as a last resort and never preselected.
    Leaving files out rescans the folder; your decisions are kept for files whose path and
    contents did not change.
-5. **Migrate**: run the approved plan; the outputs are validated and the report shown. When
+5. **Migrate**: run the approved plan; the outputs are validated and the report shown in
+   sections: the **AI summary** (when asked for) in its own card, marked advisory, then
+   **Validation findings** with one row per failed or not-checked file, and the full run log and
+   report in a collapsible section. When
    validation does not pass, **What to do next** lists each problem with an action this tool can
-   take, for example replacing a damaged file and rescanning, or converting an FBX to GLB so that
-   it can be fully checked. The AI summary may only rephrase these steps; it is not given any other
-   tool or check to recommend.
+   take, for example replacing a damaged file and rescanning, or re-exporting an FBX the built-in
+   reader cannot read. Where leaving the file out settles the problem (a damaged, unreadable or
+   not fully checked file), a **Leave out** button saves an `EXCLUSION` after a confirmation and
+   creates the new plan without the file, ready for you to approve and run. Existing outputs are
+   never overwritten, so if the last output folder has files, an empty folder next to it (for
+   example `messy-2`) is created and used. The AI
+   summary may only rephrase these steps; it is not given any other tool or check to recommend.
    Re-validation and report history are in a collapsed section.
 
 Later steps unlock as their prerequisites are met; completed steps stay clickable.
@@ -207,7 +217,7 @@ bash ./mvnw exec:java '-Dexec.args=inventory --state-dir /absolute/path/to/state
 | Input | Type | Current inspection | Output/conversion |
 | --- | --- | --- | --- |
 | OBJ | Model | Bounded UTF-8/BOM text checks, basic vertices/faces, material-library references | Not implemented |
-| FBX | Model | Bounded binary or ASCII header/version recognition | Not implemented |
+| FBX | Model | Bounded binary or ASCII header/version recognition; at plan and validation time, read with the built-in FBX reader (Assimp): meshes, embedded images and external texture references | Copied unchanged, or converted to GLB |
 | MTL | Material | Bounded UTF-8/BOM text checks and texture references | Not implemented |
 | PNG | Texture | Extension classification and streaming SHA-256 only; no content validation | Not implemented |
 | JPG/JPEG | Texture | Extension classification and streaming SHA-256 only; no content validation | Not implemented |
@@ -299,8 +309,15 @@ model whose reference is a `usemtl` material name is validated only: the target
 must already be one of the model's (possibly corrected) material libraries, otherwise
 `MAPPING_LIBRARY_NOT_REFERENCED` blocks the plan.
 
-**Opaque formats.** FBX references cannot be inspected, so an FBX asset blocks the
-preview with `INSPECTION_UNSUPPORTED` until it is excluded or explicitly
+**FBX.** FBX models are read with the built-in FBX reader, the bundled Assimp library that also
+converts FBX to GLB, plus a bounded scan of the FBX node tree for the texture file names it
+records (Assimp alone reports some as empty). A readable FBX needs no acknowledgment: its external
+texture references are resolved like MTL ones. An FBX is binary and is never rewritten, so a texture
+it needs must be at the place it names in the output. A layout that moves the texture away blocks
+with `FBX_REFERENCE_NOT_REWRITABLE`, and no correction is suggested for an FBX; **Fix blockers**
+places the texture where the FBX looks for it instead. An FBX the reader cannot read (damaged, or an
+FBX version it does not support), or any model format that is not inspected, blocks the preview
+(`INSPECTION_UNREADABLE` / `INSPECTION_UNSUPPORTED`) until it is excluded or explicitly
 acknowledged: `review --kind ACKNOWLEDGMENT --value reason=...`. Acknowledgments are
 rejected for OBJ/MTL (which are inspected) and for textures. Use `reviews --project PROJECT-UUID` with the
 state directory and its managed `logs` child to list saved decisions, or open **Saved
@@ -324,12 +341,20 @@ Accepting one is an ordinary explicit `review`; nothing is applied automatically
 | `categories` | A category for assets the rules left Uncategorized | It is in the fixed vocabulary |
 | `relationships` | Targets for broken references; texture groupings | The reference is actually broken for that asset and the target has the expected type |
 | `materials` | Targets for broken texture references | As above, textures only |
-| `names` | Clearer filenames | Portable, and the extension is unchanged |
-| `folders` | An output folder layout (uses accepted categories) | Portable relative path, at most 4 levels |
+| `names` | Clearer filenames, one shared stem per asset family | Portable, and the extension is unchanged |
+| `folders` | An output folder layout (uses accepted categories), one folder per family | Portable relative path, at most 4 levels |
 
-Only relative paths, asset types, formats, accepted categories and reference text
-are sent, for at most 300 assets per request; file contents, fingerprints and
-absolute paths never are. Names and paths are framed as untrusted data, and any
+Besides each file's path, type and format, the model sees what the scanner already
+knows: the files it references and is referenced by (OBJ, MTL and FBX references),
+the family that forms (for example `mdl_0001.obj` using `knight.mtl`), and for PNG/JPEG
+textures whether they have transparency. That lets it categorize and name a family
+consistently instead of one file at a time. When the AI picks one of several rule
+candidates (two files named `skin.png`), that suggestion is marked as the AI's choice,
+so Accept all and Fix blockers can use it.
+
+Only relative paths, asset types, formats, accepted categories, reference text and
+measured traits are sent, for at most 300 assets per request; file contents,
+fingerprints and absolute paths never are. Names and paths are framed as untrusted data, and any
 proposal that fails validation is dropped and counted in `AI_OUTPUT_REJECTED`. When
 nothing is uncertain no request is made (`AI_NOT_NEEDED`). If the account is not
 connected, the session expired, the plan's usage limit is reached or the model
@@ -441,16 +466,27 @@ recorded outcome, including an interrupted run. The GUI provides the same separa
 draft, approval and migration steps, and shows the completion report in Validation
 and History.
 
-**AI-proposed steps (hybrid F06).** `plan ... --ai`, or the GUI checkbox, asks the
-model to propose one step per asset. The controller checks every proposal against
-the inventory, the reviewed organization, the installed converters and destination
-conflicts. A step that matches the reviewed command is recorded as `AI_PLAN_STEP`.
-A supported new texture or model conversion becomes an `AI_PLAN_PROPOSAL`: accept a
-`CONVERSION` review and generate a new plan to include it. Anything else is
-`AI_PLAN_STEP_REJECTED`, for example an unsupported format, a conversion that does
-not match the asset type, excluded assets or colliding outputs. Proposals are non-blocking findings and never change the plan's commands
-or order, so approval works exactly as it does without AI. If the model fails, the
-deterministic draft is still created with an `AI_UNAVAILABLE` finding.
+**AI plan suggestions (hybrid F05/F06).** `plan ... --ai`, or **Ask AI for suggestions**
+in the Plan step, asks the model which changes would make the migration to the chosen
+engine better or unblock the plan: conversions (for example OBJ/FBX to GLB, or a
+transparent PNG to JPG with a background colour), leaving out a file that cannot be
+migrated (a damaged image), and fixes for broken references. The model sees each file's
+relative path, type, format, its non-INFO plan finding codes, measured traits such as
+`transparent`, the references between files and what the target profile documents (for
+example that Unity needs glTFast for GLB). Every proposal becomes review decisions that
+the program checks exactly as it checks a plan: review rules, converter support and the
+converter's own check on the input the run would use, image decoding, and the
+organization preview (destination clashes, references to files left out). A proposal is
+dropped, with the reason shown, if it fails a check, leaves out a file that nothing
+blocks, or would block the plan; one that changes nothing is left out silently.
+
+In the GUI the suggestions that pass appear in an **AI suggestions** card; **Review**
+lists them with checkboxes (none preselected) and the dropped ones underneath. Applying
+saves the ticked ones as review decisions, as Fix blockers does, and creates a new plan.
+In the CLI they are `AI_PLAN_PROPOSAL` findings that include the `review` that applies
+each one, and dropped ones are `AI_PLAN_PROPOSAL_DROPPED`. Suggestions never change the
+plan's commands, add or clear blockers, or approve anything. If the model fails, the
+rule-based draft is still created with an `AI_UNAVAILABLE` finding.
 
 Plans contain `COPY` commands, plus `REWRITE_REFERENCES` commands for OBJ/MTL
 files whose reviewed preview lists rewrites (their parameters record each exact
@@ -483,9 +519,8 @@ copied next to it.
   reviewed texture conversion (a PNG reviewed as JPEG is embedded as JPEG). The OBJ's
   material libraries must be in the same output folder as the model
   (`MODEL_CONVERSION_LAYOUT` otherwise).
-- An FBX still needs the usual `ACKNOWLEDGMENT`, and every texture must already be inside
-  the file; an FBX that references external textures fails with
-  `CONVERSION_CHECK_FAILED` before approval.
+- Every texture of an FBX must already be inside the file; an FBX that references external
+  textures fails with `CONVERSION_CHECK_FAILED` before approval.
 - The full import and export run at plan creation and again in preflight, so a model
   Assimp cannot read is blocked before any run is reserved. Inputs are limited to 64 MiB.
 - Every converted model gets a `MODEL_CONVERSION_FIDELITY` warning (MTL colours become
@@ -537,8 +572,11 @@ Each output is checked for:
 - format: PNG/JPEG must decode with the JDK image reader and match the extension;
   OBJ/MTL must be UTF-8 text whose `mtllib` and texture references resolve, with
   exact case, to files this run produced inside the output root.
+- FBX outputs are read with the built-in FBX reader: the scene must import with at least one
+  mesh, every embedded PNG/JPEG must decode, and external texture references must resolve to
+  files this run produced.
 
-Checks that cannot be performed are `UNKNOWN`, never passed: FBX contents, a
+Checks that cannot be performed are `UNKNOWN`, never passed: an FBX the reader cannot read, a
 missing recorded hash, oversized images, and references that resolve to files this
 run did not produce. The status is `PASSED` only if every recorded output passed
 every check and the run succeeded; `FAILED` if any check failed; `INCOMPLETE` if
@@ -550,9 +588,12 @@ Validation holds the project lock, so it fails rather than overlapping a running
 migration. `--ai` adds an advisory summary from the connected ChatGPT account,
 requested after the status is computed. The model sees statuses, counts, finding
 codes and relative source paths only, never contents, finding messages or absolute
-paths. A summary that names a different status is rejected, and on any failure the
-report keeps only its deterministic summary with an `AI_UNAVAILABLE` or
-`AI_OUTPUT_REJECTED` finding.
+paths. The user already sees the fixed **What to do next** steps, so the model is asked
+only for what they do not say (how problems relate, what to fix first). No summary is
+requested for a passed run with nothing to do, and an empty reply or one that only
+repeats the next steps is not shown (`AI_NOT_NEEDED`). A summary that names a different
+status is rejected, and on any failure the report keeps only its deterministic summary
+with an `AI_UNAVAILABLE` or `AI_OUTPUT_REJECTED` finding.
 
 Reports are append-only JSON files in `<state-dir>/projects/<project>/reports`.
 `history --project PROJECT-UUID [--details]` lists them oldest first and says so
@@ -567,7 +608,7 @@ its **Re-validate or view earlier reports** section provides both operations.
 connected model, which must map it to exactly one allowlisted action:
 `SHOW_INVENTORY`, `LIST_TARGETS`, `ANALYZE` (rule-based), `CHECK_COMPATIBILITY`,
 `PREVIEW_ORGANIZATION`, `CREATE_PLAN` (a draft only), `SHOW_PLAN`, `SHOW_RUN`,
-`VALIDATE`, `HISTORY`, `CLARIFY` or `UNSUPPORTED`. The action runs through the same
+`VALIDATE`, `HISTORY`, `PREPARE`, `CLARIFY` or `UNSUPPORTED`. The action runs through the same
 `AssetManager` operations as the explicit commands. Approving, migrating, saving
 reviews and editing files are not actions: the model is told to answer
 `UNSUPPORTED`, and a reply naming any other action, an unexpected parameter or a
@@ -579,6 +620,42 @@ sees the request, the project ID, asset counts by type and the supported targets
 Without a connected account, nothing is done and an `AI_UNAVAILABLE` finding is
 returned. The command exits non-zero when the request failed or could not be
 interpreted.
+
+**The agent as operator.** A request such as "prepare this project for godot 4.3"
+resolves to `PREPARE`. The model then chooses the program's read-only tools one at a
+time (`INVENTORY`, `ANALYZE kind`, `CHECK_COMPATIBILITY`, `PREVIEW_ORGANIZATION`,
+`SUGGEST_PLAN_STEPS`), sees a summary of each result (relative paths, counts and finding
+codes only; a tool's error text is never sent) and calls `FINISH` with a short message,
+for at most 8 steps. What the tools found becomes one bundle of proposed decisions: the
+checked plan suggestions, reference corrections, the AI's categories, and names or
+folders if it ran those analyses (the AI wins over a disagreeing rule; ties are left
+out). The program checks the whole bundle as above. Nothing is saved: in the GUI's Agent
+drawer **Review N proposed decisions** opens the same accept-or-reject list, and the CLI
+prints the `review` command for each. With an output folder in the request, a draft plan
+of the current state is also created. Approving and running stay explicit.
+
+## Measuring the AI
+
+`benchmark [--ai] [--keep DIR]` writes a 24-file messy sample with known right answers
+into a temporary folder (vaguely named files whose material names the object, a broken
+reference with two equally named candidates, a texture that belongs to a model only by
+what it depicts, a damaged image, a transparent texture and a real FBX), runs the
+analyses, Fix blockers and, with `--ai`, the AI on it through the same facade the GUI
+uses, and prints a score table. Rules + AI is what a user gets with AI on: the AI's
+suggestion where it made one, the rules' otherwise, and both Fix blockers and the checked
+AI suggestions for plan steps. Plan steps are judged per target: expected (leave out the
+damaged image, fix both references), acceptable (for example OBJ to GLB for Godot) or
+wrong (for example GLB for Unity, or flattening the transparent grass). Notes list AI
+failures and suggestions the checks dropped, so a failed run is not mistaken for a
+measurement. Nothing is approved or migrated. The rules-only baseline is fixed by a test:
+
+| Measure | Key | Rules |
+| --- | --- | --- |
+| Categories right | 24 | 20 |
+| Broken references fixed right | 2 | 1 |
+| Unreferenced textures grouped right | 2 | 1 |
+| Names that match the key | 5 | 2 |
+| Plan steps (Godot 4.3 and Unity 6000.0 each) | 3 | 2 |
 
 ## File Logs
 

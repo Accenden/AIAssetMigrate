@@ -38,6 +38,22 @@ public final class CompatibilityEngine {
         return List.of(GODOT, UNITY);
     }
 
+    /**
+     * What this profile documents about a target, in plain sentences, for AI planning context. These restate the
+     * sources above; they are not checks.
+     */
+    public static List<String> notes(AssetManager.TargetProfile target) {
+        if (GODOT.equals(target)) return List.of(
+                "Godot 4.3 recommends glTF 2.0 (.gltf/.glb) for 3D scenes; it also imports .blend, .dae, .obj and .fbx.",
+                "Godot documents OBJ limitations: no skinning, animation, UV2 or PBR materials.",
+                "Godot imports PNG with at most 8 bits per channel; JPG has no transparency.");
+        if (UNITY.equals(target)) return List.of(
+                "Unity 6000.0 imports .fbx, .dae, .dxf, .obj and .blend natively; FBX is its usual model format.",
+                "Unity imports .glb only with the glTFast package (com.unity.cloud.gltfast), so converting models to GLB adds a dependency.",
+                "Unity imports PNG and JPG textures natively; JPG has no transparency.");
+        throw new IllegalArgumentException("Unknown target profile or version: " + target);
+    }
+
     /** Returns only new compatibility findings; retain the snapshot and its original findings separately. */
     public static List<Finding> check(InventorySnapshot snapshot, AssetManager.TargetProfile target) {
         Objects.requireNonNull(snapshot, "snapshot");

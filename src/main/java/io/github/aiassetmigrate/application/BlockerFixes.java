@@ -91,6 +91,21 @@ public final class BlockerFixes {
                 context.scanProblem(finding);
                 continue;
             }
+            if (context.fbxOwner(finding)) {
+                // An FBX is copied as it is: references are fixed by placing the texture, never by editing the file.
+                if (finding.code().equals("UNRESOLVED_REFERENCE")) {
+                    context.placeForFbx(finding, OrganizationPreview.UNRESOLVED_PREFIX);
+                    continue;
+                }
+                if (finding.code().equals("FBX_REFERENCE_NOT_REWRITABLE")) {
+                    context.placeForFbx(finding, OrganizationPreview.FBX_FIXED_PREFIX);
+                    continue;
+                }
+                if (finding.code().startsWith("INSPECTION_")) {
+                    context.acknowledgeUnreadableFbx(finding);
+                    continue;
+                }
+            }
             switch (finding.code()) {
                 case "PARTIAL_INVENTORY" -> context.partialInventory();
                 case "UNRESOLVED_REFERENCE" -> context.unresolvedReference(finding);
@@ -157,6 +172,8 @@ public final class BlockerFixes {
         final List<Fix> fixes = new ArrayList<>();
         final List<String> unfixable = new ArrayList<>();
         final Set<UUID> clashSettled = new HashSet<>();
+        /** Texture placements proposed for FBX references, by texture: one texture can be in only one place. */
+        final Map<UUID, String> placements = new HashMap<>();
         final Set<UUID> lastResort = new HashSet<>();
         final Set<Path> leftOut = new HashSet<>();
         boolean partialDone, destinationsDone;
@@ -247,6 +264,93 @@ public final class BlockerFixes {
                 }
             }
             return found;
+        }
+
+        boolean fbxOwner(Finding finding) {
+            return finding.assetId().map(assets::get).filter(io.github.aiassetmigrate.analysis.MaterialAnalysis::fbx).isPresent();
+        }
+
+        /** The built-in reader could not read an FBX: include it unchecked, as acknowledging an FBX always did. */
+        void acknowledgeUnreadableFbx(Finding finding) {
+            UUID asset = finding.assetId().orElseThrow();
+            add(finding.code(), asset, "Include " + path(asset) + " without checking it (the built-in FBX reader could not read "
+                    + "it: it may be damaged or use an FBX version the reader does not support; validation will report it "
+                    + "as not fully checked)",
+                    List.of(decision(asset, ReviewedChange.Kind.ACKNOWLEDGMENT, ReviewedChange.Decision.ACCEPTED,
+                            Map.of("reason", "FBX the built-in reader could not read; included unchecked (quick fix in the Plan step)"))),
+                    Source.RULES);
+        }
+
+        /**
+         * An FBX cannot be edited, so its texture is moved instead: the texture gets the output name and folder
+         * the FBX names, relative to the FBX's own output folder. For a broken reference the texture is the only
+         * file with that name; for a texture the layout moved away, it is the file the reference resolves to.
+         */
+        void placeForFbx(Finding finding, String prefix) {
+            UUID owner = finding.assetId().orElseThrow();
+            if (!finding.message().startsWith(prefix)) { lastResort(finding); return; }
+            String reference = finding.message().substring(prefix.length()).replace('\\', '/');
+            OrganizationPreview.Entry ownerEntry = entry(owner).orElse(null);
+            if (ownerEntry == null || ownerEntry.destination().isEmpty()) { lastResort(finding); return; }
+            String wanted;
+            try {
+                Path folder = Path.of(ownerEntry.destination().get()).getParent();
+                Path place = (folder == null ? Path.of(reference) : folder.resolve(reference)).normalize();
+                if (place.isAbsolute() || place.startsWith("..") || reference.startsWith("/") || reference.contains(":")) {
+                    lastResort(finding, "the FBX names a file outside the output folder");
+                    return;
+                }
+                wanted = PortablePath.of(place);
+            } catch (java.nio.file.InvalidPathException invalid) {
+                lastResort(finding);
+                return;
+            }
+            Asset target = finding.code().equals("UNRESOLVED_REFERENCE") ? uniqueByName(reference) : resolvedTarget(owner, reference);
+            if (target == null) {
+                lastResort(finding, finding.code().equals("UNRESOLVED_REFERENCE") ? "no single file named "
+                        + reference.substring(reference.lastIndexOf('/') + 1) + " was found" : null);
+                return;
+            }
+            if (entry(target.id()).map(e -> !e.conversion().isEmpty()).orElse(false)) {
+                lastResort(finding, "its texture is being converted, which changes its name");
+                return;
+            }
+            String placed = placements.putIfAbsent(target.id(), wanted);
+            if (placed != null) {
+                if (!placed.equals(wanted)) lastResort(finding, "two files need " + path(target.id()) + " in different places");
+                return;
+            }
+            int slash = wanted.lastIndexOf('/');
+            String name = wanted.substring(slash + 1), folder = slash < 0 ? "" : wanted.substring(0, slash);
+            if (!OrganizationPreview.validName(name) || !OrganizationPreview.validFolder(folder)) { lastResort(finding); return; }
+            add(finding.code(), owner, "Place " + path(target.id()) + " at " + wanted + " in the output, where " + path(owner)
+                    + " looks for it (FBX files cannot be edited)",
+                    List.of(decision(target.id(), ReviewedChange.Kind.NAME, ReviewedChange.Decision.ACCEPTED, Map.of("name", name)),
+                            decision(target.id(), ReviewedChange.Kind.FOLDER, ReviewedChange.Decision.ACCEPTED, Map.of("folder", folder))),
+                    Source.RULES);
+        }
+
+        Optional<OrganizationPreview.Entry> entry(UUID asset) {
+            return preview.entries().stream().filter(e -> e.assetId().equals(asset)).findFirst();
+        }
+
+        /** The only texture whose file name matches (ignoring case), or null. */
+        Asset uniqueByName(String reference) {
+            String name = reference.substring(reference.lastIndexOf('/') + 1).toLowerCase(Locale.ROOT);
+            List<Asset> matches = assets.values().stream().filter(a -> a.type() == Asset.Type.TEXTURE
+                    && a.relativePath().getFileName().toString().toLowerCase(Locale.ROOT).equals(name)).toList();
+            return matches.size() == 1 ? matches.getFirst() : null;
+        }
+
+        /** The texture a reference resolves to in the source folder, relative to its owner, or null. */
+        Asset resolvedTarget(UUID owner, String reference) {
+            try {
+                Path parent = assets.get(owner).relativePath().getParent();
+                String source = PortablePath.of((parent == null ? Path.of(reference) : parent.resolve(reference)).normalize());
+                return assets.values().stream().filter(a -> PortablePath.of(a.relativePath()).equals(source)).findFirst().orElse(null);
+            } catch (java.nio.file.InvalidPathException invalid) {
+                return null;
+            }
         }
 
         void acknowledge(Finding finding) {

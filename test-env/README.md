@@ -25,17 +25,31 @@ The GUI remembers the workspace and the last project, so set the workspace once.
 Each approved plan runs once, and outputs are never overwritten. To migrate the same
 project again, empty its output folder or run `setup.cmd` (add `-KeepState` to keep projects).
 
+## Trying the AI features
+
+Connect an account first (AI drawer in the GUI, or `aam auth connect`).
+
+- **Measure:** `aam benchmark` prints the rules-only scores on a built-in sample with known
+  answers; `aam benchmark --ai` adds the rules + AI column. Use it to check that a change helps.
+- **Plan suggestions:** on `messy`, tick **Ask AI for suggestions** in the Plan step and create the
+  plan. The **AI suggestions** card lists what passed the program's checks (for example leaving out
+  `misc\broken.png` or fixing `sword_tex.png`); dropped ones are listed with the reason.
+- **Agent:** in the Agent drawer ask "prepare this project for godot 4.3". The agent runs the checks
+  it needs and offers **Review N proposed decisions**; nothing is saved until you apply them.
+
 ## sources\clean: the happy path
 
-Three textured OBJ/MTL pairs and a UI icon whose references all resolve. It should plan with
+Textured OBJ/MTL models, a real FBX and a UI icon whose references all resolve. It should plan with
 no blocking findings, migrate, and validate as `PASSED`.
 
 - `characters\hero.obj` -> `hero.mtl` -> `hero_diffuse.png`
 - `props\crate.obj` -> `crate.mtl` -> `crate_albedo.jpg`
+- `props\barrel.fbx` (binary FBX with its texture embedded; read and validated by the built-in FBX reader)
 - `ui\menu_icon.png` (transparent PNG)
 
 Try a conversion: accept a `CONVERSION` review with `format=glb` on `characters/hero.obj`
-(textured cube, converts with Assimp) or `format=jpg` on `crate_albedo.jpg`, then create a new plan.
+(textured cube, converts with Assimp), `format=glb` on `props/barrel.fbx`, or `format=jpg` on `crate_albedo.jpg`,
+then create a new plan.
 
 ## sources\messy: one problem per file
 
@@ -47,7 +61,7 @@ Importing it gives a `PARTIAL` scan (CLI exit code 3).
 | `weapons\sword.mtl` | `map_Kd sword_tex.png`, which is really in `textures\`: `REFERENCE_UNRESOLVED` and a `REFERENCE_CANDIDATE` to accept as a correction (the output copy gets the reference rewritten). |
 | `textures\sword_tex.png` | Target of that correction; also a `CATEGORY_CONFLICT` (Weapons vs. Textures) and a `NAME_RELATIONSHIP_CANDIDATE` with the sword. |
 | `props\weapon_rack.obj` | `CATEGORY_CONFLICT` (Props vs. Weapons); left Uncategorized. |
-| `props\crate_01.fbx` | FBX header stub: blocks the preview with `INSPECTION_UNSUPPORTED` until you accept an `ACKNOWLEDGMENT` (or exclude it). Validation reports it as not fully checked. |
+| `props\crate_01.fbx` | FBX header stub with no scene: the built-in FBX reader cannot read it, so the preview is blocked with `INSPECTION_UNREADABLE` until you accept an `ACKNOWLEDGMENT` (**Fix blockers** offers it) or exclude it. Validation reports it as not fully checked. |
 | `environment\rock.obj` + `rock_albedo.jpg` | Unreferenced texture sharing the model's name: `NAME_RELATIONSHIP_CANDIDATE`. |
 | `environment\grass_alpha.png` | Transparent texture: a `CONVERSION` to `jpg` without `background=#RRGGBB` fails the conversion check (**Fix blockers** offers a white background). |
 | `textures\IMG_0042.PNG`, `ui\MainMenu Button.png` | Poor names and an upper-case extension for the names analysis and rename rules (`snake-case`, `by-type`). |
@@ -55,11 +69,12 @@ Importing it gives a `PARTIAL` scan (CLI exit code 3).
 | `misc\broken.png` | Truncated PNG. Import only fingerprints PNGs, so it is inventoried; creating a plan decodes it and blocks with `SOURCE_IMAGE_INVALID` (**Fix blockers** leaves it out). |
 
 Until every problem is dealt with, a plan for `messy` has blocking findings (`PARTIAL_INVENTORY`,
-`UNRESOLVED_REFERENCE` x2, `INSPECTION_UNSUPPORTED`, `SOURCE_IMAGE_INVALID`). The quick way: create
+`UNRESOLVED_REFERENCE` x2, `INSPECTION_UNREADABLE`, `SOURCE_IMAGE_INVALID`). The quick way: create
 a plan, choose **Fix blockers...** and apply the proposed fixes, which gives a plan with no blockers.
-After the run, validation is `INCOMPLETE`, not `PASSED`: the FBX stub stays not fully checked (FBX
-contents cannot be inspected, and not checked is never a pass), and **What to do next** in the
-Migrate step says so. Leave the FBX out too to see `PASSED`. Converting this stub to GLB does not
+After the run, validation is `INCOMPLETE`, not `PASSED`: the FBX stub stays not fully checked (the reader
+cannot read it, and not checked is never a pass), and **What to do next** in the
+Migrate step says so. Choose **Leave out** there; a new plan without the FBX is created (into the new
+`output\messy-2`). Approve and run it to see `PASSED`. Converting this stub to GLB does not
 help: it is only a header, so the conversion check blocks it. The walkthrough below does the same by hand:
 
 1. Import `messy` and run the analyses (Analysis and Review tab, or `aam analyze

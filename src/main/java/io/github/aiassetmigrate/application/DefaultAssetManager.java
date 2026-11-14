@@ -388,15 +388,19 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             for (AssetReference reference : analysis.references()) {
                 Asset owner = assets.get(reference.ownerAssetId());
                 Asset target = reference.normalizedTargetPath().map(paths::get).orElse(null);
+                // Material mappings are material-to-texture (or model-to-material); an FBX model's textures are
+                // relationships only. An FBX cannot be rewritten, so no correction is suggested for it: the Plan
+                // step's Fix blockers offers to place the texture where the FBX expects it instead.
+                boolean mapping = kind == AnalysisKind.MATERIALS && reference.kind() == AssetReference.Kind.TEXTURE
+                        && owner.type() == Asset.Type.MATERIAL;
                 if (reference.resolutionStatus() == AssetReference.ResolutionStatus.RESOLVED && target != null) {
-                    if (kind == AnalysisKind.RELATIONSHIPS
-                            || (kind == AnalysisKind.MATERIALS && reference.kind() == AssetReference.Kind.TEXTURE)) {
+                    if (kind == AnalysisKind.RELATIONSHIPS || mapping) {
                         suggestions.add(analysisSuggestion(owner.id(), kind, target.id().toString(), reference.originalText()));
                     }
                 } else {
                     findings.add(analysisFinding(owner, "REFERENCE_" + reference.resolutionStatus(),
                             "Reference '" + reference.originalText() + "': " + reference.resolutionStatus()));
-                    if (kind == AnalysisKind.RELATIONSHIPS || reference.kind() == AssetReference.Kind.TEXTURE) {
+                    if (!MaterialAnalysis.fbx(owner) && (kind == AnalysisKind.RELATIONSHIPS || mapping)) {
                         for (Asset candidate : correctionCandidates(snapshot.project().assets(), owner, reference)) {
                             suggestions.add(analysisSuggestion(owner.id(), kind, candidate.id().toString(), reference.originalText()));
                             findings.add(analysisFinding(owner, "REFERENCE_CANDIDATE", "Possible correction for '"
@@ -465,13 +469,14 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         if (base.inventoryRevision() != inventory.project().inventoryRevision()) {
             throw new IllegalStateException("Inventory changed while analyzing; retry");
         }
-        InventorySnapshot inspected = inventory;
-        if (kind == AnalysisKind.RELATIONSHIPS || kind == AnalysisKind.MATERIALS) {
-            var references = inspectReferences(inventory);
-            inspected = new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(), inventory.project(),
-                    inventory.findings(), inventory.scanStatus(), inventory.scannedAt(), inventory.pathOutcomes(),
-                    references.references());
-        }
+        // Every kind gets the inspected references, so the model sees which files belong together (step 4 of the
+        // AI plan); categories and organization also get measured traits such as transparency.
+        var references = inspectReferences(inventory);
+        InventorySnapshot inspected = new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(),
+                inventory.project(), inventory.findings(), inventory.scanStatus(), inventory.scannedAt(),
+                inventory.pathOutcomes(), references.references());
+        Map<UUID, Set<String>> traits = kind == AnalysisKind.RELATIONSHIPS || kind == AnalysisKind.MATERIALS
+                ? Map.of() : traits(inventory);
         Map<UUID, String> categories = new HashMap<>();
         if (kind == AnalysisKind.NAMES || kind == AnalysisKind.FOLDERS) {
             for (ReviewedChange review : loadReviews(id)) {
@@ -479,7 +484,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                         && review.values().containsKey("category")) categories.put(review.assetId(), review.values().get("category"));
             }
         }
-        AnalysisResult result = new io.github.aiassetmigrate.ai.AIEngine(assistant).assist(kind, inspected, base, categories);
+        AnalysisResult result = new io.github.aiassetmigrate.ai.AIEngine(assistant).assist(kind, inspected, base, categories, traits);
         if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed during AI analysis; retry");
         return result;
     }
@@ -518,6 +523,16 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
         List<ReviewedChange> decisions = loadReviews(id);
         var references = inspectReferences(inventory);
+        var preview = preview(inventory, references, decisions);
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed while previewing; analyze again");
+        return preview;
+    }
+
+    /** The organization preview for these decisions, with the inspection findings that also block a plan. */
+    private static OrganizationPreview.Result preview(InventorySnapshot inventory, MaterialAnalysis.Result references,
+                                                      List<ReviewedChange> decisions) {
+        UUID id = inventory.project().id();
+        long expectedInventoryRevision = inventory.project().inventoryRevision();
         InventorySnapshot inspected = new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(),
                 inventory.project(), inventory.findings(), inventory.scanStatus(), inventory.scannedAt(),
                 inventory.pathOutcomes(), references.references());
@@ -529,9 +544,13 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         decisions.stream().filter(change -> change.kind() == ReviewedChange.Kind.ACKNOWLEDGMENT
                 && change.decision() == ReviewedChange.Decision.ACCEPTED).forEach(change -> acknowledged.add(change.assetId()));
         Set<UUID> inspectedIds = new HashSet<>();
+        Map<UUID, Asset> byId = new HashMap<>();
+        inventory.project().assets().forEach(asset -> byId.put(asset.id(), asset));
         for (var file : references.files()) {
             inspectedIds.add(file.assetId());
-            if (file.status() != MaterialAnalysis.Inspection.VERIFIED && !excluded.contains(file.assetId())) {
+            // An acknowledgment accepts an FBX the built-in reader could not read, as it always did for FBX.
+            boolean acknowledgedFbx = acknowledged.contains(file.assetId()) && MaterialAnalysis.fbx(byId.get(file.assetId()));
+            if (file.status() != MaterialAnalysis.Inspection.VERIFIED && !excluded.contains(file.assetId()) && !acknowledgedFbx) {
                 findings.add(new OrganizationPreview.Finding("INSPECTION_" + file.status(), Optional.of(file.assetId()),
                         "Reference coverage is incomplete"));
             }
@@ -547,7 +566,6 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         }
         if (references.truncated()) findings.add(new OrganizationPreview.Finding("ANALYSIS_LIMIT", Optional.empty(),
                 "Reference analysis exceeded its budget"));
-        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed while previewing; analyze again");
         return new OrganizationPreview.Result(id, expectedInventoryRevision, result.entries(), findings);
     }
 
@@ -623,7 +641,31 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         if (incoming.isEmpty()) throw new IllegalArgumentException("At least one decision is required");
         Map<UUID, Asset> assets = new HashMap<>();
         inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
-        for (ReviewedChange change : incoming) {
+        for (ReviewedChange change : incoming) validateChange(assets, change);
+        try {
+            validatePaths(inventory.project().sourceRoot(), id);
+            FileReviewedChangeRepository reviews = new FileReviewedChangeRepository(stateDirectory);
+            var previous = reviews.loadLatest(id);
+            List<ReviewedChange> merged = merge(previous.filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
+                    .map(FileReviewedChangeRepository.ReviewSet::changes).orElse(List.of()), incoming);
+            long expected = previous.map(FileReviewedChangeRepository.ReviewSet::revision).orElse(0L);
+            try (Publisher publisher = acquireWriter(id)) {
+                publisher.publish(LogEvent.Level.INFO, "Saving reviewed changes");
+                var saved = reviews.save(inventory, expected, merged);
+                try {
+                    publisher.publish(LogEvent.Level.INFO, "Review revision " + saved.revision() + " committed");
+                } catch (IOException e) {
+                    throw new IOException("Review revision " + saved.revision() + " was committed, but completion logging failed", e);
+                }
+                return saved.changes();
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Cannot save reviews for project " + id + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** Checks one decision against the inventory as {@link #review} does; throws IllegalArgumentException with the reason. */
+    private static void validateChange(Map<UUID, Asset> assets, ReviewedChange change) {
             if (!assets.containsKey(change.assetId())) throw new IllegalArgumentException("Unknown reviewed asset");
             Map<String, String> values = change.values();
             switch (change.kind()) {
@@ -690,14 +732,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                 }
                 default -> throw new UnsupportedOperationException("Review not implemented: " + change.kind());
             }
-        }
-        try {
-            validatePaths(inventory.project().sourceRoot(), id);
-            FileReviewedChangeRepository reviews = new FileReviewedChangeRepository(stateDirectory);
-            var previous = reviews.loadLatest(id);
-            List<ReviewedChange> merged = new ArrayList<>();
-            previous.filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
-                    .ifPresent(set -> merged.addAll(set.changes()));
+    }
+
+    /** Adds decisions to a saved set: a new decision replaces the one in the same slot (for example one category per file). */
+    static List<ReviewedChange> merge(List<ReviewedChange> existing, List<ReviewedChange> incoming) {
+            List<ReviewedChange> merged = new ArrayList<>(existing);
             for (ReviewedChange change : incoming) {
                 merged.removeIf(old -> old.assetId().equals(change.assetId()) && old.kind() == change.kind()
                         && (change.kind() == ReviewedChange.Kind.CATEGORY || change.kind() == ReviewedChange.Kind.EXCLUSION
@@ -712,20 +751,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                                         && Objects.equals(old.values().get("targetAssetId"), change.values().get("targetAssetId"))))));
                 merged.add(change);
             }
-            long expected = previous.map(FileReviewedChangeRepository.ReviewSet::revision).orElse(0L);
-            try (Publisher publisher = acquireWriter(id)) {
-                publisher.publish(LogEvent.Level.INFO, "Saving reviewed changes");
-                var saved = reviews.save(inventory, expected, merged);
-                try {
-                    publisher.publish(LogEvent.Level.INFO, "Review revision " + saved.revision() + " committed");
-                } catch (IOException e) {
-                    throw new IOException("Review revision " + saved.revision() + " was committed, but completion logging failed", e);
-                }
-                return saved.changes();
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException("Cannot save reviews for project " + id + ": " + e.getMessage(), e);
-        }
+            return merged;
     }
 
     private static String requireValue(Map<String, String> values, String key) {
@@ -826,16 +852,13 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             List<ReviewedChange> decisions = latestReviews
                     .filter(set -> set.inventoryRevision() == inventory.project().inventoryRevision())
                     .map(FileReviewedChangeRepository.ReviewSet::changes).orElse(List.of());
-            var preview = previewOrganization(id, inventory.project().inventoryRevision());
-            var compatibility = assessCompatibility(id, target);
-            List<Finding> planFindings = new ArrayList<>(compatibility.findings());
-            planFindings.addAll(conversionChecks(inventory, preview, target));
-            planFindings.addAll(imageChecks(inventory, preview));
+            PlanState state = planState(inventory, target);
+            var preview = state.preview();
+            List<Finding> planFindings = new ArrayList<>(state.checks());
             UUID planId = UUID.randomUUID();
             if (assistant.isPresent()) {
-                // AI proposals are checked by the controller and recorded as findings; commands stay deterministic.
-                planFindings.addAll(new io.github.aiassetmigrate.ai.AIEngine(assistant.get()).plan(inventory, preview,
-                        CopyPlanBuilder.commands(inventory, preview, planId), target));
+                // AI suggestions are checked by the controller and recorded as findings; commands stay deterministic.
+                planFindings.addAll(suggestionFindings(suggest(state, target, assistant.get())));
             }
             if (!loadInventory(id).equals(inventory)) throw new IOException("Inventory changed during planning");
             var draft = CopyPlanBuilder.draft(inventory, decisions, preview, target, root, planId,
@@ -931,6 +954,302 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
         return bytes;
     }
 
+    /**
+     * Everything a plan is checked against, computed once: the inspected references, saved decisions, the organization
+     * preview and the plan checks (compatibility, conversion checks, image decoding).
+     */
+    private record PlanState(InventorySnapshot inventory, MaterialAnalysis.Result references, List<ReviewedChange> saved,
+                             OrganizationPreview.Result preview, List<Finding> checks) {}
+
+    private PlanState planState(InventorySnapshot inventory, TargetProfile target) {
+        UUID id = inventory.project().id();
+        var references = inspectReferences(inventory);
+        List<ReviewedChange> saved = loadReviews(id);
+        var preview = preview(inventory, references, saved);
+        List<Finding> checks = new ArrayList<>(assessCompatibility(id, target).findings());
+        checks.addAll(conversionChecks(inventory, preview, target));
+        checks.addAll(imageChecks(inventory, preview));
+        return new PlanState(inventory, references, saved, preview, checks);
+    }
+
+    @Override public PlanSuggestions suggestPlanSteps(UUID id, TargetProfile target, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        Objects.requireNonNull(target, "target");
+        Objects.requireNonNull(assistant, "assistant");
+        InventorySnapshot inventory = loadInventory(id);
+        if (!supportedTargets().contains(target)) throw new IllegalArgumentException("Unknown target profile or version: " + target);
+        PlanSuggestions suggestions = suggest(planState(inventory, target), target, assistant);
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed while preparing suggestions; retry");
+        return suggestions;
+    }
+
+    @Override public BlockerFixes.Proposal checkDecisions(UUID id, long inventoryRevision, Optional<TargetProfile> target,
+                                                          List<BlockerFixes.Fix> candidates) {
+        Objects.requireNonNull(target, "target");
+        List<BlockerFixes.Fix> chosen = List.copyOf(candidates);
+        InventorySnapshot inventory = loadInventory(id);
+        if (inventory.project().inventoryRevision() != inventoryRevision) {
+            throw new IllegalStateException("The project was rescanned; check the decisions again");
+        }
+        if (target.isPresent() && !supportedTargets().contains(target.get())) {
+            throw new IllegalArgumentException("Unknown target profile or version: " + target.get());
+        }
+        PlanState state;
+        if (target.isPresent()) {
+            state = planState(inventory, target.get());
+        } else {
+            var references = inspectReferences(inventory);
+            List<ReviewedChange> saved = loadReviews(id);
+            var preview = preview(inventory, references, saved);
+            List<Finding> checks = new ArrayList<>(imageChecks(inventory, preview));
+            state = new PlanState(inventory, references, saved, preview, checks);
+        }
+        var checked = check(state, target, chosen);
+        if (!loadInventory(id).equals(inventory)) throw new IllegalStateException("Inventory changed while checking decisions; retry");
+        return checked;
+    }
+
+    private PlanSuggestions suggest(PlanState state, TargetProfile target, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        InventorySnapshot inventory = state.inventory();
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        Map<UUID, String> outputs = new HashMap<>();
+        Map<UUID, Map<String, String>> conversions = new HashMap<>();
+        for (var entry : state.preview().entries()) {
+            if (!entry.excluded()) entry.destination().ifPresent(destination -> outputs.put(entry.assetId(), destination));
+            if (!entry.conversion().isEmpty()) conversions.put(entry.assetId(), entry.conversion());
+        }
+        Map<UUID, Set<String>> issues = new HashMap<>();
+        for (Finding finding : state.checks()) {
+            // Every asset carries CONTENT_UNVERIFIED; it says nothing about one file.
+            if (finding.severity() == Finding.Severity.INFO || finding.code().equals("CONTENT_UNVERIFIED")) continue;
+            finding.assetId().ifPresent(asset -> issues.computeIfAbsent(asset, ignored -> new java.util.TreeSet<>()).add(finding.code()));
+        }
+        for (var finding : state.preview().findings()) {
+            finding.assetId().ifPresent(asset -> issues.computeIfAbsent(asset, ignored -> new java.util.TreeSet<>()).add(finding.code()));
+        }
+        var context = new io.github.aiassetmigrate.ai.AIEngine.StepContext(target, inventory.project().assets(), outputs,
+                conversions, issues, traits(inventory), state.references().references(), CompatibilityEngine.notes(target));
+        var proposals = new io.github.aiassetmigrate.ai.AIEngine(assistant).proposeSteps(context);
+        List<BlockerFixes.Fix> candidates = proposals.proposals().stream().map(proposal -> toFix(proposal, assets)).toList();
+        BlockerFixes.Proposal checked = check(state, Optional.of(target), candidates);
+        List<Finding> findings = new ArrayList<>(proposals.findings());
+        if (!candidates.isEmpty()) {
+            findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.INFO, "AI_PLAN_CHECKED",
+                    checked.fixes().size() + " of " + candidates.size() + " AI suggestion(s) passed the program's checks"
+                            + (checked.unfixable().isEmpty() ? "" : "; " + checked.unfixable().size() + " were dropped")));
+        }
+        return new PlanSuggestions(target, checked, findings);
+    }
+
+    private static BlockerFixes.Fix toFix(io.github.aiassetmigrate.ai.AIEngine.StepProposal proposal, Map<UUID, Asset> assets) {
+        UUID asset = proposal.assetId();
+        String path = PortablePath.of(assets.get(asset).relativePath());
+        String why = proposal.reason().map(reason -> " (AI: " + reason + ")").orElse(" (suggested by AI)");
+        Instant now = Instant.now();
+        return switch (proposal.kind()) {
+            case CONVERT -> {
+                Map<String, String> values = new java.util.LinkedHashMap<>();
+                String format = io.github.aiassetmigrate.conversion.Converters.normalizeFormat(proposal.values().get("format"));
+                values.put("format", format == null ? proposal.values().get("format") : format);
+                if (proposal.values().containsKey("background")) values.put("background", proposal.values().get("background"));
+                yield new BlockerFixes.Fix("AI_CONVERSION", Optional.of(asset), "Convert " + path + " to " + values.get("format")
+                        + (values.containsKey("background") ? " on a " + values.get("background") + " background" : "") + why,
+                        List.of(new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.CONVERSION,
+                                ReviewedChange.Decision.ACCEPTED, values, now)), Set.of(), BlockerFixes.Source.AI, false);
+            }
+            case EXCLUDE -> new BlockerFixes.Fix("AI_EXCLUSION", Optional.of(asset), "Leave " + path + " out of the migration" + why,
+                    List.of(new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.EXCLUSION, ReviewedChange.Decision.ACCEPTED,
+                            Map.of("reason", "Left out on an AI suggestion" + proposal.reason().map(r -> ": " + r).orElse("")), now)),
+                    Set.of(), BlockerFixes.Source.AI, false);
+            case FIX_REFERENCE -> {
+                UUID target = UUID.fromString(proposal.values().get("targetAssetId"));
+                String reference = proposal.values().get("reference");
+                yield new BlockerFixes.Fix("AI_REFERENCE_FIX", Optional.of(asset), "Point '" + reference + "' in " + path + " to "
+                        + PortablePath.of(assets.get(target).relativePath()) + why,
+                        List.of(new ReviewedChange(UUID.randomUUID(), asset, ReviewedChange.Kind.RELATIONSHIP, ReviewedChange.Decision.ACCEPTED,
+                                Map.of("targetAssetId", target.toString(), "reference", reference), now)), Set.of(), BlockerFixes.Source.AI, false);
+            }
+        };
+    }
+
+    /**
+     * The program's checks for proposed decisions. A fix is dropped, with the reason, when a decision breaks a review
+     * rule, leaves out a file that nothing blocks, would make the organization preview block (a destination clash, a
+     * reference to a file left out), does not resolve the reference it corrects, or fails the converter's own check
+     * on the exact input the run would use. Fixes that change nothing are left out silently, and of two fixes for the
+     * same decision only the first is kept. Conversion warnings (for example GLB needing glTFast in Unity) are added
+     * to the description so the user sees them before accepting.
+     */
+    private BlockerFixes.Proposal check(PlanState state, Optional<TargetProfile> target, List<BlockerFixes.Fix> candidates) {
+        InventorySnapshot inventory = state.inventory();
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        Set<String> currentPreview = new HashSet<>();
+        state.preview().findings().forEach(finding -> currentPreview.add(previewKey(finding)));
+        Map<UUID, Set<String>> blockers = new HashMap<>();
+        for (Finding finding : state.checks()) {
+            if (finding.severity() == Finding.Severity.ERROR || finding.severity() == Finding.Severity.UNKNOWN) {
+                finding.assetId().ifPresent(asset -> blockers.computeIfAbsent(asset, ignored -> new HashSet<>()).add(finding.code()));
+            }
+        }
+        state.preview().findings().forEach(finding -> finding.assetId()
+                .ifPresent(asset -> blockers.computeIfAbsent(asset, ignored -> new HashSet<>()).add(finding.code())));
+        Set<String> broken = new HashSet<>();
+        for (AssetReference reference : state.references().references()) {
+            if (reference.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED) {
+                broken.add(reference.ownerAssetId() + "\u0000" + reference.originalText());
+            }
+        }
+        Set<String> currentConversionErrors = new HashSet<>();
+        if (target.isPresent()) {
+            for (Finding finding : state.checks()) {
+                if (finding.code().equals("CONVERSION_CHECK_FAILED")) currentConversionErrors.add(finding.assetId() + "|" + finding.message());
+            }
+        }
+        List<BlockerFixes.Fix> passed = new ArrayList<>();
+        List<String> dropped = new ArrayList<>();
+        Map<String, Map<String, String>> taken = new HashMap<>();
+        for (BlockerFixes.Fix fix : candidates) {
+            String label = fix.description();
+            if (!fix.leaveOut().isEmpty()) {
+                dropped.add(label + ": leaving files out of the scan is only offered by Fix blockers");
+                continue;
+            }
+            String problem = null;
+            List<ReviewedChange> effective = new ArrayList<>();
+            for (ReviewedChange change : fix.changes()) {
+                try {
+                    validateChange(assets, change);
+                } catch (IllegalArgumentException | UnsupportedOperationException invalid) {
+                    problem = invalid.getMessage();
+                    break;
+                }
+                if (state.saved().stream().anyMatch(saved -> saved.assetId().equals(change.assetId()) && saved.kind() == change.kind()
+                        && saved.decision() == change.decision() && saved.values().equals(change.values()))) continue;
+                String reference = change.values().get("reference");
+                if ((change.kind() == ReviewedChange.Kind.RELATIONSHIP || change.kind() == ReviewedChange.Kind.MATERIAL_MAPPING)
+                        && reference != null && !broken.contains(change.assetId() + "\u0000" + reference)) continue;
+                if (change.kind() == ReviewedChange.Kind.EXCLUSION && change.decision() == ReviewedChange.Decision.ACCEPTED
+                        && blockers.getOrDefault(change.assetId(), Set.of()).isEmpty()) {
+                    problem = "nothing blocks " + PortablePath.of(assets.get(change.assetId()).relativePath())
+                            + ", so leaving it out would lose a usable file";
+                    break;
+                }
+                effective.add(change);
+            }
+            if (problem != null) {
+                dropped.add(label + ": " + problem);
+                continue;
+            }
+            if (effective.isEmpty()) continue; // nothing would change
+            Set<String> slots = new HashSet<>();
+            effective.forEach(change -> slots.add(slot(change)));
+            // The same decision from two sources is offered once; a different one for the same slot is dropped.
+            if (effective.stream().allMatch(change -> change.values().equals(taken.get(slot(change))))) continue;
+            if (slots.stream().anyMatch(taken::containsKey)) {
+                dropped.add(label + ": another suggestion already decides this for the same file");
+                continue;
+            }
+            List<ReviewedChange> merged = merge(state.saved(), effective);
+            OrganizationPreview.Result simulated = preview(inventory, state.references(), merged);
+            Optional<OrganizationPreview.Finding> blocker = simulated.findings().stream()
+                    .filter(finding -> !currentPreview.contains(previewKey(finding))).findFirst();
+            if (blocker.isPresent()) {
+                dropped.add(label + ": it would block the plan (" + blocker.get().assetId().map(assets::get)
+                        .map(asset -> PortablePath.of(asset.relativePath()) + ": ").orElse("") + blocker.get().message() + ")");
+                continue;
+            }
+            for (ReviewedChange change : effective) {
+                String reference = change.values().get("reference");
+                if (reference != null && simulated.findings().stream().anyMatch(finding -> finding.code().equals("UNRESOLVED_REFERENCE")
+                        && finding.assetId().equals(Optional.of(change.assetId()))
+                        && finding.message().equals(OrganizationPreview.UNRESOLVED_PREFIX + reference))) {
+                    problem = "the reference would still not resolve";
+                }
+            }
+            List<String> notes = new ArrayList<>();
+            if (problem == null && target.isPresent() && effective.stream().anyMatch(change -> change.kind() == ReviewedChange.Kind.CONVERSION)) {
+                Set<UUID> converted = new HashSet<>();
+                effective.stream().filter(change -> change.kind() == ReviewedChange.Kind.CONVERSION).forEach(change -> converted.add(change.assetId()));
+                for (Finding finding : conversionChecks(inventory, simulated, target.get())) {
+                    if (finding.severity() == Finding.Severity.ERROR
+                            && !currentConversionErrors.contains(finding.assetId() + "|" + finding.message())) {
+                        problem = "the converter's check fails: " + finding.message();
+                        break;
+                    }
+                    if (finding.severity() == Finding.Severity.WARNING && finding.assetId().filter(converted::contains).isPresent()
+                            && !finding.code().equals("MODEL_CONVERSION_FIDELITY")) {
+                        notes.add(finding.message());
+                    }
+                }
+            }
+            if (problem != null) {
+                dropped.add(label + ": " + problem);
+                continue;
+            }
+            effective.forEach(change -> taken.put(slot(change), change.values()));
+            passed.add(notes.isEmpty() ? fix : new BlockerFixes.Fix(fix.code(), fix.assetId(), label + ". Note: "
+                    + String.join(" ", notes), fix.changes(), fix.leaveOut(), fix.source(), fix.recommended()));
+        }
+        return new BlockerFixes.Proposal(inventory.project().id(), inventory.project().inventoryRevision(), passed, dropped);
+    }
+
+    private static String previewKey(OrganizationPreview.Finding finding) {
+        return finding.code() + "|" + finding.assetId().map(UUID::toString).orElse("") + "|" + finding.message();
+    }
+
+    /** The decision a change occupies, as {@link #merge} replaces them. */
+    private static String slot(ReviewedChange change) {
+        String detail = switch (change.kind()) {
+            case RELATIONSHIP -> change.values().containsKey("reference") ? "ref:" + change.values().get("reference")
+                    : "target:" + change.values().get("targetAssetId");
+            case MATERIAL_MAPPING -> "ref:" + change.values().get("reference");
+            default -> "";
+        };
+        return change.assetId() + "|" + change.kind() + "|" + detail;
+    }
+
+    /** AI plan suggestions as non-blocking plan findings, each saying how to apply it. */
+    private static List<Finding> suggestionFindings(PlanSuggestions suggestions) {
+        List<Finding> findings = new ArrayList<>(suggestions.findings());
+        for (BlockerFixes.Fix fix : suggestions.proposal().fixes()) {
+            String review = fix.changes().stream().map(change -> "review --asset " + change.assetId() + " --kind " + change.kind()
+                    + " --decision " + change.decision() + new java.util.TreeMap<>(change.values()).entrySet().stream()
+                    .map(e -> " --value " + e.getKey() + "=" + e.getValue()).collect(java.util.stream.Collectors.joining()))
+                    .collect(java.util.stream.Collectors.joining("; "));
+            findings.add(new Finding(UUID.randomUUID(), fix.assetId(), Optional.empty(), Finding.Severity.INFO, "AI_PLAN_PROPOSAL",
+                    "AI suggests: " + fix.description() + ". Not applied: accept it under AI suggestions in the Plan step, or save it ("
+                            + review + ") and create a new plan"));
+        }
+        for (String line : suggestions.proposal().unfixable()) {
+            findings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.INFO,
+                    "AI_PLAN_PROPOSAL_DROPPED", "Dropped by the program's checks: " + line));
+        }
+        return findings;
+    }
+
+    /**
+     * Facts measured from the files for AI context, never their contents: whether each PNG or JPEG texture has
+     * transparency. Textures that cannot be read or decoded get no trait (their plan findings say why).
+     */
+    private static Map<UUID, Set<String>> traits(InventorySnapshot inventory) {
+        Map<UUID, Set<String>> traits = new HashMap<>();
+        Path root = inventory.project().sourceRoot();
+        int read = 0;
+        for (Asset asset : inventory.project().assets()) {
+            if (asset.type() != Asset.Type.TEXTURE || read >= io.github.aiassetmigrate.ai.AIEngine.MAX_ASSETS) continue;
+            String format = asset.metadata().getOrDefault(Asset.FORMAT, "");
+            if (!Set.of("png", "jpg", "jpeg").contains(format)) continue;
+            read++;
+            byte[] bytes;
+            try { bytes = verifiedSource(root, asset); }
+            catch (IOException unreadable) { continue; }
+            io.github.aiassetmigrate.conversion.TextureConverter.transparency(bytes)
+                    .ifPresent(transparent -> traits.put(asset.id(), Set.of(transparent ? "transparent" : "opaque")));
+        }
+        return traits;
+    }
+
     @Override public MigrationPlan loadPlan(UUID planId) {
         ensureOpen();
         try {
@@ -1018,7 +1337,14 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     private InventorySnapshot inspectedInventory(InventorySnapshot inventory) throws IOException {
         var analysis = inspectReferences(inventory);
-        if (analysis.truncated() || analysis.files().stream().anyMatch(f -> f.status() != MaterialAnalysis.Inspection.VERIFIED)) {
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        // An FBX the reader could not read (its fingerprint matched) or too large to read was acknowledged or
+        // excluded before approval, as uninspected FBX always were; a changed source still stops the run.
+        java.util.function.Predicate<MaterialAnalysis.FileInspection> acceptable = f -> f.status() == MaterialAnalysis.Inspection.VERIFIED
+                || (MaterialAnalysis.fbx(assets.get(f.assetId())) && (f.status() == MaterialAnalysis.Inspection.UNREADABLE
+                        || f.status() == MaterialAnalysis.Inspection.BUDGET_EXCEEDED));
+        if (analysis.truncated() || !analysis.files().stream().allMatch(acceptable)) {
             throw new IOException("Reference inspection is incomplete or source files changed");
         }
         return new InventorySnapshot(inventory.schemaVersion(), inventory.inspectionVersion(), inventory.project(),
@@ -1120,7 +1446,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             return new CommandResult("The request could not be interpreted; no action was taken. Rephrase it or use the explicit commands.",
                     Optional.empty(), interpretation.findings());
         }
-        return new CommandDispatcher(this).dispatch(id, interpretation.intent().get(), interpretation.findings());
+        return new CommandDispatcher(this, assistant, request).dispatch(id, interpretation.intent().get(), interpretation.findings());
     }
 
     private static void requireRequest(String request) {

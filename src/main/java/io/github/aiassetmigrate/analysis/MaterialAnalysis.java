@@ -24,7 +24,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Read-only, conservative OBJ/MTL analysis. Content is supplied by the caller, never opened here. */
+/**
+ * Read-only, conservative OBJ/MTL analysis, plus the texture references of FBX models read with the built-in
+ * FBX reader when it is available. Content is supplied by the caller, never opened here.
+ */
 public final class MaterialAnalysis {
     private MaterialAnalysis() {}
 
@@ -39,7 +42,8 @@ public final class MaterialAnalysis {
         public static Limits defaults() { return new Limits(1000, 1024 * 1024, 32L * 1024 * 1024, 100000); }
     }
 
-    public enum Inspection { VERIFIED, UNAVAILABLE, BUDGET_EXCEEDED, FINGERPRINT_MISMATCH, INVALID_TEXT }
+    /** UNREADABLE: the built-in FBX reader could not read the model (damaged, or an unsupported FBX version). */
+    public enum Inspection { VERIFIED, UNAVAILABLE, BUDGET_EXCEEDED, FINGERPRINT_MISMATCH, INVALID_TEXT, UNREADABLE }
     public enum MappingStatus { RESOLVED, MISSING, AMBIGUOUS, UNVERIFIED }
     public record FileInspection(UUID assetId, Inspection status) {}
     public record Mapping(UUID modelId, String materialName, MappingStatus status, Optional<UUID> materialAssetId) {}
@@ -52,11 +56,22 @@ public final class MaterialAnalysis {
         }
     }
 
-    /** True for the OBJ models and MTL materials whose references this analysis can inspect. */
+    /** True for the OBJ models and MTL materials whose references this analysis can inspect (and rewrite). */
     public static boolean inspectable(Asset asset) {
         String name = asset.relativePath().getFileName().toString().toLowerCase(Locale.ROOT);
         return (asset.type() == Asset.Type.MODEL && name.endsWith(".obj"))
                 || (asset.type() == Asset.Type.MATERIAL && name.endsWith(".mtl"));
+    }
+
+    /** True for an FBX model. Its references are read (when the reader is available) but can never be rewritten. */
+    public static boolean fbx(Asset asset) {
+        return asset.type() == Asset.Type.MODEL
+                && asset.relativePath().getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".fbx");
+    }
+
+    /** True for an FBX model this analysis reads with the built-in FBX reader. */
+    public static boolean readableFbx(Asset asset) {
+        return fbx(asset) && io.github.aiassetmigrate.conversion.FbxReader.available();
     }
 
     /** Results describe this snapshot only and are not reviewed changes or migration approval. */
@@ -94,6 +109,7 @@ public final class MaterialAnalysis {
                 String name = asset.relativePath().toString().toLowerCase(Locale.ROOT);
                 if ((asset.type() == Asset.Type.MODEL && name.endsWith(".obj"))
                         || (asset.type() == Asset.Type.MATERIAL && name.endsWith(".mtl"))) inspect(asset, name.endsWith(".obj"));
+                else if (readableFbx(asset)) inspectFbx(asset);
             }
             for (Asset model : assets) {
                 Parsed obj = parsed.get(model.id());
@@ -162,6 +178,40 @@ public final class MaterialAnalysis {
                         for (String token : value.split("\\s+")) addReference(result, AssetReference.Kind.MATERIAL_LIBRARY, token);
                     } else addReference(result, obj ? AssetReference.Kind.MATERIAL_LIBRARY : AssetReference.Kind.TEXTURE, value);
                 }
+            }
+        }
+
+        /**
+         * Reads an FBX with the built-in reader and records its external texture files as TEXTURE references.
+         * FBX files are read up to the reader's own limit and do not use the text byte budget; they still
+         * count toward the file and record limits.
+         */
+        void inspectFbx(Asset asset) {
+            Inspection status;
+            byte[] data = null;
+            if (files.size() >= limits.maxFiles()) {
+                status = Inspection.BUDGET_EXCEEDED; truncated = true;
+            } else {
+                int cap = io.github.aiassetmigrate.conversion.FbxReader.MAX_BYTES;
+                try {
+                    data = content.read(asset, cap);
+                    if (data == null) status = Inspection.UNAVAILABLE;
+                    else if (data.length > cap) { status = Inspection.BUDGET_EXCEEDED; data = null; }
+                    else status = hash(data).equals(asset.fingerprint()) ? Inspection.VERIFIED : Inspection.FINGERPRINT_MISMATCH;
+                } catch (Exception e) { status = Inspection.UNAVAILABLE; }
+            }
+            io.github.aiassetmigrate.conversion.FbxReader.Result read = null;
+            if (status == Inspection.VERIFIED) {
+                try { read = io.github.aiassetmigrate.conversion.FbxReader.read(data); }
+                catch (java.io.IOException e) { status = Inspection.UNREADABLE; }
+            }
+            files.add(new FileInspection(asset.id(), status));
+            if (read == null) return;
+            for (String path : read.textureFiles()) {
+                if (!reserve()) break;
+                AssetReference ref = resolve(asset, AssetReference.Kind.TEXTURE, path);
+                references.add(ref);
+                textures.add(new TextureBinding(Optional.empty(), ref));
             }
         }
 

@@ -9,7 +9,11 @@ import io.github.aiassetmigrate.domain.MigrationRun;
 import io.github.aiassetmigrate.domain.PlanStatus;
 import io.github.aiassetmigrate.domain.PortablePath;
 import io.github.aiassetmigrate.domain.Report;
+import io.github.aiassetmigrate.domain.ReviewedChange;
 import io.github.aiassetmigrate.domain.StepStatus;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
@@ -29,13 +33,23 @@ import java.util.stream.Collectors;
  * operations the explicit controls use. It has no path to approve, migrate or review; parameters
  * from the model are untrusted and checked here, and a missing or invalid one becomes a
  * clarification instead of a guess. Operation failures are returned, not thrown.
+ *
+ * <p>PREPARE makes the agent the operator (Agent.md section 1.1): the model chooses read-only tools in
+ * sequence through {@link AIEngine#operate}, and what they find becomes one bundle of proposed decisions,
+ * checked by the program, which the user confirms before anything is saved.
  */
 final class CommandDispatcher {
     private static final int MAX_LISTED = 10;
+    private static final int MAX_OBSERVED = 40;
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
     private final AssetManager manager;
+    private final io.github.aiassetmigrate.ai.LLMClient assistant;
+    private final String request;
 
-    CommandDispatcher(AssetManager manager) {
+    CommandDispatcher(AssetManager manager, io.github.aiassetmigrate.ai.LLMClient assistant, String request) {
         this.manager = Objects.requireNonNull(manager, "manager");
+        this.assistant = Objects.requireNonNull(assistant, "assistant");
+        this.request = Objects.requireNonNull(request, "request");
     }
 
     AssetManager.CommandResult dispatch(UUID project, AIEngine.Intent intent, List<Finding> interpretation) {
@@ -53,6 +67,7 @@ final class CommandDispatcher {
                 case SHOW_RUN -> showRun(project, intent, findings);
                 case VALIDATE -> validate(project, intent, findings);
                 case HISTORY -> history(project, findings);
+                case PREPARE -> prepare(project, intent, findings);
                 case CLARIFY -> clarify(intent.message(), findings);
                 case UNSUPPORTED -> {
                     findings.add(finding(Finding.Severity.WARNING, "COMMAND_UNSUPPORTED", "No action was taken"));
@@ -192,6 +207,230 @@ final class CommandDispatcher {
         reports.reversed().stream().limit(MAX_LISTED).forEach(r -> text.append("\n  ").append(r.createdAt()).append(' ')
                 .append(r.validationStatus()).append(" run ").append(r.runId()).append(" (report ").append(r.id()).append(')'));
         return result(text.toString(), findings);
+    }
+
+    // ---------------------------------------------------------------- PREPARE: the agent as operator
+
+    /** What the operator's tools gathered for the bundle. */
+    private static final class Gathered {
+        final Map<AssetManager.AnalysisKind, AssetManager.AnalysisResult> analyses = new java.util.EnumMap<>(AssetManager.AnalysisKind.class);
+        AssetManager.PlanSuggestions plan;
+    }
+
+    private AssetManager.CommandResult prepare(UUID project, AIEngine.Intent intent, List<Finding> findings) {
+        Optional<AssetManager.TargetProfile> target = target(intent);
+        if (target.isEmpty()) return clarify("Which engine should the project be prepared for? Supported: " + targets() + ".", findings);
+        Path output = null;
+        String outputText = intent.parameters().get("output");
+        try { if (outputText != null) output = Path.of(outputText); } catch (InvalidPathException e) { output = null; }
+        if (outputText != null && (output == null || !output.isAbsolute())) {
+            return clarify("Which output folder? Give an absolute path to an existing folder outside the source, or leave it out.", findings);
+        }
+        InventorySnapshot inventory = manager.loadInventory(project);
+        long revision = inventory.project().inventoryRevision();
+        Map<UUID, String> paths = new HashMap<>();
+        inventory.project().assets().forEach(asset -> paths.put(asset.id(), PortablePath.of(asset.relativePath())));
+        Gathered gathered = new Gathered();
+        AIEngine.Toolbox tools = (tool, parameters) -> {
+            try {
+                return observe(project, target.get(), revision, tool, parameters, paths, gathered);
+            } catch (RuntimeException e) {
+                findings.add(finding(Finding.Severity.WARNING, "COMMAND_FAILED", tool + " failed: " + message(e)));
+                throw e;
+            }
+        };
+        AIEngine.Operation operation = new AIEngine(assistant).operate(request, target.get(), tools);
+        findings.addAll(operation.findings());
+
+        // Target-aware plan suggestions first, so an analysis suggestion for the same decision is the one dropped.
+        List<BlockerFixes.Fix> candidates = new ArrayList<>();
+        if (gathered.plan != null) {
+            candidates.addAll(gathered.plan.proposal().fixes());
+            findings.addAll(gathered.plan.findings());
+        }
+        candidates.addAll(fromAnalyses(gathered.analyses, paths));
+        BlockerFixes.Proposal decisions = candidates.isEmpty()
+                ? new BlockerFixes.Proposal(project, revision, List.of(), List.of())
+                : manager.checkDecisions(project, revision, target, candidates);
+        List<String> dropped = new ArrayList<>(decisions.unfixable());
+        if (gathered.plan != null) dropped.addAll(0, gathered.plan.proposal().unfixable());
+        decisions = new BlockerFixes.Proposal(project, revision, decisions.fixes(), dropped);
+
+        StringBuilder text = new StringBuilder("Prepared for ").append(target.get().id()).append(' ').append(target.get().version())
+                .append(": the agent ran ").append(operation.steps().isEmpty() ? "no tools" : operation.steps().stream()
+                        .map(step -> step.tool().name().toLowerCase(Locale.ROOT).replace('_', ' ')
+                                + (step.parameters().containsKey("kind") ? " " + step.parameters().get("kind").toLowerCase(Locale.ROOT) : "")
+                                + (step.ran() ? "" : " (not run)"))
+                        .collect(Collectors.joining(", "))).append('.');
+        operation.message().ifPresent(note -> text.append("\nAgent: ").append(note));
+        if (decisions.fixes().isEmpty()) {
+            text.append("\nNo decisions to propose").append(dropped.isEmpty() ? "." : "; " + dropped.size() + " suggestion(s) failed the checks.");
+        } else {
+            text.append("\n").append(decisions.fixes().size()).append(" proposed decision(s), checked by the program. Nothing is saved")
+                    .append(" until you confirm them:");
+            decisions.fixes().stream().limit(MAX_LISTED).forEach(fix -> text.append("\n  ")
+                    .append(fix.source() == BlockerFixes.Source.AI ? "[AI] " : "[rules] ").append(fix.description()));
+            if (decisions.fixes().size() > MAX_LISTED) text.append("\n  ...and ").append(decisions.fixes().size() - MAX_LISTED).append(" more");
+            if (!dropped.isEmpty()) text.append("\n").append(dropped.size()).append(" other suggestion(s) failed the checks and are not offered.");
+        }
+        Optional<MigrationPlan> draft = Optional.empty();
+        if (output != null) {
+            try {
+                MigrationPlan plan = manager.createPlan(project, target.get(), output);
+                draft = Optional.of(plan);
+                long blocking = plan.findings().stream().filter(f -> f.severity() == Finding.Severity.ERROR
+                        || f.severity() == Finding.Severity.UNKNOWN).count();
+                text.append("\nDraft plan ").append(plan.id()).append(" (version ").append(plan.version()).append(", ")
+                        .append(blocking).append(" blocking finding(s)) shows the project as it is now");
+                text.append(decisions.fixes().isEmpty() ? "." : "; confirming the decisions creates a new plan.");
+            } catch (RuntimeException e) {
+                findings.add(finding(Finding.Severity.WARNING, "COMMAND_FAILED", "Draft plan failed: " + message(e)));
+            }
+        }
+        text.append("\nNothing was approved or migrated.");
+        return new AssetManager.CommandResult(text.toString(), draft, findings, Optional.of(decisions));
+    }
+
+    /** Runs one operator tool and describes the result with relative paths, counts and codes only. */
+    private JsonNode observe(UUID project, AssetManager.TargetProfile target, long revision, AIEngine.Tool tool,
+                             Map<String, String> parameters, Map<UUID, String> paths, Gathered gathered) {
+        ObjectNode result = JSON.createObjectNode();
+        switch (tool) {
+            case INVENTORY -> {
+                InventorySnapshot inventory = manager.loadInventory(project);
+                requireRevision(inventory.project().inventoryRevision(), revision);
+                result.put("assets", inventory.project().assets().size()).put("scan", inventory.scanStatus().name())
+                        .put("coverage", inventory.hasCompleteCoverage() ? "complete" : "partial");
+                ObjectNode types = result.putObject("byType");
+                ObjectNode formats = result.putObject("byFormat");
+                inventory.project().assets().forEach(asset -> {
+                    types.put(asset.type().name(), types.path(asset.type().name()).asInt() + 1);
+                    String format = asset.metadata().getOrDefault(Asset.FORMAT, "unknown");
+                    formats.put(format, formats.path(format).asInt() + 1);
+                });
+                codes(result.putObject("scanFindings"), inventory.findings());
+            }
+            case ANALYZE -> {
+                AssetManager.AnalysisKind kind = AssetManager.AnalysisKind.valueOf(parameters.get("kind"));
+                AssetManager.AnalysisResult analysis = manager.analyze(project, kind, assistant);
+                requireRevision(analysis.inventoryRevision(), revision);
+                gathered.analyses.put(kind, analysis);
+                result.put("kind", kind.name()).put("suggestions", analysis.suggestions().size())
+                        .put("fromAi", analysis.suggestions().stream().filter(s -> s.source() == AssetManager.Source.AI).count());
+                ArrayNode items = result.putArray("items");
+                for (AssetManager.Suggestion suggestion : analysis.suggestions()) {
+                    if (items.size() >= MAX_OBSERVED) break;
+                    ObjectNode item = items.addObject().put("path", paths.getOrDefault(suggestion.assetId(), "?"))
+                            .put("source", suggestion.source().name());
+                    boolean link = kind == AssetManager.AnalysisKind.RELATIONSHIPS || kind == AssetManager.AnalysisKind.MATERIALS;
+                    item.put("value", link ? uuid(suggestion.proposedValue()).map(paths::get).orElse("?") : suggestion.proposedValue());
+                    suggestion.reference().ifPresent(reference -> item.put("reference", reference));
+                }
+                codes(result.putObject("findings"), analysis.findings());
+            }
+            case CHECK_COMPATIBILITY -> {
+                AssetManager.CompatibilityResult compatibility = manager.assessCompatibility(project, target);
+                requireRevision(compatibility.inventoryRevision(), revision);
+                Map<String, List<Finding>> byCode = new java.util.TreeMap<>();
+                compatibility.findings().stream().filter(f -> f.severity() != Finding.Severity.INFO && !f.code().equals("CONTENT_UNVERIFIED"))
+                        .forEach(f -> byCode.computeIfAbsent(f.code(), c -> new ArrayList<>()).add(f));
+                ArrayNode issues = result.putArray("issues");
+                byCode.forEach((code, list) -> {
+                    ObjectNode issue = issues.addObject().put("code", code).put("severity", list.getFirst().severity().name())
+                            .put("count", list.size());
+                    ArrayNode examples = issue.putArray("examplePaths");
+                    list.stream().flatMap(f -> f.sourceRelativePath().stream()).map(PortablePath::of).distinct().limit(3).forEach(examples::add);
+                });
+            }
+            case PREVIEW_ORGANIZATION -> {
+                var preview = manager.previewOrganization(project, revision);
+                long excluded = preview.entries().stream().filter(e -> e.excluded()).count();
+                result.put("outputs", preview.entries().size() - excluded).put("leftOut", excluded).put("blocked", preview.blocked());
+                ArrayNode blockers = result.putArray("blockers");
+                preview.findings().stream().limit(MAX_OBSERVED).forEach(f -> blockers.addObject().put("code", f.code())
+                        .put("path", f.assetId().map(paths::get).orElse("")));
+            }
+            case SUGGEST_PLAN_STEPS -> {
+                AssetManager.PlanSuggestions plan = manager.suggestPlanSteps(project, target, assistant);
+                requireRevision(plan.proposal().inventoryRevision(), revision);
+                gathered.plan = plan;
+                ArrayNode passed = result.putArray("passedChecks");
+                plan.proposal().fixes().stream().limit(MAX_OBSERVED).forEach(fix -> passed.add(fix.description()));
+                ArrayNode failed = result.putArray("failedChecks");
+                plan.proposal().unfixable().stream().limit(MAX_OBSERVED).forEach(failed::add);
+            }
+            case FINISH -> throw new IllegalArgumentException("FINISH is not a tool");
+        }
+        return result;
+    }
+
+    private static void requireRevision(long actual, long expected) {
+        if (actual != expected) throw new IllegalStateException("The project was rescanned while the agent worked; ask again");
+    }
+
+    private static void codes(ObjectNode node, List<Finding> findings) {
+        findings.forEach(f -> node.put(f.code(), node.path(f.code()).asInt() + 1));
+    }
+
+    /**
+     * Proposed decisions from the analyses the operator ran. Where the AI and the rules disagree the AI's suggestion
+     * is taken (it was asked exactly where the rules are unsure); a tie between suggestions of the same source is left
+     * out. Categories come from the AI only (the rules' are shown in Review), and only corrections of broken references
+     * are proposed (the program drops any for a reference that already resolves).
+     */
+    private static List<BlockerFixes.Fix> fromAnalyses(Map<AssetManager.AnalysisKind, AssetManager.AnalysisResult> analyses,
+                                                       Map<UUID, String> paths) {
+        List<BlockerFixes.Fix> fixes = new ArrayList<>();
+        java.time.Instant now = java.time.Instant.now();
+        analyses.forEach((kind, analysis) -> {
+            boolean link = kind == AssetManager.AnalysisKind.RELATIONSHIPS || kind == AssetManager.AnalysisKind.MATERIALS;
+            Map<String, List<AssetManager.Suggestion>> slots = new java.util.LinkedHashMap<>();
+            for (AssetManager.Suggestion suggestion : analysis.suggestions()) {
+                if (link && suggestion.reference().isEmpty()) continue;
+                if (kind == AssetManager.AnalysisKind.CATEGORIES && suggestion.source() != AssetManager.Source.AI) continue;
+                slots.computeIfAbsent(suggestion.assetId() + "|" + suggestion.reference().orElse(""), k -> new ArrayList<>()).add(suggestion);
+            }
+            for (List<AssetManager.Suggestion> group : slots.values()) {
+                List<AssetManager.Suggestion> ai = group.stream().filter(s -> s.source() == AssetManager.Source.AI).toList();
+                List<AssetManager.Suggestion> chosen = ai.isEmpty() ? group : ai;
+                if (chosen.stream().map(AssetManager.Suggestion::proposedValue).distinct().count() != 1) continue;
+                AssetManager.Suggestion pick = chosen.getFirst();
+                if (pick.proposedValue().equals(io.github.aiassetmigrate.analysis.CategoryAnalyzer.UNCATEGORIZED)) continue;
+                String path = paths.getOrDefault(pick.assetId(), pick.assetId().toString());
+                String why = pick.reason().map(r -> " (AI: " + r + ")").orElse(pick.source() == AssetManager.Source.AI ? " (suggested by AI)" : "");
+                ReviewedChange.Kind reviewKind;
+                Map<String, String> values;
+                String description;
+                switch (kind) {
+                    case CATEGORIES -> {
+                        reviewKind = ReviewedChange.Kind.CATEGORY;
+                        values = Map.of("category", pick.proposedValue());
+                        description = "Categorize " + path + " as " + pick.proposedValue();
+                    }
+                    case NAMES -> {
+                        reviewKind = ReviewedChange.Kind.NAME;
+                        values = Map.of("name", pick.proposedValue());
+                        description = "Rename " + path + " to " + pick.proposedValue();
+                    }
+                    case FOLDERS -> {
+                        reviewKind = ReviewedChange.Kind.FOLDER;
+                        values = Map.of("folder", pick.proposedValue());
+                        description = "Put " + path + " in the folder '" + pick.proposedValue() + "'";
+                    }
+                    default -> {
+                        Optional<UUID> target = uuid(pick.proposedValue());
+                        if (target.isEmpty()) continue;
+                        reviewKind = kind == AssetManager.AnalysisKind.MATERIALS ? ReviewedChange.Kind.MATERIAL_MAPPING : ReviewedChange.Kind.RELATIONSHIP;
+                        values = Map.of("targetAssetId", target.get().toString(), "reference", pick.reference().orElseThrow());
+                        description = "Point '" + pick.reference().get() + "' in " + path + " to " + paths.getOrDefault(target.get(), "?");
+                    }
+                }
+                fixes.add(new BlockerFixes.Fix("AGENT_" + kind, Optional.of(pick.assetId()), description + why,
+                        List.of(new ReviewedChange(UUID.randomUUID(), pick.assetId(), reviewKind, ReviewedChange.Decision.ACCEPTED, values, now)),
+                        java.util.Set.of(), pick.source() == AssetManager.Source.AI ? BlockerFixes.Source.AI : BlockerFixes.Source.RULES, false));
+            }
+        });
+        return fixes;
     }
 
     private AssetManager.CommandResult clarify(String question, List<Finding> findings) {

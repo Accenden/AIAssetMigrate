@@ -64,8 +64,9 @@ public final class PlanCommands {
         @Option(names = "--target-version", required = true, paramLabel = "VERSION") String version;
         @Option(names = "--output", required = true, paramLabel = "DIR") Path output;
         @Option(names = "--ai", description = {
-                "Ask the connected ChatGPT account (see 'auth') to propose steps; the controller checks them.",
-                "Proposals are recorded as findings and never change commands or approve the plan."})
+                "Ask the connected ChatGPT account (see 'auth') for conversions, files to leave out and reference fixes",
+                "for the target. The program checks each one; those that pass are listed as AI_PLAN_PROPOSAL findings with",
+                "the review that applies them. They never change commands or approve the plan."})
         boolean ai;
         private final AnalyzeCommand.AssistantFactory assistantFactory;
         public Plan() { this(DefaultAssetManager::new); }

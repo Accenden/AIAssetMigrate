@@ -122,6 +122,18 @@ public final class TextureConverter implements ConversionStrategy {
         }
     }
 
+    /**
+     * Whether a PNG or JPEG has any pixel that is not fully opaque; empty when it cannot be decoded within the
+     * conversion limits. Used to tell the AI which textures cannot become JPG without a background colour.
+     */
+    public static java.util.Optional<Boolean> transparency(byte[] source) {
+        try {
+            return java.util.Optional.of(transparent(decode(source)));
+        } catch (IOException | RuntimeException undecodable) {
+            return java.util.Optional.empty();
+        }
+    }
+
     private static BufferedImage decode(byte[] source) throws IOException {
         try (ImageInputStream input = ImageIO.createImageInputStream(new ByteArrayInputStream(source))) {
             Iterator<ImageReader> readers = input == null ? null : ImageIO.getImageReaders(input);

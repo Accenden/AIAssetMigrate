@@ -194,7 +194,7 @@ public final class OutputValidator {
                 .append(counts.failed()).append(" failed, ").append(counts.unchecked()).append(" not fully checked, ")
                 .append(counts.notProduced()).append(" not produced.");
         if (!completionRecorded) text.append(" The run did not record completion, so step results are unknown.");
-        if (counts.unchecked() > 0) text.append(" Not fully checked is not passed: some formats (such as FBX) cannot be inspected.");
+        if (counts.unchecked() > 0) text.append(" Not fully checked is not passed: some outputs could not be fully inspected.");
         return text.toString();
     }
 
@@ -223,10 +223,11 @@ public final class OutputValidator {
         String extension = extension(output.shown);
         boolean image = extension.equals("png") || extension.equals("jpg") || extension.equals("jpeg");
         boolean glb = extension.equals("glb");
+        boolean fbx = extension.equals("fbx") && output.asset.type() == Asset.Type.MODEL;
         byte[] bytes = null;
         try {
             MessageDigest digest = digest();
-            ByteArrayOutputStream kept = (image || glb) && attributes.size() <= MAX_DECODE_BYTES ? new ByteArrayOutputStream() : null;
+            ByteArrayOutputStream kept = (image || glb || fbx) && attributes.size() <= MAX_DECODE_BYTES ? new ByteArrayOutputStream() : null;
             long total = 0;
             try (InputStream in = Files.newInputStream(output.file, LinkOption.NOFOLLOW_LINKS)) {
                 byte[] buffer = new byte[65536];
@@ -255,6 +256,7 @@ public final class OutputValidator {
         }
         if (image) checkImage(output, extension, bytes);
         else if (glb) checkGlb(output, bytes);
+        else if (fbx && io.github.aiassetmigrate.conversion.FbxReader.available()) checkFbx(output, bytes);
         else if (!text(output)) { // OBJ/MTL text and references are checked together in checkReferences.
             output.add(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", output.shown + ": "
                     + (extension.equals("fbx") ? "FBX contents cannot be inspected" : "no format check exists for ." + extension)
@@ -321,6 +323,46 @@ public final class OutputValidator {
         }
     }
 
+    /**
+     * Reads an FBX output with the built-in FBX reader (the Assimp library used for FBX to GLB conversion):
+     * it must import with at least one mesh, and every image embedded in it must decode. Its external texture
+     * references are checked with the OBJ/MTL references in {@link #checkReferences}. An FBX the reader cannot
+     * read is not checked, rather than failed: the reader does not support every FBX version.
+     */
+    private static void checkFbx(Output output, byte[] bytes) {
+        if (bytes == null) {
+            output.add(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", output.shown + " is too large to read");
+            return;
+        }
+        io.github.aiassetmigrate.conversion.FbxReader.Result read;
+        try {
+            read = io.github.aiassetmigrate.conversion.FbxReader.read(bytes);
+        } catch (IOException e) {
+            output.add(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", output.shown + ": the built-in FBX reader could not "
+                    + "read it (" + message(e) + "); it may be damaged or use an FBX version the reader does not support");
+            return;
+        }
+        int decoded = 0;
+        for (var image : read.embeddedImages()) {
+            String format = image.format().equals("jpeg") ? "jpg" : image.format();
+            if (!format.equals("png") && !format.equals("jpg")) {
+                output.add(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", output.shown + " embeds an image in a format "
+                        + "that is not checked (" + (format.isEmpty() ? "unknown" : format) + ")");
+                continue;
+            }
+            ImageCheck check = inspectImage(image.data(), format);
+            if (check.severity() == null) decoded++;
+            else output.add(check.severity(), check.severity() == Finding.Severity.ERROR ? "OUTPUT_FORMAT_INVALID"
+                    : "OUTPUT_FORMAT_UNCHECKED", output.shown + ": an embedded image " + check.message());
+        }
+        if (read.rawEmbedded() > 0) {
+            output.add(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", output.shown + " embeds " + read.rawEmbedded()
+                    + " uncompressed image(s), which are not checked");
+        }
+        output.passed.add("FBX read with the built-in reader (" + read.meshes() + " mesh(es)"
+                + (decoded > 0 ? ", " + decoded + " embedded image(s) decode" : "") + ")");
+    }
+
     private static void checkGlb(Output output, byte[] bytes) {
         if (bytes == null) {
             output.add(Finding.Severity.UNKNOWN, "OUTPUT_FORMAT_UNCHECKED", output.shown + " is too large to inspect");
@@ -346,7 +388,7 @@ public final class OutputValidator {
             produced.add(new Asset(output.asset.id(), output.command.relativeOutputPath(), output.asset.type(),
                     output.actualHash, Map.of(Asset.FORMAT, extension(output.shown))));
         }
-        List<Output> inspectable = byAsset.values().stream().filter(OutputValidator::text).toList();
+        List<Output> inspectable = byAsset.values().stream().filter(OutputValidator::referencing).toList();
         if (inspectable.isEmpty()) return;
         Project project = new Project(plan.projectId(), root, 1, produced, Instant.EPOCH);
         InventorySnapshot outputs = new InventorySnapshot(InventorySnapshot.CURRENT_SCHEMA_VERSION,
@@ -389,10 +431,12 @@ public final class OutputValidator {
                         output.add(Finding.Severity.UNKNOWN, "OUTPUT_REFERENCES_UNCHECKED",
                                 "Reference checking exceeded its budget; references in " + output.shown + " were not fully checked");
                     } else if (!output.has(Finding.Severity.ERROR) && !output.has(Finding.Severity.UNKNOWN)) {
-                        output.passed.add("valid UTF-8 text; " + resolved.getOrDefault(output.asset.id(), 0)
-                                + " reference(s) resolve to outputs of this run");
+                        output.passed.add((MaterialAnalysis.fbx(output.asset) ? "" : "valid UTF-8 text; ")
+                                + resolved.getOrDefault(output.asset.id(), 0) + " reference(s) resolve to outputs of this run");
                     }
                 }
+                // Already reported by checkFbx as not checked.
+                case UNREADABLE -> { }
                 case INVALID_TEXT -> output.add(Finding.Severity.ERROR, "OUTPUT_FORMAT_INVALID", output.shown + " is not valid UTF-8 text");
                 case FINGERPRINT_MISMATCH -> output.add(Finding.Severity.ERROR, "OUTPUT_CHANGED", output.shown + " changed during validation");
                 case BUDGET_EXCEEDED -> output.add(Finding.Severity.UNKNOWN, "OUTPUT_REFERENCES_UNCHECKED",
@@ -425,11 +469,17 @@ public final class OutputValidator {
         }
     }
 
-    /** An OBJ model or MTL material at its output path, which the reference analysis parses. */
+    /** An OBJ model or MTL material at its output path, which the reference analysis parses as text. */
     private static boolean text(Output output) {
         String extension = extension(output.shown);
         return (output.asset.type() == Asset.Type.MODEL && extension.equals("obj"))
                 || (output.asset.type() == Asset.Type.MATERIAL && extension.equals("mtl"));
+    }
+
+    /** Outputs whose references are checked: OBJ/MTL text, and FBX models the built-in reader can read. */
+    private static boolean referencing(Output output) {
+        return text(output) || (extension(output.shown).equals("fbx") && output.asset.type() == Asset.Type.MODEL
+                && io.github.aiassetmigrate.conversion.FbxReader.available());
     }
 
     private static boolean present(Path file) {

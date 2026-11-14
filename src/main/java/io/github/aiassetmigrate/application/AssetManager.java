@@ -148,13 +148,38 @@ public interface AssetManager {
     MigrationPlan createPlan(UUID projectId, TargetProfile target, Path outputRoot);
 
     /**
-     * Hybrid F06: as {@link #createPlan(UUID, TargetProfile, Path)}, with steps proposed by the
-     * explicitly supplied model and checked by the controller. Proposals are recorded as non-blocking
-     * findings and never change the plan's commands; a new step needs a review and a new plan.
+     * Hybrid F06: as {@link #createPlan(UUID, TargetProfile, Path)}, plus the checked suggestions of
+     * {@link #suggestPlanSteps(UUID, TargetProfile, io.github.aiassetmigrate.ai.LLMClient)} recorded as non-blocking
+     * AI_PLAN_PROPOSAL findings (and AI_PLAN_PROPOSAL_DROPPED for those the checks rejected). Suggestions never change
+     * the plan's commands; one applies only once the user accepts it and creates a new plan.
      */
     default MigrationPlan createPlan(UUID projectId, TargetProfile target, Path outputRoot,
                                      io.github.aiassetmigrate.ai.LLMClient assistant) {
         throw new UnsupportedOperationException("AI-assisted planning is not supported by this manager");
+    }
+
+    /**
+     * Hybrid F05/F06: asks the explicitly supplied model which changes would make migrating to the target better or
+     * unblock the plan (conversions, leaving out files that cannot be migrated, fixes for broken references). Each
+     * proposal becomes review decisions that the program checks exactly as it checks a plan: converter support and
+     * the converter's own check, image decoding and the organization preview (destinations and references). Those
+     * that pass are returned as AI fixes for the user to accept or reject; the others are listed with the reason.
+     * Nothing is saved; accepted fixes apply through {@link #applyBlockerFixes(UUID, long, List)}. If the model fails,
+     * the result is empty with an AI_UNAVAILABLE finding.
+     */
+    default PlanSuggestions suggestPlanSteps(UUID projectId, TargetProfile target, io.github.aiassetmigrate.ai.LLMClient assistant) {
+        throw new UnsupportedOperationException("AI plan suggestions are not supported by this manager");
+    }
+
+    /**
+     * Checks proposed decisions for the given inventory revision the way AI plan suggestions are checked (review rules,
+     * the organization preview and, with a target, conversion checks) and returns those that pass, plus a line for each
+     * that does not. Decisions that change nothing (already saved, or a correction for a reference that already
+     * resolves) are left out silently. Nothing is saved.
+     */
+    default BlockerFixes.Proposal checkDecisions(UUID projectId, long inventoryRevision, Optional<TargetProfile> target,
+                                                 List<BlockerFixes.Fix> candidates) {
+        throw new UnsupportedOperationException("Checking proposed decisions is not supported by this manager");
     }
 
     /** Loads a saved plan for inspection; status alone is not execution authority. */
@@ -251,6 +276,8 @@ public interface AssetManager {
      * F09: interprets the request with the explicitly supplied model as one allowlisted action and
      * dispatches it through this facade. It can show, analyze, check, preview, draft plans and
      * validate, but never approve, migrate or save reviews; file changes still need an approved plan.
+     * A request to prepare the project for a target lets the model operate: it chooses read-only tools in
+     * sequence and the result carries one bundle of checked, proposed decisions for the user to confirm.
      * Ambiguous requests return a clarification; failures are returned as findings, not thrown.
      */
     default CommandResult command(UUID projectId, String request, io.github.aiassetmigrate.ai.LLMClient assistant) {
@@ -360,10 +387,28 @@ public interface AssetManager {
         }
     }
 
-    record CommandResult(String message, Optional<MigrationPlan> draftPlan, List<Finding> findings) {
+    /**
+     * {@code decisions}: proposed decisions the agent gathered and the program checked, for the user to confirm
+     * (through {@link #applyBlockerFixes(UUID, long, List)}); nothing in it is saved.
+     */
+    record CommandResult(String message, Optional<MigrationPlan> draftPlan, List<Finding> findings,
+                         Optional<BlockerFixes.Proposal> decisions) {
+        public CommandResult(String message, Optional<MigrationPlan> draftPlan, List<Finding> findings) {
+            this(message, draftPlan, findings, Optional.empty());
+        }
         public CommandResult {
             Objects.requireNonNull(message, "message");
             Objects.requireNonNull(draftPlan, "draftPlan");
+            findings = List.copyOf(findings);
+            Objects.requireNonNull(decisions, "decisions");
+        }
+    }
+
+    /** Checked AI suggestions for one target ({@code proposal.fixes()}), the dropped ones with reasons, and AI status findings. */
+    record PlanSuggestions(TargetProfile target, BlockerFixes.Proposal proposal, List<Finding> findings) {
+        public PlanSuggestions {
+            Objects.requireNonNull(target, "target");
+            Objects.requireNonNull(proposal, "proposal");
             findings = List.copyOf(findings);
         }
     }

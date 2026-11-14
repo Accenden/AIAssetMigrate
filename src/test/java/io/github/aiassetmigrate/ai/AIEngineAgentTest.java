@@ -2,7 +2,6 @@ package io.github.aiassetmigrate.ai;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.aiassetmigrate.analysis.OrganizationPreview;
 import io.github.aiassetmigrate.application.AssetManager.TargetProfile;
 import io.github.aiassetmigrate.domain.*;
 import org.junit.jupiter.api.Test;
@@ -90,81 +89,106 @@ class AIEngineAgentTest {
         assertEquals(List.of("AI_NOT_NEEDED"), none.stream().map(Finding::code).toList());
     }
 
-    // ---------------------------------------------------------------- F06
+    // ---------------------------------------------------------------- F05/F06: plan suggestions
 
-    private record Planned(InventorySnapshot inventory, OrganizationPreview.Result preview, List<MigrationCommand> commands,
-                           Asset obj, Asset png, Asset fbx, Asset excluded) {}
+    private record Planned(AIEngine.StepContext context, Asset obj, Asset mtl, Asset png, Asset fbx, Asset broken) {}
 
     private Planned planned() {
-        Asset obj = asset("hero.obj", Asset.Type.MODEL), png = asset("hero.png", Asset.Type.TEXTURE),
-                fbx = asset("crate.fbx", Asset.Type.MODEL), excluded = asset("old.png", Asset.Type.TEXTURE),
-                jpg = asset("hero_alt.jpg", Asset.Type.TEXTURE);
-        var inventory = new InventorySnapshot(1, 1, new Project(UUID.randomUUID(), ROOT, 1, List.of(obj, png, fbx, excluded, jpg), NOW),
-                List.of(), InventorySnapshot.ScanStatus.COMPLETE, NOW, List.of(), List.of());
-        var preview = new OrganizationPreview.Result(inventory.project().id(), 1, List.of(
-                new OrganizationPreview.Entry(obj.id(), obj.relativePath(), Optional.of("hero.obj"), false),
-                new OrganizationPreview.Entry(png.id(), png.relativePath(), Optional.of("hero.png"), false),
-                new OrganizationPreview.Entry(fbx.id(), fbx.relativePath(), Optional.of("crate.fbx"), false),
-                new OrganizationPreview.Entry(excluded.id(), excluded.relativePath(), Optional.empty(), true),
-                new OrganizationPreview.Entry(jpg.id(), jpg.relativePath(), Optional.of("hero_alt.jpg"), false)), List.of());
-        List<MigrationCommand> commands = new ArrayList<>();
-        for (Asset a : List.of(obj, png, fbx, jpg)) {
-            commands.add(new AssetOperationCommand(UUID.randomUUID(), a.id(), MigrationCommand.Operation.COPY,
-                    a.relativePath(), Map.of(), List.of(), Optional.empty()));
-        }
-        return new Planned(inventory, preview, commands, obj, png, fbx, excluded);
+        Asset obj = asset("hero.obj", Asset.Type.MODEL), mtl = asset("hero.mtl", Asset.Type.MATERIAL),
+                png = asset("tex/hero.png", Asset.Type.TEXTURE), fbx = asset("crate.fbx", Asset.Type.MODEL),
+                broken = asset("misc/broken.png", Asset.Type.TEXTURE);
+        var references = List.of(
+                new AssetReference(obj.id(), AssetReference.Kind.MATERIAL_LIBRARY, "hero.mtl", Optional.of(Path.of("hero.mtl")),
+                        AssetReference.ResolutionStatus.RESOLVED),
+                new AssetReference(mtl.id(), AssetReference.Kind.TEXTURE, "hero.png", Optional.of(Path.of("hero.png")),
+                        AssetReference.ResolutionStatus.MISSING));
+        var context = new AIEngine.StepContext(UNITY, List.of(obj, mtl, png, fbx, broken),
+                Map.of(obj.id(), "hero.obj", mtl.id(), "hero.mtl", png.id(), "tex/hero.png", fbx.id(), "crate.fbx", broken.id(), "misc/broken.png"),
+                Map.of(), Map.of(broken.id(), Set.of("SOURCE_IMAGE_INVALID")), Map.of(png.id(), Set.of("transparent")),
+                references, List.of("Unity imports .glb only with the glTFast package."));
+        return new Planned(context, obj, mtl, png, fbx, broken);
     }
 
-    @Test void planProposalsAreCheckedAgainstToolsReviewsAndConflicts() {
+    @Test void stepProposalsAreParsedStrictlyAndSendOnlyMetadata() {
         var p = planned();
-        var added = new AIEngine(replying(prompt -> """
-                {"steps":[
-                  {"assetId":"%s","operation":"COPY","reason":"already engine ready"},
-                  {"assetId":"%s","operation":"CONVERT_TEXTURE","format":"jpg","reason":"smaller"},
-                  {"assetId":"%s","operation":"CONVERT_MODEL","format":"gltf","reason":"modern"},
-                  {"assetId":"%s","operation":"COPY"},
-                  {"assetId":"%s","operation":"COPY"},
-                  {"assetId":"%s","operation":"DELETE_SOURCE"}]}
-                """.formatted(p.obj().id(), p.png().id(), p.fbx().id(), p.excluded().id(), p.obj().id(), p.png().id())))
-                .plan(p.inventory(), p.preview(), p.commands(), UNITY);
-        var codes = byCode(added);
-        assertEquals(1, codes.get("AI_PLAN_STEP").size(), added.toString());
-        assertTrue(codes.get("AI_PLAN_STEP").getFirst().message().contains("AI agrees: COPY hero.obj"));
-        var proposal = codes.get("AI_PLAN_PROPOSAL");
-        assertEquals(1, proposal.size(), added.toString());
-        assertTrue(proposal.getFirst().message().contains("hero.png to jpg (output hero.jpg)")
-                && proposal.getFirst().message().contains("Not applied"), proposal.toString());
-        var rejected = codes.get("AI_PLAN_STEP_REJECTED").stream().map(Finding::message).toList();
-        assertEquals(2, rejected.size(), rejected.toString());
-        assertTrue(rejected.stream().anyMatch(m -> m.contains("crate.fbx") && m.contains("no installed converter")));
-        assertTrue(rejected.stream().anyMatch(m -> m.contains("old.png") && m.contains("excludes")));
-        assertTrue(codes.get("AI_OUTPUT_REJECTED").getFirst().message().startsWith("2 "), "duplicate and unknown operation");
-        assertTrue(codes.get("AI_PLAN_RETAINED").getFirst().message().startsWith("1 "), "hero_alt.jpg had no proposal");
-        assertTrue(added.stream().noneMatch(f -> f.severity() == Finding.Severity.ERROR || f.severity() == Finding.Severity.UNKNOWN),
-                "AI findings never block approval");
-        assertFalse(prompts.getFirst().contains(ROOT.toString()));
+        var result = new AIEngine(replying(prompt -> """
+                {"proposals":[
+                  {"kind":"CONVERT","assetId":"%s","format":"JPG","background":"#ffffff","reason":"smaller"},
+                  {"kind":"exclude","assetId":"%s","reason":"damaged"},
+                  {"kind":"FIX_REFERENCE","assetId":"%s","reference":"hero.png","targetAssetId":"%s","reason":"moved"},
+                  {"kind":"FIX_REFERENCE","assetId":"%s","reference":"hero.png","targetAssetId":"%s"},
+                  {"kind":"FIX_REFERENCE","assetId":"%s","reference":"not-broken.png","targetAssetId":"%s"},
+                  {"kind":"CONVERT","assetId":"%s","format":"glb","background":"white"},
+                  {"kind":"DELETE","assetId":"%s"},
+                  {"kind":"EXCLUDE","assetId":"%s"},
+                  {"kind":"EXCLUDE","assetId":"%s"}]}
+                """.formatted(p.png().id(), p.broken().id(), p.mtl().id(), p.png().id(), p.mtl().id(), p.obj().id(),
+                p.mtl().id(), p.png().id(), p.fbx().id(), p.obj().id(), UUID.randomUUID(), p.broken().id())))
+                .proposeSteps(p.context());
+        assertEquals(List.of(AIEngine.StepKind.CONVERT, AIEngine.StepKind.EXCLUDE, AIEngine.StepKind.FIX_REFERENCE),
+                result.proposals().stream().map(AIEngine.StepProposal::kind).toList(), result.toString());
+        assertEquals(Map.of("format", "jpg", "background", "#FFFFFF"), result.proposals().get(0).values());
+        assertEquals(Map.of("reference", "hero.png", "targetAssetId", p.png().id().toString()), result.proposals().get(2).values());
+        assertEquals(Optional.of("moved"), result.proposals().get(2).reason());
+        // wrong target type, reference that is not broken, bad colour, unknown kind, unknown asset, duplicate
+        assertTrue(byCode(result.findings()).get("AI_OUTPUT_REJECTED").getFirst().message().startsWith("6 "), result.findings().toString());
+        String prompt = prompts.getFirst();
+        assertFalse(prompt.contains(ROOT.toString()), "no absolute paths");
+        assertTrue(prompt.contains("\"traits\":[\"transparent\"]") && prompt.contains("\"issues\":[\"SOURCE_IMAGE_INVALID\"]")
+                && prompt.contains("glTFast") && prompt.contains("\"reference\":\"hero.png\""), prompt);
     }
 
-    @Test void conversionThatWouldCollideIsRejected() {
-        var p = planned();
-        Asset alt = p.inventory().project().assets().stream().filter(a -> a.relativePath().toString().equals("hero_alt.jpg")).findFirst().orElseThrow();
-        // Another output already uses hero.jpg, so converting hero.png to JPEG would collide.
-        var preview = new OrganizationPreview.Result(p.preview().projectId(), 1, List.of(
-                new OrganizationPreview.Entry(p.png().id(), p.png().relativePath(), Optional.of("hero.png"), false),
-                new OrganizationPreview.Entry(alt.id(), alt.relativePath(), Optional.of("hero.jpg"), false)), List.of());
-        var added = new AIEngine(replying(prompt -> """
-                {"steps":[{"assetId":"%s","operation":"CONVERT_TEXTURE","format":"jpeg"}]}
-                """.formatted(p.png().id()))).plan(p.inventory(), preview, p.commands(), UNITY);
-        var rejected = byCode(added).get("AI_PLAN_STEP_REJECTED");
-        assertNotNull(rejected, added.toString());
-        assertTrue(rejected.getFirst().message().contains("would collide"), rejected.toString());
+    @Test void stepProposalFailureKeepsThePlan() {
+        var result = new AIEngine(failing()).proposeSteps(planned().context());
+        assertTrue(result.proposals().isEmpty());
+        assertEquals(List.of("AI_UNAVAILABLE"), result.findings().stream().map(Finding::code).toList());
+        assertTrue(result.findings().getFirst().message().contains("retry"));
     }
 
-    @Test void planFailureLeavesThePlanUnchanged() {
-        var p = planned();
-        var added = new AIEngine(failing()).plan(p.inventory(), p.preview(), p.commands(), UNITY);
-        assertEquals(List.of("AI_UNAVAILABLE"), added.stream().map(Finding::code).toList());
-        assertTrue(added.getFirst().message().contains("retry"));
+    // ---------------------------------------------------------------- F09: operator
+
+    @Test void operatorRunsChosenToolsInSequenceAndStopsOnFinish() {
+        Deque<String> replies = new ArrayDeque<>(List.of(
+                "{\"tool\":\"INVENTORY\"}",
+                "{\"tool\":\"ANALYZE\",\"parameters\":{\"kind\":\"relationships\"}}",
+                "{\"tool\":\"ANALYZE\",\"parameters\":{\"kind\":\"RELATIONSHIPS\"}}",
+                "{\"tool\":\"SUGGEST_PLAN_STEPS\"}",
+                "{\"tool\":\"FINISH\",\"parameters\":{\"message\":\"Two fixes proposed.\"}}"));
+        List<String> ran = new ArrayList<>();
+        var operation = new AIEngine(replying(prompt -> replies.poll())).operate("prepare for unity", UNITY, (tool, parameters) -> {
+            ran.add(tool + parameters.getOrDefault("kind", ""));
+            if (tool == AIEngine.Tool.SUGGEST_PLAN_STEPS) throw new IllegalStateException("secret C:\\path failure");
+            return JSON.createObjectNode().put("tool", tool.name());
+        });
+        assertEquals(List.of("INVENTORY", "ANALYZERELATIONSHIPS", "SUGGEST_PLAN_STEPS"), ran, "a repeated call is not run again");
+        assertEquals(4, operation.steps().size());
+        assertFalse(operation.steps().get(2).ran());
+        assertFalse(operation.steps().get(3).ran(), "a failing tool is recorded as not run");
+        assertEquals(Optional.of("Two fixes proposed."), operation.message());
+        assertTrue(prompts.get(1).contains("\"tool\":\"INVENTORY\""), "each turn sees earlier results");
+        assertFalse(prompts.getLast().contains("secret"), "a tool's failure text is never sent to the model");
+        assertTrue(byCode(operation.findings()).containsKey("AI_SOURCE"));
+    }
+
+    @Test void operatorRejectsUnknownToolsAndIsBounded() {
+        var rejected = new AIEngine(replying(prompt -> "{\"tool\":\"APPROVE\",\"parameters\":{\"planId\":\"x\"}}"))
+                .operate("approve it", UNITY, (tool, parameters) -> { throw new AssertionError("no tool may run"); });
+        assertTrue(rejected.steps().isEmpty());
+        assertTrue(byCode(rejected.findings()).containsKey("AI_OUTPUT_REJECTED"));
+        var badKind = new AIEngine(replying(prompt -> "{\"tool\":\"ANALYZE\",\"parameters\":{\"kind\":\"delete\"}}"))
+                .operate("x", UNITY, (tool, parameters) -> { throw new AssertionError("no tool may run"); });
+        assertTrue(byCode(badKind.findings()).containsKey("AI_OUTPUT_REJECTED"));
+
+        int[] calls = {0};
+        List<String> kinds = List.of("categories", "relationships", "materials", "names", "folders", "categories", "names", "folders");
+        var looping = new AIEngine(replying(prompt -> calls[0] < 5
+                ? "{\"tool\":\"ANALYZE\",\"parameters\":{\"kind\":\"" + kinds.get(calls[0]++) + "\"}}"
+                : "{\"tool\":\"" + List.of("INVENTORY", "CHECK_COMPATIBILITY", "PREVIEW_ORGANIZATION", "SUGGEST_PLAN_STEPS").get(calls[0]++ % 4) + "\"}"))
+                .operate("x", UNITY, (tool, parameters) -> JSON.createObjectNode());
+        assertEquals(AIEngine.MAX_OPERATOR_STEPS, looping.steps().size());
+        assertTrue(byCode(looping.findings()).containsKey("AI_LIMIT"));
+        var failed = new AIEngine(failing()).operate("x", UNITY, (tool, parameters) -> JSON.createObjectNode());
+        assertTrue(byCode(failed.findings()).containsKey("AI_UNAVAILABLE"));
     }
 
     // ---------------------------------------------------------------- F09
