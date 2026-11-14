@@ -49,25 +49,31 @@ Importing it gives a `PARTIAL` scan (CLI exit code 3).
 | `props\weapon_rack.obj` | `CATEGORY_CONFLICT` (Props vs. Weapons); left Uncategorized. |
 | `props\crate_01.fbx` | FBX header stub: blocks the preview with `INSPECTION_UNSUPPORTED` until you accept an `ACKNOWLEDGMENT` (or exclude it). Validation reports it as not fully checked. |
 | `environment\rock.obj` + `rock_albedo.jpg` | Unreferenced texture sharing the model's name: `NAME_RELATIONSHIP_CANDIDATE`. |
-| `environment\grass_alpha.png` | Transparent texture: a `CONVERSION` to `jpg` without `background=#RRGGBB` fails the conversion check. |
+| `environment\grass_alpha.png` | Transparent texture: a `CONVERSION` to `jpg` without `background=#RRGGBB` fails the conversion check (**Fix blockers** offers a white background). |
 | `textures\IMG_0042.PNG`, `ui\MainMenu Button.png` | Poor names and an upper-case extension for the names analysis and rename rules (`snake-case`, `by-type`). |
-| `misc\notes.txt` | Unsupported extension: skipped and flagged, which makes the scan `PARTIAL`. |
-| `misc\broken.png` | Truncated PNG. Import only fingerprints PNGs, so it is inventoried; if migrated, validation fails it with `OUTPUT_FORMAT_INVALID`. |
+| `misc\notes.txt` | Unsupported extension: skipped and flagged, which makes the scan `PARTIAL` and blocks plans until it is left out (**Leave these files out**, or `rescan --exclude misc/notes.txt`). |
+| `misc\broken.png` | Truncated PNG. Import only fingerprints PNGs, so it is inventoried; creating a plan decodes it and blocks with `SOURCE_IMAGE_INVALID` (**Fix blockers** leaves it out). |
 
 Until every problem is dealt with, a plan for `messy` has blocking findings (`PARTIAL_INVENTORY`,
-`UNRESOLVED_REFERENCE` x2, `INSPECTION_UNSUPPORTED`). A suggested walkthrough:
+`UNRESOLVED_REFERENCE` x2, `INSPECTION_UNSUPPORTED`, `SOURCE_IMAGE_INVALID`). The quick way: create
+a plan, choose **Fix blockers...** and apply the proposed fixes, which gives a plan with no blockers.
+After the run, validation is `INCOMPLETE`, not `PASSED`: the FBX stub stays not fully checked (FBX
+contents cannot be inspected, and not checked is never a pass), and **What to do next** in the
+Migrate step says so. Leave the FBX out too to see `PASSED`. Converting this stub to GLB does not
+help: it is only a header, so the conversion check blocks it. The walkthrough below does the same by hand:
 
 1. Import `messy` and run the analyses (Analysis and Review tab, or `aam analyze
    categories|relationships|materials|names --project ID ...`).
-2. A partial scan can never be planned: delete `sources\messy\misc\notes.txt` and **rescan**
-   (revision 2). Reviews are bound to a revision, so review only after the rescan.
+2. A partial scan cannot be planned: in the Project step choose **Leave these files out**
+   (CLI: `rescan ... --exclude misc/notes.txt`). This rescans to revision 2 without touching the
+   source folder. Reviews are bound to a revision, so review only after this rescan.
 3. Accept the two `REFERENCE_CANDIDATE` corrections (`RELATIONSHIP` for `Hero.mtl`, `MATERIAL_MAPPING`
    for `sword_tex.png`) and an `ACKNOWLEDGMENT` for the FBX; optionally settle the category conflicts.
 4. Preview the organization, then plan, approve and migrate to `output\messy`. The two corrections
    become `REWRITE_REFERENCES` commands (the output `weapons\sword.mtl` reads
-   `map_Kd ../textures/sword_tex.png`; sources are untouched). The run succeeds, but the completion
-   report is `FAILED`: `misc/broken.png` does not decode (`OUTPUT_FORMAT_INVALID`), and the FBX is
-   `OUTPUT_FORMAT_UNCHECKED`. To compare, start over and also exclude `broken.png` with an `EXCLUSION` review.
+   `map_Kd ../textures/sword_tex.png`; sources are untouched). The plan is blocked until
+   `misc/broken.png` is excluded (it does not decode: `SOURCE_IMAGE_INVALID`). The run then succeeds
+   and the report is `INCOMPLETE`, because the FBX is `OUTPUT_FORMAT_UNCHECKED`.
 
 ## Example CLI session
 

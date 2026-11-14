@@ -11,6 +11,10 @@ import picocli.CommandLine.Parameters;
 import picocli.CommandLine.Spec;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 
@@ -27,6 +31,13 @@ public final class RescanCommand implements Callable<Integer> {
     @Option(names = "--log-directory", paramLabel = "DIR",
             description = "Legacy compatibility option; must be <state-dir>/logs.")
     private Path logDirectory;
+    @Option(names = "--exclude", paramLabel = "PATH", description = {
+            "Leave this file out of the project (relative to SOURCE, for example misc/notes.txt); repeatable.",
+            "Added to the files already left out. A left-out file counts as covered, so a skipped file no longer",
+            "blocks plans, but it is never read or migrated, and a reference to it still blocks. Sources are not changed."})
+    private List<Path> exclude = new ArrayList<>();
+    @Option(names = "--include-all", description = "Include every previously left-out file again.")
+    private boolean includeAll;
     @Spec
     private CommandSpec spec;
 
@@ -49,7 +60,13 @@ public final class RescanCommand implements Callable<Integer> {
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();
             }) {
-                committed = manager.rescan(projectId, source).snapshot();
+                if (exclude.isEmpty() && !includeAll) {
+                    committed = manager.rescan(projectId, source).snapshot();
+                } else {
+                    Set<Path> excluded = new LinkedHashSet<>(includeAll ? Set.of() : manager.loadInventory(projectId).excludedFiles());
+                    exclude.forEach(path -> excluded.add(path.normalize()));
+                    committed = manager.rescan(projectId, source, excluded).snapshot();
+                }
             }
             ImportCommand.printInventory(spec.commandLine().getOut(), committed, stateDirectory);
             return ImportCommand.inventoryExitCode(committed);

@@ -80,12 +80,21 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
 1. **Project**: import an asset folder, or open a saved project by ID (the last one is
    remembered). The workspace folder, where projects, plans, reports and logs are saved,
    is under a collapsed section; it defaults to `~/AIAssetMigrate` and its logs go in
-   `<workspace>/logs`.
+   `<workspace>/logs`. If files were skipped, a box lists them with the reason and offers
+   **Leave these files out** (they are not copied; your folder is not changed) so planning
+   is no longer blocked; **Include them again** undoes it.
 2. **Review** (optional): run a check (Categories, Relationships, Materials, Names,
    Folders), then select a suggestion and **Accept** it (the plan will use it) or
    **Reject** it (the file stays as it is). A box under the buttons says what each would do
    for the selected suggestion, for example the name its output copy would get; a later
-   decision for the same file replaces the earlier one. Editing a
+   decision for the same file replaces the earlier one. **Accept all** accepts every
+   suggestion in the table at once after a confirmation that says how many come from AI.
+   Where the rules and the AI suggest different values for the same file (for example a
+   category for a file the rules left Uncategorized), the AI's suggestion is accepted and the
+   rule's is set aside. Only real ties are left for you to pick, such as two equally named files
+   that could fix one broken reference. The batch is saved all together or not at all. Running a
+   check again (for example after switching to another check and back) hides the suggestions
+   you have already decided; **Saved decisions** lists them. Editing a
    suggestion, adding your own decision (for example an `EXCLUSION`, `ACKNOWLEDGMENT` or
    `CONVERSION`), rename rules, saved decisions and the layout preview are in
    collapsed sections. With **Use AI suggestions** ticked, an **AI review summary** box below
@@ -98,8 +107,30 @@ The GUI walks through the workflow as five steps, shown in a stepper at the top:
    files, and, with **Explain issues with AI** ticked, the model's explanation next to the
    rule's own wording. The raw list is under **All findings**.
 4. **Plan**: choose the output folder, create the plan, read the files it will write, and
-   approve it. Blocking issues are listed with the next step to fix each.
-5. **Migrate**: run the approved plan; the outputs are validated and the report shown.
+   approve it. Blocking issues are listed with the next step to fix each. **Fix blockers...**
+   proposes a fix for each one and creates a new plan once you confirm. Fixes are ordinary
+   decisions you could make by hand, and your asset folder is never changed:
+   - skipped files are left out of the scan;
+   - a broken reference with exactly one matching file is pointed to it;
+   - an uninspectable FBX gets an acknowledgment;
+   - a damaged PNG or JPEG is left out of the migration. Creating a plan decodes every image that
+     is copied unchanged, using validation's own check, so a damaged image is caught before the run
+     instead of failing validation after it;
+   - a transparent texture converted to JPG is flattened onto white (`background=#FFFFFF`);
+   - any other conversion that cannot work is undone;
+   - an invalid name or folder goes back to the original;
+   - two files written to the same place get a numbered name (`icon_2.png`).
+
+   These are preselected. When the rules find no single answer for a broken reference,
+   **Ask AI for the rest** lets the AI choose among the files; its choices are marked "AI".
+   Leaving a file out of the migration is offered as a last resort and never preselected.
+   Leaving files out rescans the folder; your decisions are kept for files whose path and
+   contents did not change.
+5. **Migrate**: run the approved plan; the outputs are validated and the report shown. When
+   validation does not pass, **What to do next** lists each problem with an action this tool can
+   take, for example replacing a damaged file and rescanning, or converting an FBX to GLB so that
+   it can be fully checked. The AI summary may only rephrase these steps; it is not given any other
+   tool or check to recommend.
    Re-validation and report history are in a collapsed section.
 
 Later steps unlock as their prerequisites are met; completed steps stay clickable.
@@ -188,10 +219,20 @@ scan result and retain `RESOLVED`, `MISSING`, `SKIPPED`, `UNRESOLVED`,
 `CASE_AMBIGUOUS`, or `UNSAFE` evidence. These checks do not establish complete
 file validity, engine import, conversion support, or rendering.
 
-`COMPLETE` means every discovered path was fully traversed or inventoried.
-`PARTIAL` means coverage was skipped, failed, or unvisited, for example because
+`COMPLETE` means every discovered path was fully traversed, inventoried or left out by
+you. `PARTIAL` means coverage was skipped, failed, or unvisited, for example because
 of an unsupported extension, a size limit, or an unsafe/inaccessible path.
-Inspection warnings alone do not make a scan partial. CLI exit codes are `0` for
+Inspection warnings alone do not make a scan partial.
+
+A partial scan blocks plans. When the gaps are files (a stray `notes.txt`, a `.psd`, a file
+too large or unreadable), you can leave them out instead of editing your source folder:
+`rescan SOURCE --project PROJECT-UUID --state-dir DIR --exclude misc/notes.txt` (repeatable;
+added to the files already left out), or **Leave these files out** in the GUI's Project step.
+A left-out file is recorded as `EXCLUDED` with an `EXCLUDED_BY_USER` note, counts as
+covered, and is never read, inventoried or migrated; later rescans keep it out until
+`--include-all` (GUI: **Include them again**). If a model or material references a left-out
+file, the reference is `SKIPPED` and the plan stays blocked. Folders that could not be read
+cannot be left out; fix them and rescan. CLI exit codes are `0` for
 complete, `3` for a saved partial snapshot, `1` for a fatal error, `2` for
 argument errors, and `130` for interruption.
 

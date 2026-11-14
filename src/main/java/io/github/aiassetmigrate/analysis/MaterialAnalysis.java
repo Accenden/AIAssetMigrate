@@ -197,7 +197,8 @@ public final class MaterialAnalysis {
                     ? Asset.Type.MATERIAL : Asset.Type.TEXTURE) ? AssetReference.ResolutionStatus.RESOLVED : AssetReference.ResolutionStatus.UNRESOLVED;
             else if (snapshot.pathOutcomes().stream().anyMatch(o -> (o.relativePath().equals(target)
                     || (o.kind() == PathOutcome.Kind.DIRECTORY && (o.relativePath().toString().isEmpty() || target.startsWith(o.relativePath()))))
-                    && (o.status() == PathOutcome.Status.SKIPPED || o.status() == PathOutcome.Status.FAILED || o.status() == PathOutcome.Status.UNVISITED)))
+                    && (o.status() == PathOutcome.Status.SKIPPED || o.status() == PathOutcome.Status.FAILED
+                        || o.status() == PathOutcome.Status.UNVISITED || o.status() == PathOutcome.Status.EXCLUDED)))
                 status = AssetReference.ResolutionStatus.SKIPPED;
             else status = completeCoverage
                     ? AssetReference.ResolutionStatus.MISSING : AssetReference.ResolutionStatus.UNRESOLVED;

@@ -105,15 +105,24 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     @Override
     public ImportResult importAssets(Path sourceRoot) {
-        return scanAndSave(UUID.randomUUID(), sourceRoot, false);
+        return scanAndSave(UUID.randomUUID(), sourceRoot, false, Optional.empty());
     }
 
     @Override
     public ImportResult rescan(UUID projectId, Path sourceRoot) {
-        return scanAndSave(Objects.requireNonNull(projectId, "projectId"), sourceRoot, true);
+        return scanAndSave(Objects.requireNonNull(projectId, "projectId"), sourceRoot, true, Optional.empty());
     }
 
-    private ImportResult scanAndSave(UUID id, Path sourceRoot, boolean rescan) {
+    @Override
+    public ImportResult rescan(UUID projectId, Path sourceRoot, Set<Path> excludedFiles) {
+        Objects.requireNonNull(excludedFiles, "excludedFiles");
+        // Constructing an outcome validates each entry as a relative file path before anything is scanned.
+        excludedFiles.forEach(path -> new PathOutcome(path, PathOutcome.Kind.FILE, PathOutcome.Status.EXCLUDED));
+        return scanAndSave(Objects.requireNonNull(projectId, "projectId"), sourceRoot, true, Optional.of(Set.copyOf(excludedFiles)));
+    }
+
+    /** {@code exclusions}: the files to leave out; empty keeps the previous revision's (none for a new project). */
+    private ImportResult scanAndSave(UUID id, Path sourceRoot, boolean rescan, Optional<Set<Path>> exclusions) {
         ensureOpen();
         Long committed = null;
         try {
@@ -130,7 +139,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     try {
                         publisher.publish(LogEvent.Level.INFO, "Scan started");
                         Instant started = Instant.now();
-                        AssetScanner.ScanResult scan = scanner.scan(sourceRoot);
+                        Set<Path> excluded = exclusions.orElseGet(() -> previous.map(InventorySnapshot::excludedFiles).orElse(Set.of()));
+                        if (!excluded.isEmpty()) {
+                            publisher.publish(LogEvent.Level.INFO, "Leaving out " + excluded.size() + " file(s) chosen by the user");
+                        }
+                        AssetScanner.ScanResult scan = scanner.scan(sourceRoot, excluded);
                         publisher.publish(LogEvent.Level.INFO, "Scan completed: " + scan.assets().size()
                                 + " assets, " + scan.findings().size() + " findings, status " + scan.scanStatus());
                         Map<Path, UUID> oldIds = new HashMap<>();
@@ -817,6 +830,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             var compatibility = assessCompatibility(id, target);
             List<Finding> planFindings = new ArrayList<>(compatibility.findings());
             planFindings.addAll(conversionChecks(inventory, preview, target));
+            planFindings.addAll(imageChecks(inventory, preview));
             UUID planId = UUID.randomUUID();
             if (assistant.isPresent()) {
                 // AI proposals are checked by the controller and recorded as findings; commands stay deterministic.
@@ -866,6 +880,35 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                             + " (com.unity.cloud.gltfast); the original model format imports natively"));
                 }
             }
+        }
+        return findings;
+    }
+
+    /**
+     * Import only fingerprints images, so a damaged PNG or JPEG would otherwise surface only when validation fails
+     * after the run. Each image copied unchanged is decoded here with validation's own check (converted images
+     * are decoded by their conversion check); one that would fail blocks approval as SOURCE_IMAGE_INVALID.
+     * Sources that cannot be read within the limit are left to the run's own preflight.
+     */
+    private static List<Finding> imageChecks(InventorySnapshot inventory, OrganizationPreview.Result preview) {
+        Map<UUID, Asset> assets = new HashMap<>();
+        inventory.project().assets().forEach(asset -> assets.put(asset.id(), asset));
+        List<Finding> findings = new ArrayList<>();
+        Path root = inventory.project().sourceRoot();
+        for (var entry : preview.entries()) {
+            Asset asset = assets.get(entry.assetId());
+            if (asset == null || entry.excluded() || entry.destination().isEmpty() || !entry.conversion().isEmpty()
+                    || asset.type() != Asset.Type.TEXTURE) continue;
+            String name = asset.relativePath().getFileName().toString();
+            String extension = name.substring(name.lastIndexOf('.') + 1).toLowerCase(java.util.Locale.ROOT);
+            if (!Set.of("png", "jpg", "jpeg").contains(extension)) continue;
+            byte[] bytes;
+            try { bytes = verifiedSource(root, asset); }
+            catch (IOException unreadable) { continue; }
+            io.github.aiassetmigrate.validation.OutputValidator.imageFailure(bytes, extension).ifPresent(problem ->
+                    findings.add(new Finding(UUID.randomUUID(), Optional.of(asset.id()), Optional.of(asset.relativePath()),
+                            Finding.Severity.ERROR, "SOURCE_IMAGE_INVALID", PortablePath.of(asset.relativePath()) + " " + problem
+                            + "; copied as it is, it would fail validation")));
         }
         return findings;
     }

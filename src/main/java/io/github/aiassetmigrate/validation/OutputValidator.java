@@ -273,6 +273,15 @@ public final class OutputValidator {
                 : "OUTPUT_FORMAT_UNCHECKED", output.shown + " " + check.message());
     }
 
+    /**
+     * Why an image copied unchanged would fail validation (the same decode check validation runs), or empty if
+     * it would not fail. Used before a run so a damaged source is found while it can still be left out.
+     */
+    public static java.util.Optional<String> imageFailure(byte[] bytes, String extension) {
+        ImageCheck check = inspectImage(bytes, extension.toLowerCase(Locale.ROOT));
+        return check.severity() == Finding.Severity.ERROR ? java.util.Optional.of(check.message()) : java.util.Optional.empty();
+    }
+
     /** Result of decoding one image: a null severity means it passed and {@code message} says how. */
     record ImageCheck(Finding.Severity severity, String message) {}
 

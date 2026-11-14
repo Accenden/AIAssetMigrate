@@ -30,6 +30,8 @@ public final class TextureConverter implements ConversionStrategy {
     public static final String ID = "texture-imageio";
     public static final long MAX_PIXELS = 64L * 1024 * 1024;
     private static final Set<String> FORMATS = Set.of("png", "jpg");
+    /** The check failure for a transparent texture converted to JPEG without a background colour. */
+    public static final String NEEDS_BACKGROUND = "Texture has transparency; JPEG conversion needs an approved background colour (background=#RRGGBB)";
 
     @Override public String id() { return ID; }
 
@@ -63,7 +65,7 @@ public final class TextureConverter implements ConversionStrategy {
         options(targetFormat, options);
         BufferedImage image = decode(source);
         if (normalize(targetFormat).equals("jpg") && transparent(image) && !options.containsKey("background")) {
-            throw new IOException("Texture has transparency; JPEG conversion needs an approved background colour (background=#RRGGBB)");
+            throw new IOException(NEEDS_BACKGROUND);
         }
     }
 

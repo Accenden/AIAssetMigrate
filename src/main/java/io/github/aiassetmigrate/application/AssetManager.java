@@ -25,8 +25,19 @@ public interface AssetManager {
     /**
      * Rescans an existing project; sourceRoot must match its original root.
      * Preserves project identity and createdAt while advancing inventoryRevision.
+     * Files left out in the previous revision stay left out.
      */
     ImportResult rescan(UUID projectId, Path sourceRoot) throws ImportException;
+
+    /**
+     * As {@link #rescan(UUID, Path)}, leaving out exactly these files (relative paths), replacing the previous
+     * set; an empty set includes everything again. A left-out file is recorded as EXCLUDED, which counts as
+     * complete coverage, and is never read, inventoried or migrated. A reference to it still blocks a plan,
+     * so leaving out a file that a model or material needs cannot go unnoticed. Source files are not changed.
+     */
+    default ImportResult rescan(UUID projectId, Path sourceRoot, java.util.Set<Path> excludedFiles) throws ImportException {
+        throw new UnsupportedOperationException("Leaving files out is not supported by this manager");
+    }
 
     /** Loads the latest inventory without scanning or creating state. */
     InventorySnapshot loadInventory(UUID projectId) throws ImportException;
@@ -57,6 +68,64 @@ public interface AssetManager {
 
     /** Read-only lexical output preview for an exact inventory revision, not approval to write. */
     OrganizationPreview.Result previewOrganization(UUID projectId, long expectedInventoryRevision);
+
+    /**
+     * Proposes quick fixes for the blocking findings of a draft plan (see {@link BlockerFixes}); nothing is
+     * saved. With an assistant, the AI may choose the target of a broken reference the rules cannot settle;
+     * such fixes are marked as AI and, like all fixes, apply only if the caller passes them back.
+     */
+    default BlockerFixes.Proposal proposeBlockerFixes(UUID projectId, MigrationPlan plan,
+                                                      Optional<io.github.aiassetmigrate.ai.LLMClient> assistant) {
+        Objects.requireNonNull(plan, "plan");
+        InventorySnapshot inventory = loadInventory(projectId);
+        long revision = inventory.project().inventoryRevision();
+        if (!plan.projectId().equals(projectId) || plan.inventoryRevision() != revision) {
+            throw new IllegalStateException("The project was rescanned after this plan was created; create the plan again");
+        }
+        AnalysisResult relationships = assistant.isPresent()
+                ? analyze(projectId, AnalysisKind.RELATIONSHIPS, assistant.get())
+                : analyze(projectId, AnalysisKind.RELATIONSHIPS);
+        OrganizationPreview.Result preview = previewOrganization(projectId, revision);
+        List<ReviewedChange> saved = loadReviews(projectId);
+        if (loadInventory(projectId).project().inventoryRevision() != revision || relationships.inventoryRevision() != revision) {
+            throw new IllegalStateException("The project changed while fixes were prepared; try again");
+        }
+        return BlockerFixes.propose(plan, inventory, saved, preview, relationships.suggestions(), java.time.Instant.now());
+    }
+
+    /**
+     * Applies the chosen fixes for the given inventory revision: saves their decisions and, if any leave files
+     * out, rescans first and carries the saved decisions over for files whose path and contents are unchanged.
+     * Source files are never changed, no output is written and no plan is approved; create a new plan after.
+     */
+    default BlockerFixes.Applied applyBlockerFixes(UUID projectId, long inventoryRevision, List<BlockerFixes.Fix> fixes) {
+        List<BlockerFixes.Fix> chosen = List.copyOf(fixes);
+        if (chosen.isEmpty()) throw new IllegalArgumentException("Choose at least one fix");
+        InventorySnapshot inventory = loadInventory(projectId);
+        if (inventory.project().inventoryRevision() != inventoryRevision) {
+            throw new IllegalStateException("The project was rescanned after these fixes were proposed; create the plan again");
+        }
+        List<ReviewedChange> changes = chosen.stream().flatMap(fix -> fix.changes().stream()).toList();
+        java.util.Set<Path> leaveOut = new java.util.LinkedHashSet<>();
+        chosen.forEach(fix -> leaveOut.addAll(fix.leaveOut()));
+        if (leaveOut.isEmpty()) {
+            review(projectId, inventoryRevision, changes);
+            return new BlockerFixes.Applied(chosen.size(), changes.size(), 0, false, inventoryRevision);
+        }
+        List<ReviewedChange> before = loadReviews(projectId);
+        java.util.Set<Path> excluded = new java.util.LinkedHashSet<>(inventory.excludedFiles());
+        excluded.addAll(leaveOut);
+        InventorySnapshot rescanned = rescan(projectId, inventory.project().sourceRoot(), excluded).snapshot();
+        long revision = rescanned.project().inventoryRevision();
+        var ids = BlockerFixes.carriedIds(inventory, rescanned);
+        List<ReviewedChange> kept = BlockerFixes.carry(before, ids);
+        List<ReviewedChange> added = BlockerFixes.carry(changes, ids);
+        // Earlier decisions first, then the fixes, so a fix replaces the decision it corrects.
+        if (!kept.isEmpty()) review(projectId, revision, kept);
+        if (!added.isEmpty()) review(projectId, revision, added);
+        return new BlockerFixes.Applied(chosen.size(), kept.size() + added.size(),
+                before.size() - kept.size() + changes.size() - added.size(), true, revision);
+    }
 
     List<Finding> checkCompatibility(UUID projectId, TargetProfile target);
 

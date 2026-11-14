@@ -59,6 +59,40 @@ class RescanCommandTest {
     }
 
     @Test
+    void excludeAddsToTheFilesAlreadyLeftOutAndIncludeAllClearsThem() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        UUID project = UUID.randomUUID();
+        InventorySnapshot current = new InventorySnapshot(1, 1, snapshot(project, source).project(), List.of(),
+                InventorySnapshot.ScanStatus.COMPLETE, Instant.parse("2025-01-01T00:00:00Z"),
+                List.of(new io.github.aiassetmigrate.domain.PathOutcome(Path.of("old.txt"),
+                        io.github.aiassetmigrate.domain.PathOutcome.Kind.FILE, io.github.aiassetmigrate.domain.PathOutcome.Status.EXCLUDED)),
+                List.of());
+        for (boolean includeAll : List.of(false, true)) {
+            var received = new java.util.concurrent.atomic.AtomicReference<Object>();
+            AssetManager manager = (AssetManager) Proxy.newProxyInstance(AssetManager.class.getClassLoader(),
+                    new Class<?>[] { AssetManager.class, AutoCloseable.class }, (proxy, method, args) -> switch (method.getName()) {
+                        case "loadInventory" -> current;
+                        case "rescan" -> {
+                            assertEquals(3, args.length, "the exclusion overload is used");
+                            received.set(args[2]);
+                            yield new AssetManager.ImportResult(snapshot(project, source));
+                        }
+                        case "close" -> null;
+                        default -> throw new UnsupportedOperationException(method.getName());
+                    });
+            var cli = new CommandLine(new RescanCommand((state, logs) -> manager))
+                    .setOut(new PrintWriter(new StringWriter())).setErr(new PrintWriter(new StringWriter()));
+            String[] args = includeAll
+                    ? new String[]{source.toString(), "--project", project.toString(), "--state-dir", directory.resolve("s").toString(), "--include-all"}
+                    : new String[]{source.toString(), "--project", project.toString(), "--state-dir", directory.resolve("s").toString(),
+                            "--exclude", "misc/notes.txt", "--exclude", "big.psd"};
+            assertEquals(0, cli.execute(args));
+            assertEquals(includeAll ? java.util.Set.of() : java.util.Set.of(Path.of("old.txt"), Path.of("misc", "notes.txt"), Path.of("big.psd")),
+                    received.get());
+        }
+    }
+
+    @Test
     void rejectsMissingProjectWithoutCreatingInventory() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         UUID project = UUID.randomUUID();

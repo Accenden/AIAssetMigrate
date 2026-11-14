@@ -25,6 +25,9 @@ import java.util.UUID;
 public final class OrganizationPreview {
     private OrganizationPreview() {}
 
+    /** UNRESOLVED_REFERENCE messages are this prefix followed by the exact reference text. */
+    public static final String UNRESOLVED_PREFIX = "Reference is not uniquely resolved: ";
+
     /**
      * Rewrites are output-copy reference replacements. A non-empty conversion holds the
      * accepted CONVERSION values (normalized "format" plus options); the destination then
@@ -206,7 +209,7 @@ public final class OrganizationPreview {
                 List<Asset> targets = ref.normalizedTargetPath()
                         .map(p -> sourcePaths.getOrDefault(MaterialAnalysis.key(p), List.of())).orElse(List.of());
                 if (ref.resolutionStatus() != AssetReference.ResolutionStatus.RESOLVED || targets.size() != 1) {
-                    findings.add(finding("UNRESOLVED_REFERENCE", owner.assetId(), "Reference is not uniquely resolved: " + ref.originalText()));
+                    findings.add(finding("UNRESOLVED_REFERENCE", owner.assetId(), UNRESOLVED_PREFIX + ref.originalText()));
                     continue;
                 }
                 targetAsset = targets.getFirst();

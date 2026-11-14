@@ -24,6 +24,18 @@ class OrganizationWorkflowIntegrationTest {
     private static final byte[] FBX = "Kaydara FBX Binary  \0\u001a\0è\u001c\0\0".getBytes(StandardCharsets.ISO_8859_1);
     private static final String OBJ = "mtllib Hero.mtl\nusemtl Skin\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
     private static final String MTL = "newmtl Skin\nmap_Kd textures/hero_diffuse.png\n";
+    /** A real 1x1 PNG: planning decodes copied images, and placeholder bytes would be blocked as damaged. */
+    private static final byte[] PNG = realPng();
+
+    private static byte[] realPng() {
+        try {
+            var bytes = new java.io.ByteArrayOutputStream();
+            javax.imageio.ImageIO.write(new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_RGB), "png", bytes);
+            return bytes.toByteArray();
+        } catch (java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
 
     @TempDir Path directory;
 
@@ -38,7 +50,7 @@ class OrganizationWorkflowIntegrationTest {
         Files.createDirectories(source.resolve("props"));
         Files.writeString(source.resolve("models/Hero.obj"), OBJ);
         Files.writeString(source.resolve("models/Hero.mtl"), MTL);
-        Files.write(source.resolve("tex/hero_diffuse.png"), new byte[] {1, 2, 3});
+        Files.write(source.resolve("tex/hero_diffuse.png"), PNG);
         Files.write(source.resolve("props/crate.fbx"), FBX);
         Path output = Files.createDirectory(directory.resolve("output"));
 
@@ -116,7 +128,7 @@ class OrganizationWorkflowIntegrationTest {
             assertEquals(MTL, Files.readString(source.resolve("models/Hero.mtl")));
             assertEquals(OBJ.replace("mtllib Hero.mtl", "mtllib hero.mtl"), Files.readString(output.resolve("Characters/hero.obj")));
             assertEquals("newmtl Skin\nmap_Kd hero_diffuse.png\n", Files.readString(output.resolve("Characters/hero.mtl")));
-            assertArrayEquals(new byte[] {1, 2, 3}, Files.readAllBytes(output.resolve("Characters/hero_diffuse.png")));
+            assertArrayEquals(PNG, Files.readAllBytes(output.resolve("Characters/hero_diffuse.png")));
             assertArrayEquals(FBX, Files.readAllBytes(output.resolve("Props/crate.fbx")));
 
             // Re-importing the output proves the rewritten references resolve in the new layout.
@@ -132,7 +144,7 @@ class OrganizationWorkflowIntegrationTest {
     @Test void acceptedAiCorrectionDrivesTheSameReviewedRewriteAsARuleSuggestion() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Files.writeString(source.resolve("hero.mtl"), "newmtl Skin\nmap_Kd skin.png\n");
-        Files.write(source.resolve("hero_albedo.png"), new byte[] {4, 5});
+        Files.write(source.resolve("hero_albedo.png"), PNG);
         Path output = Files.createDirectory(directory.resolve("output"));
         try (var manager = new DefaultAssetManager(directory.resolve("state"))) {
             var snapshot = manager.importAssets(source).snapshot();

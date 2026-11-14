@@ -142,23 +142,39 @@ class ValidationIntegrationTest {
         }
     }
 
-    @Test void undecodableTextureFailsEvenWhenItsHashMatches() throws Exception {
+    /**
+     * Import only fingerprints images, so a truncated PNG is inventoried. It used to be copied and then fail
+     * validation (OUTPUT_FORMAT_INVALID); planning now runs validation's own decode check on images copied
+     * unchanged and blocks it first, so it can be left out before anything is written. (A damaged output
+     * is still failed by validation: see convertedTexturesAndRewrittenMaterialsUseTheHashesTheRunRecorded.)
+     */
+    @Test void undecodableTextureIsBlockedBeforeTheRunWithValidationsOwnVerdict() throws Exception {
         try (var manager = manager()) {
             source = Files.createDirectory(directory.resolve("source"));
             output = Files.createDirectory(directory.resolve("output"));
-            byte[] png = ConversionStrategyTest.png(false);
-            byte[] truncated = java.util.Arrays.copyOf(png, 40);
+            byte[] truncated = java.util.Arrays.copyOf(ConversionStrategyTest.png(false), 40);
             Files.write(source.resolve("broken.png"), truncated);
+            Files.write(source.resolve("good.png"), ConversionStrategyTest.png(false));
             var snapshot = manager.importAssets(source).snapshot();
-            var plan = manager.createPlan(snapshot.project().id(), UNITY, output);
-            org.junit.jupiter.api.Assumptions.assumeFalse(plan.findings().stream().anyMatch(f -> f.severity() == Finding.Severity.ERROR
-                    || f.severity() == Finding.Severity.UNKNOWN), "scanner rejected the truncated PNG before migration");
-            manager.approve(plan.id(), plan.version());
-            MigrationRun run = manager.migrate(plan.id());
-            Report report = manager.validate(run.id());
-            assertEquals(Report.ValidationStatus.FAILED, report.validationStatus());
-            assertEquals(Set.of("OUTPUT_FORMAT_INVALID"), codes(report, Finding.Severity.ERROR), report.findings().toString());
-            assertFalse(report.findings().stream().anyMatch(f -> f.code().equals("OUTPUT_CHANGED")));
+            UUID id = snapshot.project().id();
+            assertEquals(2, snapshot.project().assets().size(), "the truncated PNG is inventoried");
+            var plan = manager.createPlan(id, UNITY, output);
+            List<Finding> blockers = plan.findings().stream().filter(f -> f.severity() == Finding.Severity.ERROR
+                    || f.severity() == Finding.Severity.UNKNOWN).toList();
+            assertEquals(List.of("SOURCE_IMAGE_INVALID"), blockers.stream().map(Finding::code).toList(), "only the damaged image");
+            assertEquals(Optional.of(Path.of("broken.png")), blockers.getFirst().sourceRelativePath());
+            String verdict = io.github.aiassetmigrate.validation.OutputValidator.imageFailure(truncated, "png").orElseThrow();
+            assertTrue(blockers.getFirst().message().contains(verdict), "the same verdict validation would give");
+            assertThrows(RuntimeException.class, () -> manager.approve(plan.id(), plan.version()));
+            assertEquals(List.of(), Files.list(output).toList(), "nothing was written");
+
+            UUID broken = snapshot.project().assets().stream().filter(a -> a.relativePath().equals(Path.of("broken.png")))
+                    .findFirst().orElseThrow().id();
+            manager.review(id, 1, List.of(accept(broken, ReviewedChange.Kind.EXCLUSION, Map.of("reason", "damaged"))));
+            var fixed = manager.createPlan(id, UNITY, output);
+            manager.approve(fixed.id(), fixed.version());
+            Report report = manager.validate(manager.migrate(fixed.id()).id());
+            assertEquals(Report.ValidationStatus.PASSED, report.validationStatus(), report.findings().toString());
         }
     }
 
@@ -259,6 +275,7 @@ class ValidationIntegrationTest {
             assertEquals(1, prompts.size());
             String prompt = prompts.getFirst();
             assertTrue(prompt.contains("\"validationStatus\":\"PASSED\""), prompt);
+            assertTrue(prompt.contains("\"nextSteps\":[]"), "a pass has nothing to recommend: " + prompt);
             assertFalse(prompt.contains(output.toString()) || prompt.contains(source.toString())
                     || prompt.contains(directory.toString()), "no absolute paths are sent");
             assertFalse(prompt.contains("newmtl") || prompt.contains("map_Kd"), "file contents are never sent");

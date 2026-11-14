@@ -22,12 +22,14 @@ import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static io.github.aiassetmigrate.domain.PathOutcome.Kind.*;
@@ -88,14 +90,27 @@ public final class AssetScanner {
     }
 
     public ScanResult scan(Path sourceRoot) throws IOException {
+        return scan(sourceRoot, Set.of());
+    }
+
+    /**
+     * As {@link #scan(Path)}, leaving out the given files (relative paths): each one found is recorded as
+     * EXCLUDED with an EXCLUDED_BY_USER note and is never opened. Exclusions name files only; a directory
+     * with an excluded path is traversed as usual.
+     */
+    public ScanResult scan(Path sourceRoot, Set<Path> excludedFiles) throws IOException {
         interrupted();
+        Set<String> excluded = new HashSet<>();
+        for (Path path : Objects.requireNonNull(excludedFiles, "excludedFiles")) {
+            excluded.add(portable(new PathOutcome(path, FILE, EXCLUDED).relativePath())); // validates a relative file path
+        }
         SafeStoragePaths.validateExistingPath(sourceRoot);
         Path root = sourceRoot.toAbsolutePath().normalize();
         BasicFileAttributes attributes = io.attributes(root);
         if (!attributes.isDirectory() || !Files.isReadable(root)) {
             throw new IOException("Source must be an existing readable directory: " + root);
         }
-        State state = new State(root, attributes);
+        State state = new State(root, attributes, excluded);
         state.traverse();
         interrupted();
         state.assets.sort(Comparator.comparing(asset -> portable(asset.relativePath())));
@@ -119,11 +134,13 @@ public final class AssetScanner {
         private final List<AssetReference> references = new ArrayList<>();
         private final Map<UUID, Path> assetPaths = new HashMap<>();
         private final ArrayDeque<DirectoryVisit> pending = new ArrayDeque<>();
+        private final Set<String> excluded;
         private int entries;
 
-        State(Path root, BasicFileAttributes rootAttributes) {
+        State(Path root, BasicFileAttributes rootAttributes, Set<String> excluded) {
             this.root = root;
             this.rootAttributes = rootAttributes;
+            this.excluded = excluded;
         }
 
         private void traverse() throws IOException {
@@ -255,6 +272,12 @@ public final class AssetScanner {
 
         private PathOutcome.Status file(Path file, BasicFileAttributes before) throws IOException {
             Path relative = root.relativize(file);
+            if (excluded.contains(portable(relative))) {
+                problem(relative, Optional.empty(), Finding.Severity.INFO, "EXCLUDED_BY_USER",
+                        "Left out of the project by your choice; not read, inventoried or migrated");
+                outcome(relative, FILE, EXCLUDED);
+                return EXCLUDED;
+            }
             String name = file.getFileName().toString();
             int dot = name.lastIndexOf('.');
             String extension = dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
@@ -452,7 +475,7 @@ public final class AssetScanner {
             while (current != null) {
                 PathOutcome outcome = outcomes.get(portable(current));
                 if (outcome != null && (outcome.status() == SKIPPED || outcome.status() == FAILED
-                        || outcome.status() == UNVISITED)) return true;
+                        || outcome.status() == UNVISITED || outcome.status() == EXCLUDED)) return true;
                 current = current.getParent();
             }
             PathOutcome root = outcomes.get("");
@@ -480,7 +503,8 @@ public final class AssetScanner {
     private static String folded(Path path) { return portable(path).toUpperCase(Locale.ROOT); }
 
     private static InventorySnapshot.ScanStatus scanStatus(List<PathOutcome> outcomes) {
-        return outcomes.stream().allMatch(outcome -> outcome.status() == INVENTORIED || outcome.status() == TRAVERSED)
+        return outcomes.stream().allMatch(outcome -> outcome.status() == INVENTORIED || outcome.status() == TRAVERSED
+                        || outcome.status() == EXCLUDED)
                 ? InventorySnapshot.ScanStatus.COMPLETE : InventorySnapshot.ScanStatus.PARTIAL;
     }
 

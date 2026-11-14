@@ -533,9 +533,41 @@
     -fx-max-width: infinity;
 }
 
+/* ---- Dialogs (for example the Accept all confirmation) ------------------ */
+.dialog-pane {
+    -fx-background-color: -c-card;
+    -fx-padding: 0;
+}
+
+.dialog-pane > .header-panel {
+    -fx-background-color: -c-card;
+    -fx-border-color: transparent transparent -c-border transparent;
+    -fx-padding: 16 20 12 20;
+}
+
+.dialog-pane > .header-panel > .label {
+    -fx-font-size: 16px;
+    -fx-font-weight: bold;
+}
+
+.dialog-pane > .content.label {
+    -fx-text-fill: -c-foreground;
+    -fx-padding: 16 20 8 20;
+    -fx-line-spacing: 3;
+}
+
+.dialog-pane > .button-bar > .container {
+    -fx-padding: 8 20 16 20;
+}
+
 .callout-danger {
     -fx-background-color: rgba(239, 68, 68, 0.45), #1a0e0f;
     -fx-text-fill: #fecaca;
+}
+
+/* Something blocks progress but the user can fix it here, for example skipped files. */
+.callout-warning {
+    -fx-background-color: rgba(245, 158, 11, 0.45), #19140a;
 }
 
 /* What Accept and Reject would do for the selected suggestion. */
