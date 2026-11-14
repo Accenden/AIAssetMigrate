@@ -295,9 +295,17 @@ public final class FileMigrationPlanRepository {
         return inventories.loadLatest(project).orElseThrow(() -> new IOException("Inventory not found"));
     }
 
+    /** Says which of version or status is wrong, and what to do about it. */
     private static void requireVersion(StoredPlan stored, int version, PlanStatus status) throws IOException {
-        if (version < 1 || stored.plan().version() != version || stored.plan().status() != status)
-            throw new IOException("Plan version or status conflict");
+        MigrationPlan plan = stored.plan();
+        if (version < 1 || plan.version() != version)
+            throw new IOException("The plan is at version " + plan.version() + ", not " + version
+                    + "; show the plan again and use the version it displays");
+        if (plan.status() != status) {
+            throw new IOException(status == PlanStatus.APPROVED
+                    ? "The plan is not approved yet; approve version " + plan.version() + " before running it"
+                    : "The plan is already approved; run it, or create a new plan to change it");
+        }
     }
 
     private static MigrationPlan withStatus(MigrationPlan p, PlanStatus status) {

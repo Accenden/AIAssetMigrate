@@ -39,7 +39,8 @@ public final class SafeStoragePaths {
         checkedPath(path);
     }
 
-    static void createDirectories(Path directory) throws IOException {
+    /** Creates each missing component one at a time, rejecting unsafe links and aliases before and after each. */
+    public static void createDirectories(Path directory) throws IOException {
         Path target = checkedPath(directory);
         Path current = target.getRoot();
         for (Path component : target) {

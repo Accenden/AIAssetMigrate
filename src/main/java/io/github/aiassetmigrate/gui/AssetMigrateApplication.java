@@ -2238,12 +2238,16 @@ public final class AssetMigrateApplication extends Application {
                     // Without a report the log is the only account of what happened.
                     runLogPane.setExpanded(outcome.report().isEmpty());
                 }
-                if (current) clearPlan();
+                // A started run always comes back as an outcome; a failure here means no run started, so the
+                // approved plan is kept and can be run again once the problem is fixed.
+                boolean ran = result.failure() == null && result.value() != null;
+                if (current && ran) clearPlan();
                 busy(false);
                 if (!current) return;
-                if (result.failure() != null || result.value() == null) {
+                if (!ran) {
                     status.setText(failureText(result.failure(), null)
-                            + "\nMigration may have started; check the output folder and report history before retrying.");
+                            + "\nThe run did not start, so nothing was copied. Fix the problem and choose Run migration again,"
+                            + " or create a new plan.");
                     return;
                 }
                 var outcome = result.value();

@@ -124,6 +124,7 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     /** {@code exclusions}: the files to leave out; empty keeps the previous revision's (none for a new project). */
     private ImportResult scanAndSave(UUID id, Path sourceRoot, boolean rescan, Optional<Set<Path>> exclusions) {
         ensureOpen();
+        requireSourceFolder(sourceRoot, rescan ? Optional.of(id) : Optional.empty());
         Long committed = null;
         try {
             validatePaths(sourceRoot, id);
@@ -237,6 +238,21 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                     + (committed == null ? "" : " after committing revision " + committed), failure,
                     Optional.of(id), Optional.ofNullable(committed));
         }
+    }
+
+    /**
+     * Fails early, with a plain message, when the asset folder is missing or is a file, before any project
+     * state is touched. A new import has no project yet, so none is named; a rescan names its existing project.
+     */
+    private static void requireSourceFolder(Path sourceRoot, Optional<UUID> project) {
+        Objects.requireNonNull(sourceRoot, "sourceRoot");
+        Path folder = sourceRoot.toAbsolutePath().normalize();
+        String problem = !Files.exists(folder) ? "Asset folder not found: " + folder
+                : !Files.isDirectory(folder) ? "Not a folder: " + folder + " (choose the folder that contains the assets)"
+                : null;
+        if (problem == null) return;
+        throw new ImportException(problem + (project.isPresent() ? ". Nothing was rescanned." : ". No project was created."),
+                null, project, Optional.empty());
     }
 
     private void validatePaths(Path sourceRoot, UUID id) throws IOException {
@@ -855,6 +871,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             PlanState state = planState(inventory, target);
             var preview = state.preview();
             List<Finding> planFindings = new ArrayList<>(state.checks());
+            if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) {
+                planFindings.add(new Finding(UUID.randomUUID(), Optional.empty(), Optional.empty(), Finding.Severity.INFO,
+                        "OUTPUT_ROOT_CREATED_ON_RUN", "The output folder " + root
+                        + " does not exist yet; it is created when the approved plan runs"));
+            }
             UUID planId = UUID.randomUUID();
             if (assistant.isPresent()) {
                 // AI suggestions are checked by the controller and recorded as findings; commands stay deterministic.
@@ -1381,7 +1402,33 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             throw new IOException("Plan commands do not match the reviewed organization");
         }
         if (plan.status() == PlanStatus.APPROVED) {
-            new CopyExecutor().validatePreflight(inspectedInventory(inventory), plan, stateDirectory, logDirectory);
+            // A missing output folder is created only now, after the path checks above; if the preflight still
+            // fails, the folders made here are removed again so nothing is left behind before a run starts.
+            List<Path> created = createOutputRoot(output.normalize());
+            try {
+                new CopyExecutor().validatePreflight(inspectedInventory(inventory), plan, stateDirectory, logDirectory);
+            } catch (IOException | RuntimeException failure) {
+                removeCreated(created);
+                throw failure;
+            }
+        }
+    }
+
+    /** Creates the output folder and any missing parents; returns the folders it created, outermost first. */
+    private static List<Path> createOutputRoot(Path output) throws IOException {
+        List<Path> missing = new ArrayList<>();
+        for (Path current = output; current != null && !Files.exists(current, LinkOption.NOFOLLOW_LINKS); current = current.getParent()) {
+            missing.addFirst(current);
+        }
+        if (missing.isEmpty()) return List.of();
+        SafeStoragePaths.createDirectories(output);
+        return List.copyOf(missing);
+    }
+
+    private static void removeCreated(List<Path> created) {
+        for (int i = created.size() - 1; i >= 0; i--) {
+            try { Files.deleteIfExists(created.get(i)); }
+            catch (IOException | RuntimeException notEmpty) { return; } // something else is using it now; keep it
         }
     }
 

@@ -45,6 +45,72 @@ class CopyWorkflowIntegrationTest {
         }
     }
 
+    @Test void missingOutputFolderIsCreatedOnlyWhenTheApprovedPlanRuns() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path output = directory.resolve("out").resolve("nested");
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            UUID project = manager.importAssets(source).snapshot().project().id();
+            var plan = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            assertTrue(plan.findings().stream().anyMatch(f -> f.code().equals("OUTPUT_ROOT_CREATED_ON_RUN")
+                    && f.severity() == Finding.Severity.INFO), plan.findings().toString());
+            manager.approve(plan.id(), plan.version());
+            assertFalse(Files.exists(directory.resolve("out")), "planning and approval never create the folder");
+            assertEquals(RunStatus.SUCCESS, manager.migrate(plan.id()).status());
+            assertEquals("v 0 0 0\n", Files.readString(output.resolve("hero.obj")));
+        }
+    }
+
+    @Test void createdOutputFolderIsRemovedWhenTheRunCannotStart() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path output = directory.resolve("out").resolve("nested");
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            UUID project = manager.importAssets(source).snapshot().project().id();
+            var plan = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            manager.approve(plan.id(), plan.version());
+            Files.writeString(source.resolve("hero.obj"), "v 1 1 1\n");
+            assertThrows(RuntimeException.class, () -> manager.migrate(plan.id()));
+            assertFalse(Files.exists(directory.resolve("out")), "no folder is left behind when the run does not start");
+            assertThrows(RuntimeException.class, () -> manager.loadRun(plan.id()), "no run was reserved");
+        }
+    }
+
+    @Test void planVersionAndStatusFailuresSayWhatIsWrong() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path output = Files.createDirectory(directory.resolve("output"));
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), directory.resolve("logs"))) {
+            UUID project = manager.importAssets(source).snapshot().project().id();
+            var plan = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            String unapproved = assertThrows(RuntimeException.class, () -> manager.migrate(plan.id())).getMessage();
+            assertTrue(unapproved.contains("not approved yet") && unapproved.contains("approve version 1"), unapproved);
+            String wrongVersion = assertThrows(RuntimeException.class, () -> manager.approve(plan.id(), 2)).getMessage();
+            assertTrue(wrongVersion.contains("version 1, not 2"), wrongVersion);
+            manager.approve(plan.id(), plan.version());
+            String twice = assertThrows(RuntimeException.class, () -> manager.approve(plan.id(), plan.version())).getMessage();
+            assertTrue(twice.contains("already approved"), twice);
+        }
+    }
+
+    @Test void importOfAMissingFolderSaysSoAndCreatesNoProject() throws Exception {
+        Path state = directory.resolve("state");
+        Path missing = directory.resolve("no-such-folder");
+        Path file = Files.writeString(directory.resolve("hero.obj"), "v 0 0 0\n");
+        try (var manager = new DefaultAssetManager(state, directory.resolve("logs"))) {
+            ImportException notFound = assertThrows(ImportException.class, () -> manager.importAssets(missing));
+            assertTrue(notFound.getMessage().startsWith("Asset folder not found: "), notFound.getMessage());
+            assertTrue(notFound.getMessage().contains("No project was created"), notFound.getMessage());
+            assertTrue(notFound.projectId().isEmpty(), "no project ID is reported for a project that does not exist");
+            ImportException notFolder = assertThrows(ImportException.class, () -> manager.importAssets(file));
+            assertTrue(notFolder.getMessage().startsWith("Not a folder: "), notFolder.getMessage());
+            Path projects = state.resolve("projects");
+            if (Files.exists(projects)) {
+                try (var entries = Files.list(projects)) { assertEquals(0, entries.count()); }
+            }
+        }
+    }
+
     @Test void editedReviewsInvalidateApprovalAndExistingOutputIsNeverOverwritten() throws Exception {
         Path source = Files.createDirectory(directory.resolve("source"));
         Path output = Files.createDirectory(directory.resolve("output"));
