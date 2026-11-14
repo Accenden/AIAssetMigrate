@@ -1,24 +1,37 @@
-# Manual testing environment
+# Testing environment
 
-A sandbox for trying AIAssetMigrate by hand, through the GUI or the CLI. Generated folders
-(`sources`, `state`, `output`) are git-ignored; the scripts are not.
+Everything for trying AIAssetMigrate by hand, through the GUI or the CLI. It has two parts:
+
+- **`samples\` (committed):** three sample projects as real files, identical on every clone. Nothing ever
+  changes them during testing.
+  - `samples\clean`: everything resolves; plans, migrates and validates as `PASSED`.
+  - `samples\messy`: one problem per file (see below).
+  - `samples\benchmark`: the 24-file sample with known right answers that `aam benchmark` scores
+    (the answer key is in `BenchmarkSample.java`).
+- **`local\` (git-ignored, yours):** a play area made from the samples by `setup.cmd`: `local\sources`
+  (copies you may use freely), `local\state` (saved projects and logs) and `local\output`. Reset it any time.
 
 | Script | What it does |
 |---|---|
-| `setup.cmd` | (Re)creates sample sources and empty `state` and `output` folders. `setup.cmd -KeepState` keeps saved projects. |
-| `demo.cmd` | Happy path on `sources\clean`: import, plan (Unity 6000.0), approve, migrate (validates on completion), history. Uses `output\demo`, emptied first. |
+| `setup.cmd` | (Re)creates `local\`: copies the samples into `local\sources` and empties `local\state` and `local\output`. `setup.cmd -KeepState` keeps saved projects. |
+| `demo.cmd` | Happy path on `local\sources\clean`: import, plan (Unity 6000.0), approve, migrate (validates on completion), history. Uses `local\output\demo`, emptied first. |
 | `aam.cmd <command> ...` | Runs the CLI from the current build (compiles first if needed). Rebuild after code changes. |
+| `make-samples.cmd` | Maintainers only: regenerates `samples\` from code. Review the git diff and commit if the change is intended. |
 
-All scripts are PowerShell under the hood; the `.cmd` files bypass the execution policy.
+All scripts are PowerShell under the hood; the `.cmd` files bypass the execution policy. Sample files are
+stored byte for byte (`.gitattributes` turns off line-ending conversion for them), so their fingerprints
+and findings are the same on every machine.
 
 ## Paths to use
 
+Run `test-env\setup.cmd` once after cloning, then:
+
 | GUI field / CLI option | Value |
 |---|---|
-| Project step, Asset folder / `import SOURCE` | `test-env\sources\clean` or `test-env\sources\messy` |
-| Project step, Workspace folder (collapsed) / `--state-directory` | `test-env\state` |
-| (GUI: derived from the workspace) / `--log-directory` | `test-env\state\logs` |
-| Plan step, Output folder / `--output` | `test-env\output\clean` or `test-env\output\messy` (must be absolute in the CLI) |
+| Project step, Asset folder / `import SOURCE` | `test-env\local\sources\clean`, `...\messy` or `...\benchmark` |
+| Project step, Workspace folder (collapsed) / `--state-directory` | `test-env\local\state` |
+| (GUI: derived from the workspace) / `--log-directory` | `test-env\local\state\logs` |
+| Plan step, Output folder / `--output` | `test-env\local\output\clean`, `...\messy` or `...\benchmark` (must be absolute in the CLI) |
 
 The GUI remembers the workspace and the last project, so set the workspace once.
 
@@ -37,7 +50,7 @@ Connect an account first (AI drawer in the GUI, or `aam auth connect`).
 - **Agent:** in the Agent drawer ask "prepare this project for godot 4.3". The agent runs the checks
   it needs and offers **Review N proposed decisions**; nothing is saved until you apply them.
 
-## sources\clean: the happy path
+## samples\clean: the happy path
 
 Textured OBJ/MTL models, a real FBX and a UI icon whose references all resolve. It should plan with
 no blocking findings, migrate, and validate as `PASSED`.
@@ -51,7 +64,7 @@ Try a conversion: accept a `CONVERSION` review with `format=glb` on `characters/
 (textured cube, converts with Assimp), `format=glb` on `props/barrel.fbx`, or `format=jpg` on `crate_albedo.jpg`,
 then create a new plan.
 
-## sources\messy: one problem per file
+## samples\messy: one problem per file
 
 Importing it gives a `PARTIAL` scan (CLI exit code 3).
 
@@ -74,7 +87,7 @@ a plan, choose **Fix blockers...** and apply the proposed fixes, which gives a p
 After the run, validation is `INCOMPLETE`, not `PASSED`: the FBX stub stays not fully checked (the reader
 cannot read it, and not checked is never a pass), and **What to do next** in the
 Migrate step says so. Choose **Leave out** there; a new plan without the FBX is created (into the new
-`output\messy-2`). Approve and run it to see `PASSED`. Converting this stub to GLB does not
+`local\output\messy-2`). Approve and run it to see `PASSED`. Converting this stub to GLB does not
 help: it is only a header, so the conversion check blocks it. The walkthrough below does the same by hand:
 
 1. Import `messy` and run the analyses (Analysis and Review tab, or `aam analyze
@@ -84,7 +97,7 @@ help: it is only a header, so the conversion check blocks it. The walkthrough be
    source folder. Reviews are bound to a revision, so review only after this rescan.
 3. Accept the two `REFERENCE_CANDIDATE` corrections (`RELATIONSHIP` for `Hero.mtl`, `MATERIAL_MAPPING`
    for `sword_tex.png`) and an `ACKNOWLEDGMENT` for the FBX; optionally settle the category conflicts.
-4. Preview the organization, then plan, approve and migrate to `output\messy`. The two corrections
+4. Preview the organization, then plan, approve and migrate to `local\output\messy`. The two corrections
    become `REWRITE_REFERENCES` commands (the output `weapons\sword.mtl` reads
    `map_Kd ../textures/sword_tex.png`; sources are untouched). The plan is blocked until
    `misc/broken.png` is excluded (it does not decode: `SOURCE_IMAGE_INVALID`). The run then succeeds
@@ -94,11 +107,11 @@ help: it is only a header, so the conversion check blocks it. The walkthrough be
 
 ```powershell
 $t = (Resolve-Path test-env).Path
-$c = '--state-directory', "$t\state", '--log-directory', "$t\state\logs"
-test-env\aam.cmd import "$t\sources\messy" @c
+$c = '--state-directory', "$t\local\state", '--log-directory', "$t\local\state\logs"
+test-env\aam.cmd import "$t\local\sources\messy" @c
 test-env\aam.cmd analyze relationships --project PROJECT-ID @c
 test-env\aam.cmd preview-organization --project PROJECT-ID --inventory-revision 1 @c
-test-env\aam.cmd plan --project PROJECT-ID --target unity --target-version 6000.0 --output "$t\output\messy" @c
+test-env\aam.cmd plan --project PROJECT-ID --target unity --target-version 6000.0 --output "$t\local\output\messy" @c
 ```
 
 The GUI: `.\mvnw-local.cmd -q -B javafx:run` (or `.\mvnw-local.cmd` with no arguments to build, test and open it).

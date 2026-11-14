@@ -1,14 +1,14 @@
-# Happy path, end to end, on sources\clean: import -> plan -> approve -> migrate (validates) -> history.
-# Writes only to test-env\state and test-env\output\demo (emptied first). Run setup.ps1 once beforehand.
+# Happy path, end to end, on local\sources\clean: import -> plan -> approve -> migrate (validates) -> history.
+# Writes only to test-env\local\state and test-env\local\output\demo (emptied first). Run setup.cmd once beforehand.
 param([string]$Target = 'unity', [string]$TargetVersion = '6000.0')
 
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
-$source = Join-Path $here 'sources\clean'
-$state = Join-Path $here 'state'
+$source = Join-Path $here 'local\sources\clean'
+$state = Join-Path $here 'local\state'
 $logs = Join-Path $state 'logs'
-$output = Join-Path $here 'output\demo'
-if (-not (Test-Path $source)) { throw "Run test-env\setup.ps1 first." }
+$output = Join-Path $here 'local\output\demo'
+if (-not (Test-Path $source)) { throw "Run test-env\setup.cmd first." }
 if (Test-Path $output) { Get-ChildItem -LiteralPath $output -Force | Remove-Item -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $output | Out-Null
 

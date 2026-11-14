@@ -1,0 +1,3 @@
+newmtl Steel
+Kd 0.8 0.8 0.85
+map_Kd sword_tex.png

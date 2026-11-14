@@ -50,7 +50,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Live, opt-in check that the agent works through the real GUI: opens the application window, types "prepare this
  * project for godot 4.3" in the Agent drawer with the connected ChatGPT account, opens "Review N proposed decisions",
  * accepts all, and checks that the new plan in the Plan step has no blockers. Nothing is approved or migrated.
- * Run with: mvnw-local.cmd test -Dtest=AgentGuiLiveTest -Daam.gui.live=true (needs test-env\setup.cmd and 'auth connect').
+ * Run with: mvnw-local.cmd test -Dtest=AgentGuiLiveTest -Daam.gui.live=true (needs 'auth connect'; copies the committed test-env\samples\messy).
  * Screenshots go to target/gui-live.
  */
 @EnabledIfSystemProperty(named = "aam.gui.live", matches = "true")
@@ -59,8 +59,8 @@ class AgentGuiLiveTest {
     private final Path shots = Path.of("target", "gui-live");
 
     @Test void agentPrepareWorksThroughTheGui() throws Exception {
-        Path messy = Path.of("test-env", "sources", "messy").toAbsolutePath();
-        assertTrue(Files.isDirectory(messy), "run test-env\\setup.cmd first");
+        Path messy = Path.of("test-env", "samples", "messy").toAbsolutePath();
+        assertTrue(Files.isDirectory(messy), "the committed sample is missing: " + messy);
         Path source = directory.resolve("messy"), state = directory.resolve("state"), output = Files.createDirectories(directory.resolve("output"));
         copy(messy, source);
         UUID project;

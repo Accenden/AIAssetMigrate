@@ -75,6 +75,14 @@ macOS/Linux. `.gitattributes` keeps `mvnw` and `*.sh` checked out with LF ending
 The build produces a library JAR, not a bundled standalone application; use the
 Maven launch commands above until application packaging is implemented.
 
+## Testing by Hand
+
+`test-env\` has three committed sample projects (`samples\clean`, `samples\messy` and the AI
+benchmark's `samples\benchmark`) and scripts. Run `test-env\setup.cmd` once to create the git-ignored
+play area `test-env\local\` (copies of the samples plus empty state and output folders), then use
+`test-env\demo.cmd` for the happy path or `test-env\aam.cmd COMMAND ...` for the CLI. See
+[test-env/README.md](test-env/README.md).
+
 ## Using the GUI
 
 The GUI walks through the workflow as five steps, shown in a stepper at the top:

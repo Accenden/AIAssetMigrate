@@ -3,3 +3,6 @@ mvnw text eol=lf
 *.sh text eol=lf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+# Sample projects are test data: keep their bytes exact (no line-ending conversion), so
+# fingerprints and expected findings are the same on every machine.
+test-env/samples/** -text
