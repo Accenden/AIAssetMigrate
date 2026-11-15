@@ -12,8 +12,8 @@ import picocli.CommandLine.Spec;
                 AnalyzeCommand.class, AnalyzeOrganizationCommand.class, ReviewCommand.class, ReviewsCommand.class, PreviewOrganizationCommand.class,
                 CompatibilityCommand.class, PlanCommands.Plan.class, PlanCommands.Show.class,
                 PlanCommands.Approve.class, PlanCommands.Migrate.class, PlanCommands.ShowRun.class,
-                ValidationCommands.Validate.class, ValidationCommands.History.class, AgentCommand.class, BenchmarkCommand.class},
-        footer = "AI is optional: --ai on analyze, compatibility, plan, migrate and validate, and the 'command' request, after auth connect. AI never approves or migrates.")
+                ValidationCommands.Validate.class, ValidationCommands.History.class, FixBlockersCommand.class, AgentCommand.class, BenchmarkCommand.class},
+        footer = "AI is optional: --ai on analyze, compatibility, plan, fix-blockers, migrate and validate, and the 'command' request, after auth connect. AI never approves or migrates.")
 public final class AssetMigrateCli implements Runnable {
     @Spec
     private CommandSpec spec;

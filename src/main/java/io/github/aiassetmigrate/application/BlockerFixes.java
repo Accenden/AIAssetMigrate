@@ -75,6 +75,42 @@ public final class BlockerFixes {
      */
     public record Applied(int fixes, int decisionsSaved, int decisionsDropped, boolean rescanned, long inventoryRevision) {}
 
+    // ---------------------------------------------------------------- wording shared by the GUI dialog and the CLI
+
+    /** One line about a proposal: whether every blocker has a fix. */
+    public static String header(Proposal proposal) {
+        long recommended = proposal.fixes().stream().filter(Fix::recommended).count();
+        if (proposal.fixes().isEmpty()) return "No quick fix was found for these blockers.";
+        return recommended == proposal.fixes().size() && proposal.unfixable().isEmpty()
+                ? "A fix was found for every blocker."
+                : recommended + " fix(es) found; some blockers need a choice from you.";
+    }
+
+    /** What applying fixes does, shown before the user applies them. */
+    public static String note(Proposal proposal) {
+        return "Fixes are saved as review decisions (or files left out of the scan), exactly as if you made them by "
+                + "hand, and a new plan is created. Your asset folder is not changed and nothing is copied or approved."
+                + (proposal.fixes().stream().anyMatch(fix -> !fix.leaveOut().isEmpty())
+                ? " Leaving files out rescans the folder; your decisions are kept for files that did not change." : "");
+    }
+
+    /** True when the AI could still help: a broken reference has no fix from the rules other than leaving it out. */
+    public static boolean offersAi(Proposal proposal) {
+        return proposal.fixes().stream().anyMatch(fix -> fix.code().equals("UNRESOLVED_REFERENCE") && !fix.recommended());
+    }
+
+    /** What sending the blockers to the AI shares, shown before the user asks it. */
+    public static final String AI_DISCLOSURE = "Sends relative paths, types and reference text (never file contents) to "
+            + "OpenAI so it can choose a target for broken references. Its choices are shown for you to confirm.";
+
+    /** One line about what applying did. */
+    public static String summary(Applied applied) {
+        return "Applied " + applied.fixes() + " fix(es)."
+                + (applied.rescanned() ? " Rescanned to revision " + applied.inventoryRevision() + "." : "")
+                + (applied.decisionsDropped() > 0 ? " " + applied.decisionsDropped()
+                + " decision(s) about files that changed or were left out were not kept." : "");
+    }
+
     static Proposal propose(MigrationPlan plan, InventorySnapshot inventory, List<ReviewedChange> saved,
                             OrganizationPreview.Result preview, List<AssetManager.Suggestion> relationships, Instant now) {
         if (!plan.projectId().equals(inventory.project().id())

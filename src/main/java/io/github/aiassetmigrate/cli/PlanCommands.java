@@ -96,6 +96,7 @@ public final class PlanCommands {
                 created = manager.createPlan(project, profile, output);
             }
             printPlan(manager, out, created, true);
+            printBlockerHint(out, created);
             return 0;
         }
     }
@@ -106,7 +107,9 @@ public final class PlanCommands {
         public Show() { this(DefaultAssetManager::new); }
         Show(ImportCommand.ManagerFactory factory) { super(factory); }
         @Override int execute(AssetManager manager, PrintWriter out) throws Exception {
-            printPlan(manager, out, manager.loadPlan(plan), false);
+            MigrationPlan shown = manager.loadPlan(plan);
+            printPlan(manager, out, shown, false);
+            printBlockerHint(out, shown);
             return 0;
         }
     }
@@ -242,6 +245,15 @@ public final class PlanCommands {
                     finding.assetId().map(UUID::toString).orElse("<none>"),
                     finding.sourceRelativePath().map(io.github.aiassetmigrate.domain.PortablePath::of).map(PlanCommands::quote).orElse("<none>"), quote(finding.message()));
         }
+    }
+
+    /** Under a blocked draft, points to fix-blockers as the GUI points to its Fix blockers button. */
+    static void printBlockerHint(PrintWriter out, MigrationPlan plan) {
+        if (plan.status() != io.github.aiassetmigrate.domain.PlanStatus.DRAFT) return;
+        long blockers = plan.findings().stream().filter(f -> f.severity() == io.github.aiassetmigrate.domain.Finding.Severity.ERROR
+                || f.severity() == io.github.aiassetmigrate.domain.Finding.Severity.UNKNOWN).count();
+        if (blockers > 0) out.println(blockers + " issue(s) block this plan. Run 'fix-blockers --plan " + plan.id()
+                + "' to fix them in one step, or fix them yourself and create a new plan.");
     }
 
     private static String quote(String value) {

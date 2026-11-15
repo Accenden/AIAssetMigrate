@@ -104,6 +104,7 @@ test-env\aam.cmd migrate --plan PLAN-ID @o                       # copies, then 
 | `preview-organization` | Show the output layout and the reference fixes it needs |
 | `compatibility` | Check against a target (`--list-targets` shows them) |
 | `plan`, `show-plan`, `approve` | Create, inspect and approve a plan |
+| `fix-blockers --plan PLAN-ID` | List a fix for each blocker, apply the ones you pick (it asks in a terminal; `--ai` asks the AI for the rest) and create a new plan |
 | `migrate`, `show-run` | Run an approved plan; show the result |
 | `validate`, `history` | Re-check an output; list past reports |
 | `command REQUEST...` | Plain-language request to the AI agent |
@@ -142,7 +143,7 @@ and `validate`.
 | `Build with JDK 21 or newer` | macOS/Linux: point `JAVA_HOME` to a JDK 21+. |
 | Java download fails on Windows | You're offline or a proxy blocks `api.adoptium.net`. Install a JDK 21+ and set `JAVA_HOME`. |
 | Import says the scan is partial | Some files were skipped. Leave them out (**Leave these files out**, or `rescan ... --exclude PATH`). |
-| The plan is blocked | Click **Fix blockers...**, or follow the next step printed under each problem. |
+| The plan is blocked | Click **Fix blockers...** (CLI: `fix-blockers --plan PLAN-ID`), or follow the next step printed under each problem. |
 | `AI_UNAVAILABLE` | Not signed in, or the session expired. Run `auth connect`. Everything else still works. |
 | Migrating again fails | Existing files are never overwritten. Use an empty output folder. |
 

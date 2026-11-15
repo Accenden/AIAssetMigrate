@@ -1935,10 +1935,7 @@ public final class AssetMigrateApplication extends Application {
             list.getChildren().add(fieldLabel("Needs you"));
             proposal.unfixable().forEach(line -> list.getChildren().add(muted("• " + line)));
         }
-        Label note = muted("Fixes are saved as review decisions (or files left out of the scan), exactly as if you made them by "
-                + "hand, and a new plan is created. Your asset folder is not changed and nothing is copied or approved."
-                + (proposal.fixes().stream().anyMatch(fix -> !fix.leaveOut().isEmpty())
-                ? " Leaving files out rescans the folder; your decisions are kept for files that did not change." : ""));
+        Label note = muted(BlockerFixes.note(proposal));
         note.setWrapText(true);
         ScrollPane scroll = new ScrollPane(list);
         scroll.setFitToWidth(true);
@@ -1950,7 +1947,7 @@ public final class AssetMigrateApplication extends Application {
                 javafx.scene.control.ButtonBar.ButtonData.OK_DONE);
         javafx.scene.control.ButtonType askAi = new javafx.scene.control.ButtonType("Ask AI for the rest",
                 javafx.scene.control.ButtonBar.ButtonData.LEFT);
-        boolean offerAi = !aiUsed && proposal.fixes().stream().anyMatch(fix -> fix.code().equals("UNRESOLVED_REFERENCE") && !fix.recommended());
+        boolean offerAi = !aiUsed && BlockerFixes.offersAi(proposal);
         javafx.scene.control.Dialog<javafx.scene.control.ButtonType> dialog = new javafx.scene.control.Dialog<>();
         dialog.setTitle("Fix blockers");
         dialog.setHeaderText(fixHeader(proposal));
@@ -1968,9 +1965,7 @@ public final class AssetMigrateApplication extends Application {
         };
         boxes.keySet().forEach(box -> box.selectedProperty().addListener((observable, was, now) -> refresh.run()));
         refresh.run();
-        if (offerAi) ((Button) dialog.getDialogPane().lookupButton(askAi)).setTooltip(new Tooltip(
-                "Sends relative paths, types and reference text (never file contents) to OpenAI so it can choose a target "
-                        + "for broken references. Its choices are shown here for you to confirm."));
+        if (offerAi) ((Button) dialog.getDialogPane().lookupButton(askAi)).setTooltip(new Tooltip(BlockerFixes.AI_DISCLOSURE));
 
         var answer = dialog.showAndWait().orElse(javafx.scene.control.ButtonType.CANCEL);
         if (answer == askAi) {
@@ -2105,11 +2100,7 @@ public final class AssetMigrateApplication extends Application {
     }
 
     static String fixHeader(BlockerFixes.Proposal proposal) {
-        long recommended = proposal.fixes().stream().filter(BlockerFixes.Fix::recommended).count();
-        if (proposal.fixes().isEmpty()) return "No quick fix was found for these blockers.";
-        return recommended == proposal.fixes().size() && proposal.unfixable().isEmpty()
-                ? "A fix was found for every blocker."
-                : recommended + " fix(es) found; some blockers need a choice from you.";
+        return BlockerFixes.header(proposal);
     }
 
     private Node fixRow(BlockerFixes.Fix fix, boolean selected, Map<CheckBox, BlockerFixes.Fix> boxes) {
@@ -2153,10 +2144,7 @@ public final class AssetMigrateApplication extends Application {
     }
 
     static String fixSummary(BlockerFixes.Applied applied) {
-        return "Applied " + applied.fixes() + " fix(es)."
-                + (applied.rescanned() ? " Rescanned to revision " + applied.inventoryRevision() + "." : "")
-                + (applied.decisionsDropped() > 0 ? " " + applied.decisionsDropped()
-                + " decision(s) about files that changed or were left out were not kept." : "");
+        return BlockerFixes.summary(applied);
     }
 
     private void showPlan(PlanContext context) {
