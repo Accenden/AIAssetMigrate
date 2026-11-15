@@ -76,6 +76,11 @@ public final class ImportCommand implements Callable<Integer> {
         return stateDirectory.resolve("logs");
     }
 
+    /** The given --log-directory, or {@code <state-directory>/logs} when it was left out, as import uses. */
+    static Path logsOrDefault(Path stateDirectory, Path logDirectory) {
+        return logDirectory != null ? logDirectory : managedLogDirectory(stateDirectory);
+    }
+
     static void validateManagedLogDirectory(CommandSpec spec, Path stateDirectory, Path logDirectory) {
         if (logDirectory == null) return;
         Path expected = managedLogDirectory(stateDirectory).toAbsolutePath().normalize();

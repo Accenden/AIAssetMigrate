@@ -45,9 +45,9 @@ public final class ReviewCommand implements Callable<Integer> {
             "reference corrects that reference; migration rewrites it in the output copy",
             "(OBJ/MTL only: an FBX is never edited, so its textures must stay where it expects them)."})
     private Map<String, String> values = new LinkedHashMap<>();
-    @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
+    @Option(names = {"--state-directory", "--state-dir"}, required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;
-    @Option(names = "--log-directory", required = true, paramLabel = "DIR", description = "Event log directory.")
+    @Option(names = "--log-directory", paramLabel = "DIR", description = "Event log directory (default: <state-directory>/logs).")
     private Path logDirectory;
     @Spec private CommandSpec spec;
 
@@ -72,7 +72,7 @@ public final class ReviewCommand implements Callable<Integer> {
         boolean submitted = false;
         try {
             ReviewedChange change = new ReviewedChange(UUID.randomUUID(), assetId, kind, decision, values, Instant.now());
-            AssetManager manager = managerFactory.create(stateDirectory, logDirectory);
+            AssetManager manager = managerFactory.create(stateDirectory, ImportCommand.logsOrDefault(stateDirectory, logDirectory));
             List<ReviewedChange> saved;
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();

@@ -18,9 +18,9 @@ import java.util.concurrent.Callable;
 public final class ReviewsCommand implements Callable<Integer> {
     @Option(names = "--project", required = true, paramLabel = "UUID", description = "Project UUID.")
     private UUID projectId;
-    @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
+    @Option(names = {"--state-directory", "--state-dir"}, required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;
-    @Option(names = "--log-directory", required = true, paramLabel = "DIR", description = "Event log directory.")
+    @Option(names = "--log-directory", paramLabel = "DIR", description = "Event log directory (default: <state-directory>/logs).")
     private Path logDirectory;
     @Spec private CommandSpec spec;
 
@@ -31,7 +31,7 @@ public final class ReviewsCommand implements Callable<Integer> {
 
     @Override public Integer call() {
         try {
-            AssetManager manager = managerFactory.create(stateDirectory, logDirectory);
+            AssetManager manager = managerFactory.create(stateDirectory, ImportCommand.logsOrDefault(stateDirectory, logDirectory));
             List<ReviewedChange> reviews;
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();

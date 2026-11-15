@@ -80,11 +80,12 @@ file). See [test-env/README.md](test-env/README.md) for what each sample contain
 On Windows, run commands with `test-env\aam.cmd <command>`. On macOS/Linux, use
 `./mvnw -q compile exec:java -Dexec.args="<command>"`, or `java -jar` with the JAR.
 
-Most commands need a state folder, where projects, plans and reports are saved, and its
-`logs` folder. A typical run:
+Most commands need a state folder (`--state-directory`, or `--state-dir` for short), where
+projects, plans and reports are saved. The activity log goes in its `logs` folder unless you
+pass `--log-directory`. A typical run:
 
 ```powershell
-$o = '--state-directory', 'C:\aam\state', '--log-directory', 'C:\aam\state\logs'
+$o = '--state-directory', 'C:\aam\state'
 
 test-env\aam.cmd import C:\path\to\assets @o                    # prints the project ID
 test-env\aam.cmd compatibility --project ID --target unity --target-version 6000.0 @o
@@ -106,7 +107,7 @@ test-env\aam.cmd migrate --plan PLAN-ID @o                       # copies, then 
 | `migrate`, `show-run` | Run an approved plan; show the result |
 | `validate`, `history` | Re-check an output; list past reports |
 | `command REQUEST...` | Plain-language request to the AI agent |
-| `logs [--follow]` | Show or follow a project's activity |
+| `logs [--follow]` | Show or follow a project's activity: scans, reviews, plans, approvals, each migration step, validation |
 | `auth` | Connect or disconnect the AI account |
 | `benchmark [--ai]` | Score the rules (and AI) on a sample with known answers |
 

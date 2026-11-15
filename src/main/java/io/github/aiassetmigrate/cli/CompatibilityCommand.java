@@ -23,9 +23,9 @@ public final class CompatibilityCommand implements Callable<Integer> {
     private String targetId;
     @Option(names = "--target-version", paramLabel = "VERSION", description = "Target profile version.")
     private String targetVersion;
-    @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
+    @Option(names = {"--state-directory", "--state-dir"}, required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;
-    @Option(names = "--log-directory", required = true, paramLabel = "DIR", description = "Event log directory.")
+    @Option(names = "--log-directory", paramLabel = "DIR", description = "Event log directory (default: <state-directory>/logs).")
     private Path logDirectory;
     @Option(names = "--ai", description = {
             "Add advisory AI explanations from the connected ChatGPT account (see 'auth').",
@@ -52,7 +52,7 @@ public final class CompatibilityCommand implements Callable<Integer> {
             return 2;
         }
         try {
-            AssetManager manager = managerFactory.create(stateDirectory, logDirectory);
+            AssetManager manager = managerFactory.create(stateDirectory, ImportCommand.logsOrDefault(stateDirectory, logDirectory));
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();
             }) {

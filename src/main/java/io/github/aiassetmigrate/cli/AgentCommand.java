@@ -49,7 +49,7 @@ public final class AgentCommand extends PlanCommands.Base {
                 plan.id(), plan.version(), plan.status()));
         result.decisions().filter(d -> !d.fixes().isEmpty() || !d.unfixable().isEmpty()).ifPresent(decisions -> {
             out.println("Proposed decisions (" + decisions.fixes().size() + "; none is saved). To accept one, run its review command"
-                    + " with your --state-directory and --log-directory, then create a new plan:");
+                    + " with your --state-directory (and --log-directory, if you set one), then create a new plan:");
             for (var fix : decisions.fixes()) {
                 out.println("  " + (fix.source() == io.github.aiassetmigrate.application.BlockerFixes.Source.AI ? "[AI] " : "[rules] ")
                         + ImportCommand.safe(fix.description()));

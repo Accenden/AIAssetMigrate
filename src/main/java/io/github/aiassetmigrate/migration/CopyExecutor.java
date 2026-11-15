@@ -53,9 +53,24 @@ public final class CopyExecutor {
         preflight(snapshot, plan, state, logs);
     }
 
+    /**
+     * Observer of run progress: told about each step once it has completed, failed or been skipped, in plan order.
+     * A listener only observes; anything it throws is ignored so that reporting can never change a run.
+     */
+    @FunctionalInterface
+    public interface StepListener {
+        void stepFinished(int number, int total, MigrationCommand command, Asset asset, Step step);
+    }
+
     /** Returns a structured preflight or execution result. No writes occur before preflight succeeds. */
     public Result execute(InventorySnapshot snapshot, MigrationPlan plan, Path stateDirectory, Path logDirectory) {
-        Objects.requireNonNull(snapshot); Objects.requireNonNull(plan);
+        return execute(snapshot, plan, stateDirectory, logDirectory, (number, total, command, asset, step) -> {});
+    }
+
+    /** As {@link #execute(InventorySnapshot, MigrationPlan, Path, Path)}, telling the listener about each step after preflight. */
+    public Result execute(InventorySnapshot snapshot, MigrationPlan plan, Path stateDirectory, Path logDirectory,
+                          StepListener listener) {
+        Objects.requireNonNull(snapshot); Objects.requireNonNull(plan); Objects.requireNonNull(listener);
         List<MigrationCommand> commands = plan.commands();
         List<Step> steps = new ArrayList<>();
         List<Prepared> prepared;
@@ -68,18 +83,22 @@ public final class CopyExecutor {
         String error = "";
         for (int i = 0; i < prepared.size(); i++) {
             Prepared p = prepared.get(i);
+            Step step;
             if (!error.isEmpty()) {
-                steps.add(new Step(p.command.id(), Status.SKIPPED, "Earlier step failed"));
-                continue;
+                step = new Step(p.command.id(), Status.SKIPPED, "Earlier step failed");
+            } else {
+                try {
+                    // Command pattern: the executor invokes each command; the command selects the receiver action.
+                    String detail = p.command.execute(new StepReceiver(p, i));
+                    step = new Step(p.command.id(), Status.COMPLETED, detail);
+                } catch (IOException | SecurityException | UnsupportedOperationException e) {
+                    error = message(e);
+                    step = new Step(p.command.id(), Status.FAILED, error);
+                }
             }
-            try {
-                // Command pattern: the executor invokes each command; the command selects the receiver action.
-                String detail = p.command.execute(new StepReceiver(p, i));
-                steps.add(new Step(p.command.id(), Status.COMPLETED, detail));
-            } catch (IOException | SecurityException | UnsupportedOperationException e) {
-                error = message(e);
-                steps.add(new Step(p.command.id(), Status.FAILED, error));
-            }
+            steps.add(step);
+            try { listener.stepFinished(i + 1, prepared.size(), p.command, p.asset, step); }
+            catch (RuntimeException ignored) { /* observers never change a run */ }
         }
         return new Result(true, error, steps);
     }

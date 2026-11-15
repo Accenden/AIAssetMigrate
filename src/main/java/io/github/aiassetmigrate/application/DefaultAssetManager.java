@@ -63,6 +63,11 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
 
     interface Publisher extends AutoCloseable {
         void publish(LogEvent.Level level, String message) throws IOException;
+        /** As {@link #publish(LogEvent.Level, String)}, tagging the event with the run and step it belongs to. */
+        default void publish(LogEvent.Level level, String message, Optional<UUID> runId, Optional<UUID> commandId)
+                throws IOException {
+            publish(level, message);
+        }
         default LogSubscription subscribe(long afterSequence, LogObserver observer) throws IOException {
             throw new UnsupportedOperationException("Publisher does not support subscriptions");
         }
@@ -80,6 +85,10 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             return new Publisher() {
                 public void publish(LogEvent.Level level, String message) throws IOException {
                     publisher.publish(level, message);
+                }
+                public void publish(LogEvent.Level level, String message, Optional<UUID> runId,
+                                    Optional<UUID> commandId) throws IOException {
+                    publisher.publish(level, message, runId, commandId, Map.of());
                 }
                 public LogSubscription subscribe(long afterSequence, LogObserver observer) throws IOException {
                     return publisher.subscribe(afterSequence, observer, observer::onError);
@@ -326,8 +335,72 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             @Override public void publish(LogEvent.Level level, String message) throws IOException {
                 owned.publisher.publish(level, message);
             }
+            @Override public void publish(LogEvent.Level level, String message, Optional<UUID> runId,
+                                          Optional<UUID> commandId) throws IOException {
+                owned.publisher.publish(level, message, runId, commandId);
+            }
             @Override public void close() throws IOException { releaseWriter(id, owned); }
         };
+    }
+
+    /**
+     * Observer events for plan creation, approval and runs (F10), so Live logs and 'logs --follow' show a migration as it
+     * happens. The saved plan and run records are authoritative, so these events are best effort: when the project log
+     * cannot be opened (for example, another process is writing it) or an event cannot be written, the operation itself
+     * still goes ahead and its result is unchanged.
+     */
+    private final class ProgressLog implements AutoCloseable {
+        private Publisher publisher;
+
+        ProgressLog(Optional<UUID> project) {
+            if (project.isEmpty()) return;
+            try {
+                validatePaths(loadInventory(project.get()).project().sourceRoot(), project.get());
+                publisher = acquireWriter(project.get());
+            } catch (IOException | RuntimeException unavailable) {
+                publisher = null;
+            }
+        }
+
+        void publish(LogEvent.Level level, String message) {
+            publish(level, message, Optional.empty(), Optional.empty());
+        }
+
+        void publish(LogEvent.Level level, String message, Optional<UUID> runId, Optional<UUID> commandId) {
+            if (publisher == null) return;
+            try {
+                publisher.publish(level, message, runId, commandId);
+            } catch (IOException | RuntimeException failed) {
+                close(); // a publisher that failed a write is not used again
+            }
+        }
+
+        @Override public void close() {
+            Publisher open = publisher;
+            publisher = null;
+            if (open != null) {
+                try { open.close(); } catch (IOException | RuntimeException ignored) { /* best effort, see above */ }
+            }
+        }
+    }
+
+    /** The project a saved plan belongs to, or empty when the plan cannot be read (the operation then reports why). */
+    private Optional<UUID> planProject(UUID planId) {
+        try {
+            return Optional.of(new FileMigrationPlanRepository(stateDirectory).load(planId).plan().projectId());
+        } catch (IOException | RuntimeException unreadable) {
+            return Optional.empty();
+        }
+    }
+
+    private static long blockers(MigrationPlan plan) {
+        return plan.findings().stream()
+                .filter(f -> f.severity() == Finding.Severity.ERROR || f.severity() == Finding.Severity.UNKNOWN).count();
+    }
+
+    private static String reason(Throwable failure) {
+        String message = failure.getMessage();
+        return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message;
     }
 
     private synchronized void releaseWriter(UUID id, ManagedPublisher entry) throws IOException {
@@ -884,7 +957,15 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
             if (!loadInventory(id).equals(inventory)) throw new IOException("Inventory changed during planning");
             var draft = CopyPlanBuilder.draft(inventory, decisions, preview, target, root, planId,
                     Instant.now(), planFindings);
-            return new FileMigrationPlanRepository(stateDirectory).createDraft(draft, reviewRevision);
+            MigrationPlan saved = new FileMigrationPlanRepository(stateDirectory).createDraft(draft, reviewRevision);
+            try (ProgressLog log = new ProgressLog(Optional.of(id))) {
+                long blocking = blockers(saved);
+                log.publish(blocking > 0 ? LogEvent.Level.WARNING : LogEvent.Level.INFO, "Plan " + saved.id() + " version "
+                        + saved.version() + " created for " + target.id() + " " + target.version() + ": "
+                        + saved.commands().size() + " step(s), " + blocking + " blocking finding(s)"
+                        + (assistant.isPresent() ? ", with AI suggestions" : ""));
+            }
+            return saved;
         } catch (IOException e) {
             throw new UncheckedIOException("Cannot create draft plan for project " + id, e);
         }
@@ -1331,21 +1412,40 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
     }
     @Override public MigrationPlan approve(UUID id, int version) {
         ensureOpen();
-        try {
-            return new FileMigrationPlanRepository(stateDirectory).approve(id, version, this::validateCopyPlan);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Cannot approve plan " + id + ": " + e.getMessage(), e);
+        try (ProgressLog log = new ProgressLog(planProject(id))) {
+            try {
+                MigrationPlan approved = new FileMigrationPlanRepository(stateDirectory).approve(id, version, this::validateCopyPlan);
+                log.publish(LogEvent.Level.INFO, "Plan " + id + " version " + version + " approved");
+                return approved;
+            } catch (IOException | RuntimeException e) {
+                log.publish(LogEvent.Level.WARNING, "Plan " + id + " version " + version + " was not approved: " + reason(e));
+                if (e instanceof IOException io) throw new UncheckedIOException("Cannot approve plan " + id + ": " + e.getMessage(), io);
+                throw (RuntimeException) e;
+            }
         }
     }
 
     @Override public MigrationRun migrate(UUID id) {
         ensureOpen();
-        try {
+        AtomicBoolean started = new AtomicBoolean();
+        try (ProgressLog log = new ProgressLog(planProject(id))) {
+          try {
             var repository = new FileMigrationPlanRepository(stateDirectory);
             MigrationPlan plan = repository.load(id).plan();
-            return repository.execute(id, plan.version(), this::validateCopyPlan, (approved, inventory, reservation) -> {
+            MigrationRun finished = repository.execute(id, plan.version(), this::validateCopyPlan, (approved, inventory, reservation) -> {
+                started.set(true);
+                Optional<UUID> runId = Optional.of(reservation.id());
+                log.publish(LogEvent.Level.INFO, "Run " + reservation.id() + " started for plan " + id + " version "
+                        + approved.version() + ": " + approved.commands().size() + " step(s) into " + approved.outputRoot(),
+                        runId, Optional.empty());
                 var inspected = inspectedInventory(inventory);
-                var result = new CopyExecutor().execute(inspected, approved, stateDirectory, logDirectory);
+                var result = new CopyExecutor().execute(inspected, approved, stateDirectory, logDirectory,
+                        (number, total, command, asset, step) -> log.publish(stepLevel(step),
+                                "Step " + number + "/" + total + " " + stepWord(step) + ": " + command.operation() + " "
+                                        + asset.relativePath() + " -> " + command.relativeOutputPath()
+                                        + (step.status() == CopyExecutor.Status.COMPLETED || step.detail() == null
+                                            ? "" : " (" + step.detail() + ")"),
+                                runId, Optional.of(command.id())));
                 Map<UUID, StepStatus> statuses = new java.util.LinkedHashMap<>();
                 Map<UUID, String> details = new java.util.LinkedHashMap<>();
                 for (var step : result.steps()) {
@@ -1362,9 +1462,37 @@ public final class DefaultAssetManager implements AssetManager, AutoCloseable {
                 return new FileMigrationPlanRepository.ExecutionResult(status, statuses,
                         Optional.ofNullable(result.error()).filter(message -> !message.isBlank()), details);
             });
-        } catch (IOException e) {
-            throw new UncheckedIOException("Cannot execute plan " + id + ": " + e.getMessage(), e);
+            long succeeded = finished.stepStatuses().values().stream().filter(status -> status == StepStatus.SUCCESS).count();
+            log.publish(finished.status() == RunStatus.SUCCESS ? LogEvent.Level.INFO
+                            : finished.status() == RunStatus.PARTIAL ? LogEvent.Level.WARNING : LogEvent.Level.ERROR,
+                    "Run " + finished.id() + " finished: " + finished.status() + " (" + succeeded + " of "
+                            + finished.stepStatuses().size() + " step(s) succeeded)"
+                            + finished.message().map(message -> ": " + message).orElse(""),
+                    Optional.of(finished.id()), Optional.empty());
+            return finished;
+          } catch (IOException | RuntimeException e) {
+            log.publish(LogEvent.Level.ERROR, (started.get() ? "Run of plan " + id + " could not be completed: "
+                    : "Run of plan " + id + " did not start, so nothing was copied: ") + reason(e));
+            if (e instanceof IOException io) throw new UncheckedIOException("Cannot execute plan " + id + ": " + e.getMessage(), io);
+            throw (RuntimeException) e;
+          }
         }
+    }
+
+    private static LogEvent.Level stepLevel(CopyExecutor.Step step) {
+        return switch (step.status()) {
+            case COMPLETED -> LogEvent.Level.INFO;
+            case SKIPPED -> LogEvent.Level.WARNING;
+            case FAILED -> LogEvent.Level.ERROR;
+        };
+    }
+
+    private static String stepWord(CopyExecutor.Step step) {
+        return switch (step.status()) {
+            case COMPLETED -> "done";
+            case SKIPPED -> "skipped";
+            case FAILED -> "failed";
+        };
     }
 
     @Override public MigrationRun loadRun(UUID id) {

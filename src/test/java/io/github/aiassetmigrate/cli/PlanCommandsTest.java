@@ -77,6 +77,22 @@ class PlanCommandsTest {
         }
     }
 
+    @Test void stateDirAliasAndDefaultLogDirectoryMatchImport() {
+        var plain = new MigrationPlan(planId, project, 1, 7, "unity", "6000.0", Path.of("output"), List.of(), List.of(),
+                List.of(), PlanStatus.DRAFT, time);
+        var cli = new CommandLine(new PlanCommands.Show((state, logs) -> {
+            assertEquals(Path.of("s"), state);
+            assertEquals(Path.of("s").resolve("logs"), logs, "a left-out --log-directory is <state>/logs, as for import");
+            return manager((name, args) -> switch (name) {
+                case "close" -> null;
+                case "loadPlan" -> plain;
+                case "loadInventory" -> inventory(project, 7, List.of());
+                default -> fail("unexpected call " + name);
+            });
+        })).setOut(new PrintWriter(new StringWriter()));
+        assertEquals(0, cli.execute("--plan", planId.toString(), "--state-dir", "s"));
+    }
+
     @Test void showAndApproveCallOnlyTheirExactOperations() {
         requireHostilePaths();
         for (boolean approve : List.of(false, true)) {

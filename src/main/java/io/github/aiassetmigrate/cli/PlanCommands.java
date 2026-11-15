@@ -28,8 +28,10 @@ public final class PlanCommands {
     private PlanCommands() { }
 
     abstract static class Base implements Callable<Integer> {
-        @Option(names = "--state-directory", required = true, paramLabel = "DIR") Path state;
-        @Option(names = "--log-directory", required = true, paramLabel = "DIR") Path logs;
+        @Option(names = {"--state-directory", "--state-dir"}, required = true, paramLabel = "DIR",
+                description = "Project state directory.") Path state;
+        @Option(names = "--log-directory", paramLabel = "DIR",
+                description = "Event log directory (default: <state-directory>/logs).") Path logs;
         @Spec CommandSpec spec;
         final ImportCommand.ManagerFactory factory;
         Base(ImportCommand.ManagerFactory factory) { this.factory = factory; }
@@ -38,7 +40,7 @@ public final class PlanCommands {
         @Override public Integer call() {
             boolean returned = false;
             try {
-                AssetManager manager = factory.create(state, logs);
+                AssetManager manager = factory.create(state, ImportCommand.logsOrDefault(state, logs));
                 try (AutoCloseable resource = () -> {
                     if (manager instanceof AutoCloseable closeable) closeable.close();
                 }) {

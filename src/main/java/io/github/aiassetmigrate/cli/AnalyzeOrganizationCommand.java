@@ -25,9 +25,9 @@ public final class AnalyzeOrganizationCommand implements Callable<Integer> {
     @Option(names = "--folder-style", defaultValue = "preserve", paramLabel = "STYLE",
             converter = FolderConverter.class, description = "Folder style: preserve, by-type, by-category (accepted categories; default: preserve).")
     private FolderOption folderStyle;
-    @Option(names = "--state-directory", required = true, paramLabel = "DIR", description = "Project state directory.")
+    @Option(names = {"--state-directory", "--state-dir"}, required = true, paramLabel = "DIR", description = "Project state directory.")
     private Path stateDirectory;
-    @Option(names = "--log-directory", required = true, paramLabel = "DIR", description = "Event log directory.")
+    @Option(names = "--log-directory", paramLabel = "DIR", description = "Event log directory (default: <state-directory>/logs).")
     private Path logDirectory;
     @Spec private CommandSpec spec;
 
@@ -63,7 +63,7 @@ public final class AnalyzeOrganizationCommand implements Callable<Integer> {
             var rules = new AssetManager.OrganizationRules(
                     AssetManager.NameStyle.valueOf(nameStyle.name().toUpperCase(java.util.Locale.ROOT)),
                     AssetManager.FolderStyle.valueOf(folderStyle.name().toUpperCase(java.util.Locale.ROOT)));
-            AssetManager manager = managerFactory.create(stateDirectory, logDirectory);
+            AssetManager manager = managerFactory.create(stateDirectory, ImportCommand.logsOrDefault(stateDirectory, logDirectory));
             AssetManager.AnalysisResult result;
             try (AutoCloseable resource = () -> {
                 if (manager instanceof AutoCloseable closeable) closeable.close();

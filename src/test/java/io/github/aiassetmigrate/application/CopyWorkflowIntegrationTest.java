@@ -93,6 +93,42 @@ class CopyWorkflowIntegrationTest {
         }
     }
 
+    @Test void planApprovalAndRunProgressAreLoggedForLiveFollowers() throws Exception {
+        Path source = Files.createDirectory(directory.resolve("source"));
+        Path output = Files.createDirectory(directory.resolve("output"));
+        Path logs = directory.resolve("logs");
+        Files.writeString(source.resolve("hero.obj"), "v 0 0 0\n");
+        Files.writeString(source.resolve("crate.obj"), "v 1 1 1\n");
+        try (var manager = new DefaultAssetManager(directory.resolve("state"), logs)) {
+            UUID project = manager.importAssets(source).snapshot().project().id();
+            long afterImport = io.github.aiassetmigrate.logging.LogPublisher.readLogs(logs, project, 0).size();
+            var plan = manager.createPlan(project, new AssetManager.TargetProfile("unity", "6000.0"), output);
+            assertThrows(RuntimeException.class, () -> manager.approve(plan.id(), plan.version() + 1));
+            manager.approve(plan.id(), plan.version());
+            var run = manager.migrate(plan.id());
+            assertEquals(RunStatus.SUCCESS, run.status());
+
+            var events = io.github.aiassetmigrate.logging.LogPublisher.readLogs(logs, project, afterImport);
+            List<String> messages = events.stream().map(LogEvent::message).toList();
+            assertTrue(messages.get(0).startsWith("Plan " + plan.id() + " version 1 created for unity 6000.0: 2 step(s), 0 blocking"), messages.toString());
+            assertTrue(messages.get(1).contains("version 2 was not approved") && messages.get(1).contains("version 1, not 2"), messages.toString());
+            assertEquals("Plan " + plan.id() + " version 1 approved", messages.get(2));
+            assertTrue(messages.get(3).startsWith("Run " + run.id() + " started"), messages.toString());
+            assertTrue(messages.get(4).startsWith("Step 1/2 done: COPY "), messages.toString());
+            assertTrue(messages.get(5).startsWith("Step 2/2 done: COPY "), messages.toString());
+            assertEquals("Run " + run.id() + " finished: SUCCESS (2 of 2 step(s) succeeded)", messages.get(6));
+            assertEquals(7, messages.size(), messages.toString());
+            for (var step : events.subList(3, 7)) assertEquals(java.util.Optional.of(run.id()), step.runId());
+            assertTrue(events.get(4).commandId().isPresent() && events.get(5).commandId().isPresent());
+
+            assertThrows(RuntimeException.class, () -> manager.migrate(plan.id()));
+            var refused = io.github.aiassetmigrate.logging.LogPublisher.readLogs(logs, project, events.getLast().sequence());
+            assertEquals(1, refused.size());
+            assertEquals(LogEvent.Level.ERROR, refused.getFirst().level());
+            assertTrue(refused.getFirst().message().contains("did not start, so nothing was copied"), refused.toString());
+        }
+    }
+
     @Test void importOfAMissingFolderSaysSoAndCreatesNoProject() throws Exception {
         Path state = directory.resolve("state");
         Path missing = directory.resolve("no-such-folder");
