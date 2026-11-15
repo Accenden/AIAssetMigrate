@@ -42,7 +42,12 @@ From the repository root:
 ```
 
 This downloads all dependencies (JavaFX, picocli, Jackson, the Assimp natives), compiles the
-code and runs the JUnit tests.
+code, runs the JUnit tests and packages the runnable JAR **`target/AIAssetMigrate.jar`**.
+Add `-DskipTests` to package without running the tests.
+
+The JAR bundles every dependency, including the JavaFX and Assimp native libraries **for the
+OS that built it**. A JAR built on Windows runs on Windows, so build it again on macOS or
+Linux to run it there.
 
 ## 3. Local configuration and API keys
 
@@ -79,14 +84,28 @@ be committed.
 
 ## 4. Run the application
 
+**From the runnable JAR** (after section 2; any OS, needs Java 21+):
+
+```sh
+java -jar target/AIAssetMigrate.jar                  # GUI (no arguments)
+java -jar target/AIAssetMigrate.jar --help           # CLI: any arguments run the CLI
+java -jar target/AIAssetMigrate.jar import ...       # for example
+```
+
+JavaFX prints `WARNING: Unsupported JavaFX configuration` when it starts from a single JAR.
+The warning is harmless.
+
+**From Maven** (no packaging step):
+
 | | Windows (PowerShell) | macOS / Linux |
 | --- | --- | --- |
 | **GUI** | `.\mvnw.cmd javafx:run` | `./mvnw javafx:run` |
 | **CLI** | `.\mvnw.cmd -q compile exec:java "-Dexec.args=--help"` | `./mvnw -q compile exec:java -Dexec.args="--help"` |
 | **CLI shortcut** | `test-env\aam.cmd --help` | — |
 
-Pass CLI arguments in `-Dexec.args="..."`. On Windows, `test-env\aam.cmd <command> ...`
-is easier because it builds when needed and takes arguments normally.
+With Maven, pass CLI arguments in `-Dexec.args="..."`. On Windows,
+`test-env\aam.cmd <command> ...` is easier because it builds when needed and takes arguments
+normally.
 
 ## 5. Example usage
 
@@ -225,7 +244,8 @@ CLI exit codes: `0` success, `1` error, `2` bad arguments. `import` and `rescan`
 - FBX files are read with the bundled Assimp library and are never rewritten. An FBX it
   cannot read must be acknowledged or left out.
 - Model conversion uses LWJGL's bundled Assimp natives. On Linux it needs glibc 2.28+.
-- The build produces a library JAR, so launch the app with the Maven commands above.
+- The runnable JAR works only on the OS it was built on, and it still needs a Java 21+
+  runtime. There is no native installer.
 
 ## License
 
