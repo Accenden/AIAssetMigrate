@@ -1,20 +1,40 @@
 # Runs the AIAssetMigrate CLI from the current build: test-env\aam.cmd <command> [options]
-# Uses JAVA_HOME when it is JDK 21+, otherwise %USERPROFILE%\.jdks\ms-21.0.9.
+# Finds a JDK 21+ the same way mvnw.cmd does, so it needs no setup: JAVA_HOME, then the java on PATH,
+# then the JDK mvnw.cmd keeps in ~\.m2\wrapper\jdks (running mvnw.cmd downloads one if there is none).
 # Compiles first if target\classes or the dependency classpath is missing. After editing code,
-# rebuild (for example .\mvnw-local.cmd -q -B compile) so the CLI does not run stale classes.
+# rebuild (for example .\mvnw.cmd -q -B compile) so the CLI does not run stale classes.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 
-$jdk = $env:JAVA_HOME
-$release = if ($jdk) { Join-Path $jdk 'release' } else { $null }
-if (-not $release -or -not (Test-Path $release) -or -not (Select-String -Path $release -Pattern 'JAVA_VERSION="(2[1-9]|[3-9]\d)' -Quiet)) {
-    $jdk = Join-Path $env:USERPROFILE '.jdks\ms-21.0.9'
+function Test-Jdk21([string]$jdkHome) {
+    if (-not $jdkHome) { return $false }
+    $release = Join-Path $jdkHome 'release'
+    (Test-Path (Join-Path $jdkHome 'bin\java.exe')) -and (Test-Path $release) -and
+        (Select-String -Path $release -Pattern 'JAVA_VERSION="(2[1-9]|[3-9]\d)' -Quiet)
 }
-$java = Join-Path $jdk 'bin\java.exe'
-if (-not (Test-Path $java)) {
-    [Console]::Error.WriteLine("aam: no JDK 21+ found (set JAVA_HOME or install to $jdk).")
+function Find-WrapperJdk {
+    $jdkRoot = if ($env:MAVEN_USER_HOME) { Join-Path $env:MAVEN_USER_HOME 'wrapper\jdks' } else { Join-Path $HOME '.m2\wrapper\jdks' }
+    Get-ChildItem -LiteralPath $jdkRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Jdk21 $_.FullName } | Sort-Object Name -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+
+$jdk = $env:JAVA_HOME
+if (-not (Test-Jdk21 $jdk)) {
+    $onPath = Get-Command java.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $jdk = if ($onPath) { Split-Path (Split-Path $onPath.Source -Parent) -Parent } else { $null }
+}
+if (-not (Test-Jdk21 $jdk)) { $jdk = Find-WrapperJdk }
+if (-not $jdk) {
+    # No JDK 21+ anywhere: let the Maven wrapper download one, then use it.
+    & (Join-Path $root 'mvnw.cmd') -q -v | Out-Null
+    $jdk = Find-WrapperJdk
+}
+if (-not $jdk) {
+    [Console]::Error.WriteLine("aam: no JDK 21+ found and the download failed. Install a JDK 21+ and set JAVA_HOME.")
     exit 1
 }
+$java = Join-Path $jdk 'bin\java.exe'
 
 $classes = Join-Path $root 'target\classes'
 $classpathFile = Join-Path $root 'target\cp.txt'
