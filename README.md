@@ -101,6 +101,7 @@ test-env\aam.cmd migrate --plan PLAN-ID @o                       # copies, then 
 | `import`, `rescan`, `inventory` | Scan a folder; rescan it (`--exclude PATH` leaves a file out); show the saved scan |
 | `analyze KIND` | Suggestions: `categories`, `relationships`, `materials`, `names` or `folders` |
 | `review`, `reviews` | Accept or reject a suggestion; list saved decisions |
+| `analyze-organization` | Show name and folder suggestions together, without accepting any |
 | `preview-organization` | Show the output layout and the reference fixes it needs |
 | `compatibility` | Check against a target (`--list-targets` shows them) |
 | `plan`, `show-plan`, `approve` | Create, inspect and approve a plan |
@@ -108,16 +109,18 @@ test-env\aam.cmd migrate --plan PLAN-ID @o                       # copies, then 
 | `migrate`, `show-run` | Run an approved plan; show the result |
 | `validate`, `history` | Re-check an output; list past reports |
 | `command REQUEST...` | Plain-language request to the AI agent |
-| `logs [--follow]` | Show or follow a project's activity: scans, reviews, plans, approvals, each migration step, validation |
-| `auth` | Connect or disconnect the AI account |
-| `benchmark [--ai]` | Score the rules (and AI) on a sample with known answers |
+| `logs [--after N] [--follow]` | Show or follow a project's activity: scans, reviews, plans, approvals, each migration step, validation (`--after N` resumes after event N) |
+| `auth ACTION` | `connect`, `status`, `models`, `use-model MODEL` or `disconnect` the AI account |
+| `benchmark [--ai] [--keep DIR]` | Score the rules (and AI) on a sample with known answers (`--keep` saves the sample run in DIR) |
 
 Run any command with `--help` for its options.
 
 ## AI suggestions (optional)
 
 Connect once with `test-env\aam.cmd auth connect` (or the **AI account** button in the app).
-It signs in with your ChatGPT account in the browser; no API key is needed. Then tick the AI
+It signs in with your ChatGPT account in the browser. No API key, `.env` or example config file
+is needed, and nothing secret is stored in the project. To pick a model, run `auth models`, then
+`auth use-model MODEL`. Then tick the AI
 checkboxes in the Review, Target and Plan steps, or add `--ai` to `analyze`, `compatibility`, `plan`, `migrate`
 and `validate`.
 
