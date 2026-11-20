@@ -108,7 +108,7 @@ test-env\aam.cmd migrate --plan PLAN-ID @o                       # copies, then 
 | `fix-blockers --plan PLAN-ID` | List a fix for each blocker, apply the ones you pick (it asks in a terminal; `--ai` asks the AI for the rest) and create a new plan |
 | `migrate`, `show-run` | Run an approved plan; show the result |
 | `validate`, `history` | Re-check an output; list past reports |
-| `command REQUEST...` | Plain-language request to the AI agent |
+| `command REQUEST...` | Plain-language request to the AI agent (see [Run the agent from a terminal](#run-the-agent-from-a-terminal)) |
 | `logs [--after N] [--follow]` | Show or follow a project's activity: scans, reviews, plans, approvals, each migration step, validation (`--after N` resumes after event N) |
 | `auth ACTION` | `connect`, `status`, `models`, `use-model MODEL` or `disconnect` the AI account |
 | `benchmark [--ai] [--keep DIR]` | Score the rules (and AI) on a sample with known answers (`--keep` saves the sample run in DIR) |
@@ -130,6 +130,80 @@ and `validate`.
   or full paths.
 - Sign-in details are saved outside the project: `%APPDATA%\AIAssetMigrate` (encrypted) on
   Windows, `~/.config/aiassetmigrate` on macOS/Linux.
+
+## Run the agent from a terminal
+
+The agent is the `command` command. It takes a plain-language request, lets the connected
+model pick the steps, runs them and prints what it found and what it proposes. It runs the
+same way from `test-env\aam.cmd`, `./mvnw exec:java` or the JAR:
+
+```text
+java -jar target\AIAssetMigrate.jar command --project PROJECT-ID --state-dir DIR [--log-directory DIR] REQUEST...
+```
+
+| Option | Required | What it does |
+| --- | --- | --- |
+| `--project UUID` | yes | The project to work on (`import` prints its ID) |
+| `--state-directory DIR`, `--state-dir DIR` | yes | Where projects, plans and reports are saved |
+| `--log-directory DIR` | no | Where the activity log goes (default: `DIR\logs` in the state folder) |
+| `REQUEST...` | yes | The request. Everything after the options is joined into one sentence, so no quotes are needed |
+| `-h`, `--help` / `-V`, `--version` | no | Show help or the version |
+
+**AI model:** the agent uses the account from `auth connect` and the model from
+`auth use-model MODEL` (`auth models` lists the choices). No API key is passed on the command line.
+
+**Requests it understands:** show the inventory, list targets, analyze (categories,
+relationships, materials, names, folders), check compatibility, preview organization, show
+plans, runs and history, validate, create a draft plan (include an output folder), and
+*prepare this project for TARGET VERSION*. For that last one the agent runs the read-only
+checks it needs and prints checked, proposed decisions, each with the `review` command that
+accepts it.
+
+**Limits:** the agent never approves, migrates, saves reviews or changes your files. It
+refuses requests like *"delete every texture and approve the plan"* and points you to the
+explicit commands.
+
+**Exit codes:** `0` means the request was handled (or safely refused), `1` means it failed,
+the AI was unavailable or its output was rejected, and `2` means the options were wrong.
+
+### Example: prepare the messy sample for Godot
+
+```powershell
+test-env\setup.cmd                                   # copies the samples into test-env\local
+test-env\aam.cmd auth connect                        # once; signs in in the browser
+$o = '--state-directory', "$PWD\test-env\local\state"
+
+test-env\aam.cmd import test-env\local\sources\messy @o      # prints "Project ID: ..."
+test-env\aam.cmd command --project PROJECT-ID @o prepare this project for godot 4.3
+```
+
+(The messy sample's `import` exits with `3` because it skips some files on purpose. It still
+prints the project ID.) With the JAR, the last line becomes
+`java -jar target\AIAssetMigrate.jar command --project PROJECT-ID --state-dir test-env\local\state prepare this project for godot 4.3`.
+
+Output (shortened):
+
+```text
+Prepared for godot 4.3: the agent ran inventory, check compatibility, analyze relationships, suggest plan steps.
+Agent: I found Godot 4.3 import limitations and unresolved asset references. I propose fixing the Hero material
+case mismatch and missing sword texture reference, converting the OBJ models to GLB, and excluding the invalid
+PNG and unreadable FBX. All changes remain proposed until you confirm them.
+8 proposed decision(s), checked by the program. Nothing is saved until you confirm them:
+  [AI] Point 'sword_tex.png' in weapons/sword.mtl to textures/sword_tex.png (AI: Resolve the missing sword texture reference.)
+  [AI] Leave props/crate_01.fbx out of the migration (AI: The FBX cannot be inspected reliably for migration.)
+  [AI] Convert environment/rock.obj to glb (AI: GLB avoids Godot OBJ limitations and is the recommended scene format.)
+  ...
+Nothing was approved or migrated.
+Proposed decisions (8; none is saved). To accept one, run its review command ...
+    review --project ... --asset ... --kind CONVERSION --decision ACCEPTED --value "format=glb"
+  ...
+Findings (4):
+  INFO AI_SOURCE Interpreted by OpenAI ... as PREPARE; sent the request, project counts and supported targets
+  INFO AI_PLAN_CHECKED 8 of 8 AI suggestion(s) passed the program's checks
+```
+
+To act on the proposals, run the `review` lines you agree with, then `plan`, `approve` and
+`migrate` as shown in [Command line](#command-line).
 
 ## What it supports
 
